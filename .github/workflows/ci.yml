@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Clean-repo guard
+        run: python scripts/verify_clean_repo.py
+
+      - name: Python syntax check
+        run: python -m compileall -q app/services app/launch.py scripts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: UI type-check + build
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
