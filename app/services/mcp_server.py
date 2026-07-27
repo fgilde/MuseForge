@@ -20,6 +20,7 @@ Implementation notes:
   always hit the right instance.
 """
 
+import base64
 import os
 
 import requests
@@ -150,3 +151,191 @@ def system_status() -> dict:
     """Environment preflight: GPU/CUDA availability, disk space, ffmpeg.
     ok=true means the system is ready to generate."""
     return _get("/api/v1/system/preflight")
+
+
+@mcp.tool()
+def api_request(method: str, path: str, body: dict | None = None) -> dict:
+    """Call any MuseForge REST endpoint directly — the escape hatch for
+    everything not covered by a dedicated tool.
+
+    method: GET, POST, PUT or DELETE. path: must start with "/api/v1/"
+    (or be exactly "/openapi.json" to discover the full API schema —
+    fetch that first when unsure which endpoint or body shape to use).
+    body: JSON body for POST/PUT.
+
+    Returns the endpoint's JSON response, or {"status_code", "text"} for
+    non-JSON responses.
+    """
+    method = method.upper()
+    if method not in ("GET", "POST", "PUT", "DELETE"):
+        raise ValueError(f"Unsupported method: {method}")
+    if not (path.startswith("/api/v1/") or path == "/openapi.json"):
+        raise ValueError('path must start with "/api/v1/" (or be "/openapi.json")')
+    r = requests.request(
+        method, f"http://127.0.0.1:{_api_port}{path}", json=body, timeout=120
+    )
+    r.raise_for_status()
+    if "application/json" in r.headers.get("content-type", ""):
+        return r.json()
+    return {"status_code": r.status_code, "text": r.text[:2000]}
+
+
+@mcp.tool()
+def upload_image(image_base64: str, filename: str = "upload.png") -> dict:
+    """Upload an image (base64-encoded) to the server for use in
+    generation.
+
+    Returns {"filename", "path", "url"}. Pass the returned "path" as the
+    "image_start" key in generate() params to use it as an i2v start
+    image (see model_defaults() for related keys like image_end,
+    image_prompt_type). The extension of `filename` determines how the
+    server treats the file.
+    """
+    files = {"file": (filename, base64.b64decode(image_base64))}
+    r = requests.post(
+        f"http://127.0.0.1:{_api_port}/api/v1/upload", files=files, timeout=120
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+@mcp.tool()
+def upload_audio(audio_base64: str, filename: str = "upload.mp3") -> dict:
+    """Upload an audio file (base64-encoded): wav, mp3, flac, ogg, m4a —
+    or a video whose audio track gets extracted. Compressed formats are
+    transcoded to wav server-side.
+
+    Returns {"filename", "path", "url"} — always a WAV path. Use "path"
+    e.g. as audio_path in director_start() or as an audio guide in
+    generate() params (see model_defaults() for the exact key).
+    """
+    files = {"file": (filename, base64.b64decode(audio_base64))}
+    r = requests.post(
+        f"http://127.0.0.1:{_api_port}/api/v1/upload-audio", files=files, timeout=300
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+@mcp.tool()
+def download_model(model_type: str) -> dict:
+    """Pre-download a model's weights in the background (instead of
+    stalling the first generate() for many GB). Returns
+    {"status": "downloading", "model_type"}; poll model_download_status().
+    """
+    return _post(f"/api/v1/models/{model_type}/download")
+
+
+@mcp.tool()
+def model_download_status() -> dict:
+    """Status of model pre-downloads started via download_model():
+    {"downloads": {model_type: {"status": downloading/completed/failed,
+    "error"}}}."""
+    return _get("/api/v1/models/downloads/status")
+
+
+@mcp.tool()
+def output_metadata(name: str) -> dict:
+    """Generation metadata (prompt, seed, model, settings) for an output
+    file from list_outputs(). Reads the sidecar .meta.json first, falls
+    back to metadata embedded in the media file."""
+    return _get(f"/api/v1/outputs/{name}/metadata")
+
+
+@mcp.tool()
+def upscale(video_path: str, params: dict | None = None) -> dict:
+    """Upscale an existing clip (output filename or uploaded path) with
+    the spatial upsampler.
+
+    Optional params keys: method (default "flashvsr2"), seed, workspace.
+    Returns {"job_id"}; poll job_status(job_id).
+    """
+    body = dict(params or {})
+    body["video_path"] = video_path
+    return _post("/api/v1/tools/upscale", json=body)
+
+
+@mcp.tool()
+def revoice(video_path: str, voice_ref_paths: list[str], params: dict | None = None) -> dict:
+    """Replace the voice(s) in an existing clip via SeedVC voice
+    conversion.
+
+    video_path: output filename or uploaded path. voice_ref_paths: one or
+    two reference voice audio paths (e.g. from upload_audio()). Optional
+    params keys: mode ("single"|"two"), diffusion_steps (default 25),
+    cfg_rate (default 0.5), workspace. Returns {"job_id"}; poll
+    job_status(job_id).
+    """
+    body = dict(params or {})
+    body["video_path"] = video_path
+    body["voice_ref_paths"] = voice_ref_paths
+    return _post("/api/v1/tools/revoice", json=body)
+
+
+@mcp.tool()
+def director_start(params: dict) -> dict:
+    """Start a Director pipeline: LLM planning -> start-image generation
+    -> video generation, fully server-side (can run for hours).
+
+    Key params fields: pipeline_type ("music_video" | "short_film_audio"
+    | "short_film_story" | "podcast" | "viral_video"), scene_description
+    (the concept/story text), audio_path (server path from upload_audio(),
+    required for audio-driven modes), lyrics (or transcript text),
+    video_model / image_model (model_type ids from list_models()),
+    workspace. For the full field list fetch the schema via
+    api_request("GET", "/openapi.json").
+
+    Returns {"pipeline_id"}; poll director_status(pipeline_id).
+    """
+    return _post("/api/v1/director/pipeline/start", json=params, timeout=300)
+
+
+@mcp.tool()
+def director_status(pid: str) -> dict:
+    """Current status of a Director pipeline: status, phase, progress,
+    clip_plans, output_files, error."""
+    return _get(f"/api/v1/director/pipeline/{pid}")
+
+
+@mcp.tool()
+def director_stop(pid: str) -> dict:
+    """Cancel a running Director pipeline."""
+    return _post(f"/api/v1/director/pipeline/{pid}/stop")
+
+
+@mcp.tool()
+def list_director_pipelines() -> dict:
+    """List saved Director pipeline states for the active workspace."""
+    return _get("/api/v1/director/pipelines")
+
+
+@mcp.tool()
+def list_loras(model_type: str) -> dict:
+    """List installed LoRA filenames usable with a model_type. Activate
+    them in generate() params via activated_loras (see model_defaults())."""
+    return _get(f"/api/v1/loras/{model_type}")
+
+
+@mcp.tool()
+def civitai_search(query: str) -> dict:
+    """Search CivitAI for LoRAs by text query. Returns CivitAI's model
+    list (items with modelVersions containing download URLs and files).
+    For filters (types, baseModels, sort, nsfw, ...) use
+    api_request("GET", "/api/v1/civitai/search?query=...&types=...")."""
+    return _get("/api/v1/civitai/search", params={"query": query})
+
+
+@mcp.tool()
+def civitai_download(params: dict) -> dict:
+    """Download a LoRA (or checkpoint) file from CivitAI.
+
+    Required: download_url (must point to civitai.com — take it from
+    civitai_search() results' modelVersions files). Recommended:
+    filename, target_arch (model_type the LoRA is for, routes it into
+    the right loras dir). Optional metadata for the sidecar: model_id,
+    version_id, trained_words, model_name, base_model. For checkpoints:
+    kind="checkpoint" plus target_architecture (required). Returns
+    {"download_id", "status"}; check progress via
+    api_request("GET", "/api/v1/civitai/downloads").
+    """
+    return _post("/api/v1/civitai/download", json=params)

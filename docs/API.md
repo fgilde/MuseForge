@@ -66,10 +66,29 @@ Or in an `mcp.json`-style config:
 | `get_output_url(name)` | Download URL for an output |
 | `enhance_prompt(prompt, mode?)` | LLM prompt rewriting |
 | `system_status()` | Readiness preflight |
+| `api_request(method, path, body?)` | Call any `/api/v1/*` endpoint directly |
+| `upload_image(image_base64, filename?)` | Upload an image; returned `path` → `image_start` in `generate()` params |
+| `upload_audio(audio_base64, filename?)` | Upload audio (or video → audio extraction), always returns a WAV path |
+| `download_model(model_type)` | Pre-download model weights in the background |
+| `model_download_status()` | Status of running pre-downloads |
+| `output_metadata(name)` | Prompt/seed/settings of an output file |
+| `upscale(video_path, params?)` | Upscale a clip, returns `job_id` |
+| `revoice(video_path, voice_ref_paths, params?)` | Voice conversion on a clip, returns `job_id` |
+| `director_start(params)` | Start a Director pipeline, returns `pipeline_id` |
+| `director_status(pid)` | Poll a Director pipeline |
+| `director_stop(pid)` | Cancel a Director pipeline |
+| `list_director_pipelines()` | Saved pipeline states |
+| `list_loras(model_type)` | Installed LoRAs for a model type |
+| `civitai_search(query)` | Search CivitAI for LoRAs |
+| `civitai_download(params)` | Download a LoRA/checkpoint from CivitAI |
 
 Typical agent flow: `list_models` → `generate` → poll `job_status` → fetch
 `get_output_url`. Generation takes minutes; the first use of a model also
 downloads its weights (potentially many GB).
+
+`api_request` is the escape hatch for everything without a dedicated tool:
+it accepts GET/POST/PUT/DELETE against any `/api/v1/*` path (plus
+`/openapi.json` so agents can discover the full schema first).
 
 ### Authentication
 

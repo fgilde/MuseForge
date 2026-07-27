@@ -22,6 +22,21 @@ const TOOLS: Array<[string, string]> = [
   ['get_output_url', 'Download URL for an output file'],
   ['enhance_prompt', 'Rewrite a rough prompt via the local LLM'],
   ['system_status', 'GPU/CUDA/disk readiness check'],
+  ['api_request', 'Call any REST endpoint — escape hatch for the rest of the API'],
+  ['upload_image', 'Upload a base64 image, use its path as generation start image'],
+  ['upload_audio', 'Upload base64 audio (or video for audio extraction)'],
+  ['download_model', 'Pre-download a model\'s weights in the background'],
+  ['model_download_status', 'Status of running model pre-downloads'],
+  ['output_metadata', 'Prompt/seed/settings metadata of an output file'],
+  ['upscale', 'Upscale an existing clip, returns job_id'],
+  ['revoice', 'Replace voices in a clip via SeedVC, returns job_id'],
+  ['director_start', 'Start a Director pipeline (planning → images → video)'],
+  ['director_status', 'Poll a Director pipeline'],
+  ['director_stop', 'Cancel a running Director pipeline'],
+  ['list_director_pipelines', 'Saved pipeline states in the workspace'],
+  ['list_loras', 'Installed LoRAs for a model type'],
+  ['civitai_search', 'Search CivitAI for LoRAs'],
+  ['civitai_download', 'Download a LoRA/checkpoint from CivitAI'],
 ]
 
 function CopyRow({ label, value }: { label: string; value: string }) {
