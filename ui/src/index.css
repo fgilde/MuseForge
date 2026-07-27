@@ -904,8 +904,9 @@ input[type="range"]::-webkit-slider-thumb {
   from { opacity: 0; transform: translateY(0.5rem); }
   to { opacity: 1; transform: translateY(0); }
 }
-[data-theme="aurora"] aside,
-[data-theme="frost"] aside {
-  -webkit-backdrop-filter: blur(24px) saturate(1.3);
-  backdrop-filter: blur(24px) saturate(1.3);
-}
+/* NOTE: no backdrop-filter on <aside> — it would turn the sidebar into
+ * a containing block for position:fixed descendants (the Advanced
+ * Settings fly-out renders inside it), breaking their viewport
+ * anchoring. The sidebar stays glassy via its translucent bg tokens;
+ * real blur is reserved for .glass-panel dialogs, which have no fixed
+ * children. */

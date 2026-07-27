@@ -212,9 +212,11 @@ export function AdvancedSettings() {
       {open && <div className="fixed inset-0 bg-black/30 z-50" onClick={() => setOpen(false)} />}
       <div
         ref={panelRef}
-        className={`fixed top-0 h-full bg-bg-secondary border-r border-border z-50 flex flex-col shadow-2xl overflow-hidden transition-transform duration-200
-          left-0 w-full md:left-[420px] md:w-[380px] md:max-w-[90vw] ${
-          open ? 'translate-x-0' : '-translate-x-full md:-translate-x-[800px] pointer-events-none'
+        className={`fixed top-0 h-full bg-bg-secondary border-x border-border z-50 flex flex-col shadow-2xl overflow-hidden transition-transform duration-200
+          left-0 w-full md:left-auto md:right-[420px] md:w-[380px] md:max-w-[90vw] ${
+          open
+            ? 'translate-x-0'
+            : '-translate-x-full md:translate-x-[820px] pointer-events-none'
         }`}
         style={{ maxHeight: '100vh' }}
       >
