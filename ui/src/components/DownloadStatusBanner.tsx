@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Download, AlertTriangle } from 'lucide-react'
-import { fetchActiveDownloads, type ActiveDownload } from '../api/client'
+import {
+  fetchActiveDownloads,
+  fetchModelDownloads,
+  type ActiveDownload,
+  type ModelDownload,
+} from '../api/client'
+import { formatBytes, formatDuration } from '../lib/format'
 
 /**
  * DownloadStatusBanner — fixed-position overlay shown while
@@ -24,6 +30,10 @@ import { fetchActiveDownloads, type ActiveDownload } from '../api/client'
  */
 export function DownloadStatusBanner() {
   const [downloads, setDownloads] = useState<ActiveDownload[]>([])
+  // Model pre-download records, keyed by model_type. Only used for the
+  // "file 3/7 · <model>" context line — the byte numbers all come from
+  // the active-downloads feed.
+  const [models, setModels] = useState<Record<string, ModelDownload>>({})
 
   useEffect(() => {
     let cancelled = false
@@ -35,6 +45,12 @@ export function DownloadStatusBanner() {
       } catch {
         // Endpoint not available (older backend) or transient — ignore
         if (!cancelled) setDownloads([])
+      }
+      try {
+        const result = await fetchModelDownloads()
+        if (!cancelled) setModels(result.downloads)
+      } catch {
+        if (!cancelled) setModels({})
       }
     }
 
@@ -66,6 +82,16 @@ export function DownloadStatusBanner() {
     const curPct = cur.total_bytes ? cur.downloaded_bytes / cur.total_bytes : 0
     return curPct > bestPct ? cur : best
   }, downloads[0])
+
+  // "File 3/7 · Wan 2.2 T2V" — only when this file was started by a model
+  // pre-download that is still running.
+  const model = featured.model_type ? models[featured.model_type] : undefined
+  const modelContext = model && model.status === 'downloading'
+    ? [
+        model.files_total ? `File ${Math.min(model.files_total, (model.files_done ?? 0) + 1)}/${model.files_total}` : null,
+        model.model_name,
+      ].filter(Boolean).join(' · ')
+    : ''
 
   return (
     <div className="fixed bottom-4 right-4 z-40 max-w-md w-[calc(100vw-2rem)] sm:w-auto">
@@ -121,6 +147,12 @@ export function DownloadStatusBanner() {
               <div className="text-[10px] text-text-muted truncate" title={featured.filename}>
                 {featured.filename}
               </div>
+              {modelContext && (
+                <div className="text-[10px] text-text-secondary truncate">
+                  {modelContext}
+                  {model?.bytes_total ? ` · ${formatBytes(model.bytes_total)} total` : ''}
+                </div>
+              )}
               <DownloadProgressBar download={featured} stalled={!!stalled} />
               {stalled && (
                 <div className="text-xs text-text-secondary mt-1.5 leading-snug">
@@ -137,13 +169,6 @@ export function DownloadStatusBanner() {
   )
 }
 
-function _formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
 function DownloadProgressBar({
   download,
   stalled,
@@ -152,33 +177,37 @@ function DownloadProgressBar({
   stalled: boolean
 }) {
   const pct = download.total_bytes
-    ? Math.round((download.downloaded_bytes / download.total_bytes) * 100)
+    ? Math.min(100, Math.round((download.downloaded_bytes / download.total_bytes) * 100))
     : null
+  // Speed goes stale the moment the transfer stalls, so hide it then
+  // rather than claiming "12 MB/s" while nothing moves.
+  const rate = !stalled && download.rate ? download.rate : null
+  const eta = !stalled ? formatDuration(download.eta_seconds) : ''
 
   return (
     <div className="mt-1.5">
       <div className="h-1 rounded-full bg-bg-tertiary overflow-hidden">
+        {/* No Content-Length → indeterminate sweep. A fixed-width bar here
+            used to imply a percentage the backend never reported. */}
         <div
-          className={`h-full transition-all duration-500 ${
+          className={`h-full ${pct !== null ? 'transition-all duration-500' : 'w-1/3 progress-indeterminate'} ${
             stalled ? 'bg-indicator-warning' : 'bg-accent-blue'
           }`}
-          style={{ width: pct !== null ? `${pct}%` : '15%' }}
+          style={pct !== null ? { width: `${pct}%` } : undefined}
         />
       </div>
-      <div className="flex items-center justify-between mt-1">
-        <span className="text-[10px] text-text-muted">
-          {_formatBytes(download.downloaded_bytes)}
-          {download.total_bytes !== null && (
-            <> / {_formatBytes(download.total_bytes)}</>
-          )}
+      <div className="flex items-center justify-between gap-2 mt-1">
+        <span className="text-[10px] text-text-muted tabular-nums truncate">
+          {formatBytes(download.downloaded_bytes)}
+          {download.total_bytes ? <> / {formatBytes(download.total_bytes)}</> : null}
+          {rate !== null && <> · {formatBytes(rate)}/s</>}
         </span>
-        {pct !== null && (
-          <span className={`text-[10px] tabular-nums ${
-            stalled ? 'text-indicator-warning' : 'text-text-secondary'
-          }`}>
-            {pct}%
-          </span>
-        )}
+        <span className={`text-[10px] tabular-nums shrink-0 ${
+          stalled ? 'text-indicator-warning' : 'text-text-secondary'
+        }`}>
+          {pct !== null && `${pct}%`}
+          {eta && <span className="text-text-muted">{pct !== null ? ' · ' : ''}{eta} left</span>}
+        </span>
       </div>
     </div>
   )

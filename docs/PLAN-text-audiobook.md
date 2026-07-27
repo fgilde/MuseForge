@@ -333,10 +333,14 @@ handles a 20-hour book. ffmpeg is already in the image.
 - Chapter audio cached by content hash; editing a block invalidates only
   affected chapters.
 
-**Open decision — see question to the user:** whether live chapter playback
-also renders server-side (simpler, one mix implementation, slight latency
-before playback starts) or keeps a browser-side WebAudio path for instant
-scrubbing (nicer UX, two implementations of the mix that must agree).
+**Decided: the mix lives on the server only.** Chapter preview goes through
+the same render endpoint and returns audio plus word timings, which the UI
+plays in a plain `<audio>` element and uses to drive karaoke highlighting.
+That costs a few seconds before playback starts and gives up in-browser
+scrubbing of an unrendered mix, in exchange for one mix implementation, MCP
+agents being able to render audiobooks, renders surviving a closed tab, and
+loudness normalisation / M4B export being possible at all. Cached chapter
+audio (content hash) makes repeat playback instant.
 
 ### 3.5 "AI Magic" — assisted casting
 
@@ -404,6 +408,7 @@ their unauthenticated/unmetered LLM endpoints.
 | **6** | §3.4 render/mix/export | 5 |
 | **7** | §3.5 AI Magic; §4 hand-offs; §5 MCP tools | 4, 6 |
 
-Phases 2/4 and 5/6 touch disjoint files and can run in parallel. Each
-phase ends with a green `npm run build` + `compileall`, a commit, and a
-container restart only when the user says it's safe.
+**Decided: run in parallel with the text side reaching usable state first.**
+Phases 1→2→4 are the critical path; 3 and 5/6 run alongside on disjoint
+files. Each phase ends with a green `npm run build` + `compileall`, a
+commit, and a container restart only when the user says it's safe.

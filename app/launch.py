@@ -537,11 +537,58 @@ _model_downloads: dict = {}
 _model_downloads_lock = threading.Lock()
 
 
+def _update_model_download(model_type: str, **changes):
+    """Merge fields into a model's download record under the registry lock."""
+    with _model_downloads_lock:
+        _model_downloads.setdefault(model_type, {}).update(changes)
+
+
+def _estimate_download_bytes(urls):
+    """Sum the HF file sizes of the model files still missing locally.
+
+    One HEAD per URL via huggingface_hub — cheap next to a multi-GB
+    download, and it gives the UI a real total instead of a guess.
+    Deliberately best-effort: any URL we can't size (non-HF host, gated
+    repo, network hiccup) returns None so the UI shows an indeterminate
+    bar rather than a wrong number. NEVER raises — the download itself
+    must not depend on this.
+
+    Covers only the main model/module/text-encoder files, not the shared
+    assets download_models() pulls alongside them, so the real transfer
+    can exceed this.
+    """
+    try:
+        from huggingface_hub import get_hf_file_metadata
+    except Exception:
+        return None
+    total = 0
+    for url in urls:
+        if not url:
+            return None
+        if wgp.get_local_model_filename(url) is not None:
+            continue  # already on disk — download_models() will skip it
+        if not url.startswith("http"):
+            return None  # local-only entry we can't size (and can't fetch)
+        try:
+            size = get_hf_file_metadata(url).size
+        except Exception as e:
+            print(f"[Models] Size probe failed for {url}: {e}")
+            return None
+        if not size:
+            return None
+        total += size
+    return total or None
+
+
 def _download_model_files(model_type: str):
     """Resolve and fetch every file load_models() would download.
 
     Mirrors the file-resolution block at the top of wgp.load_models()
     (wgp.py:4041-4143) — keep the two in sync.
+
+    Reports file-level progress into `_model_downloads` (files_done /
+    files_total / current_file) while safe_download's tqdm hook reports
+    byte-level progress for the file currently in flight.
     """
     model_def = wgp.get_model_def(model_type)
     quantization = wgp.transformer_quantization
@@ -571,20 +618,49 @@ def _download_model_files(model_type: str):
             source_type_list.append(1)
             submodel_no_list.append(0)
 
-    for filename, source_type, submodel_no in zip(model_file_list, source_type_list, submodel_no_list):
-        if len(filename) == 0:
-            continue
-        wgp.download_models(filename, model_type, source_type, submodel_no)
-
+    # Text encoder resolved up front (not after the loop) so the file count
+    # and size estimate include it — it's often the single biggest file.
+    text_encoder_filename = None
+    text_encoder_folder = None
     text_encoder_URLs = wgp.get_model_recursive_prop(model_type, "text_encoder_URLs", return_list=True)
     if text_encoder_URLs is not None:
         te_quant = (model_def.get("text_encoder_quantization", None) if model_def else None) or wgp.text_encoder_quantization
-        text_encoder_filename = wgp.get_model_filename(model_type=model_type, quantization=te_quant, dtype_policy=dtype_policy, URLs=text_encoder_URLs)
-        if text_encoder_filename is not None and len(text_encoder_filename):
+        te_name = wgp.get_model_filename(model_type=model_type, quantization=te_quant, dtype_policy=dtype_policy, URLs=text_encoder_URLs)
+        if te_name is not None and len(te_name):
+            text_encoder_filename = te_name
             text_encoder_folder = model_def.get("text_encoder_folder", None)
+
+    queue = [f for f in model_file_list if len(f) > 0]
+    if text_encoder_filename:
+        queue.append(text_encoder_filename)
+    # File counts first, size estimate second: the probe does one HEAD per
+    # file, so publishing the counts immediately gets the UI off the plain
+    # spinner while the sizes are still coming in.
+    _update_model_download(model_type, files_total=len(queue), files_done=0, current_file=None)
+    _update_model_download(model_type, bytes_total=_estimate_download_bytes(queue))
+
+    # This thread is the only writer of the record's counters, so a plain
+    # local counter is enough — no read-modify-write race.
+    done = 0
+    safe_download.set_download_context(model_type)
+    try:
+        for filename, source_type, submodel_no in zip(model_file_list, source_type_list, submodel_no_list):
+            if len(filename) == 0:
+                continue
+            _update_model_download(model_type, current_file=os.path.basename(filename))
+            wgp.download_models(filename, model_type, source_type, submodel_no)
+            done += 1
+            _update_model_download(model_type, files_done=done)
+
+        if text_encoder_filename:
+            _update_model_download(model_type, current_file=os.path.basename(text_encoder_filename))
             wgp.download_models(text_encoder_filename, model_type, 2, -1, force_path=text_encoder_folder)
+            done += 1
+            _update_model_download(model_type, files_done=done)
             if wgp.get_local_model_filename(text_encoder_filename, extra_paths=text_encoder_folder) is None:
                 raise Exception(f"Text encoder '{os.path.basename(text_encoder_filename)}' could not be located after download.")
+    finally:
+        safe_download.set_download_context(None)
 
     if not _check_model_downloaded(model_type):
         raise Exception("Download finished but the checkpoint could not be located — check disk space and earlier terminal output.")
@@ -600,16 +676,27 @@ def download_model(model_type: str):
         entry = _model_downloads.get(model_type)
         if entry and entry["status"] == "downloading":
             return {"status": "downloading", "model_type": model_type}
-        _model_downloads[model_type] = {"status": "downloading", "error": None, "started": time.time()}
+        _model_downloads[model_type] = {
+            "status": "downloading",
+            "error": None,
+            "started": time.time(),
+            "model_name": md.get("name") or model_type,
+            # Filled in by _download_model_files once the file list is
+            # resolved; null until then so the UI shows a plain spinner.
+            "files_total": None,
+            "files_done": 0,
+            "current_file": None,
+            "bytes_total": None,
+        }
 
     def _worker():
         try:
             _download_model_files(model_type)
-            _model_downloads[model_type] = {"status": "completed", "error": None, "started": _model_downloads[model_type]["started"]}
+            _update_model_download(model_type, status="completed", error=None, current_file=None)
             print(f"[Models] Pre-download complete: {model_type}")
         except Exception as e:
             traceback.print_exc()
-            _model_downloads[model_type] = {"status": "failed", "error": str(e), "started": _model_downloads[model_type]["started"]}
+            _update_model_download(model_type, status="failed", error=str(e))
             print(f"[Models] Pre-download FAILED for {model_type}: {e}")
 
     threading.Thread(target=_worker, daemon=True, name=f"model-dl-{model_type}").start()
@@ -618,8 +705,15 @@ def download_model(model_type: str):
 
 @api.get("/api/v1/models/downloads/status")
 def model_downloads_status():
-    """Status of model pre-downloads started via POST .../download."""
-    return {"downloads": {mt: {"status": e["status"], "error": e["error"]} for mt, e in _model_downloads.items()}}
+    """Status of model pre-downloads started via POST .../download.
+
+    Returns the whole record: status, error, started, model_name,
+    files_total, files_done, current_file, bytes_total. Byte-level
+    progress for the file in flight comes from /api/v1/downloads/active
+    (matched by its `model_type` field).
+    """
+    with _model_downloads_lock:
+        return {"downloads": {mt: dict(e) for mt, e in _model_downloads.items()}}
 
 
 @api.get("/api/v1/resolutions")

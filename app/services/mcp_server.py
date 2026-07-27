@@ -230,7 +230,9 @@ def download_model(model_type: str) -> dict:
 def model_download_status() -> dict:
     """Status of model pre-downloads started via download_model():
     {"downloads": {model_type: {"status": downloading/completed/failed,
-    "error"}}}."""
+    "error", "started", "model_name", "files_total", "files_done",
+    "current_file", "bytes_total"}}}. Byte-level progress for the file
+    currently in flight lives at GET /api/v1/downloads/active."""
     return _get("/api/v1/models/downloads/status")
 
 

@@ -5,6 +5,7 @@ import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/u
 import * as api from '../../api/client'
 import type { GenerationMode } from '../../types'
 import { FAMILIES, resolveVariant, onOsThemeChange, type FamilyId, type ThemeMode } from '../../lib/theme'
+import { formatBytes } from '../../lib/format'
 
 const profileLabels: Record<string, string> = {
   '1': 'Profile 1: High RAM + High VRAM',
@@ -86,10 +87,12 @@ function ModelVisibilitySection() {
   const [expandedModes, setExpandedModes] = useState<Set<GenerationMode>>(new Set())
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
-  // Model pre-downloads in flight (click on the download icon). Byte-level
-  // progress shows in the global DownloadStatusBanner; this set only drives
-  // the per-row spinner and the completion refresh.
-  const [downloading, setDownloading] = useState<Set<string>>(new Set())
+  // Model pre-downloads in flight (click on the download icon), keyed by
+  // model_type. Byte-level progress for the file currently transferring
+  // shows in the global DownloadStatusBanner; the record here drives the
+  // per-row file-count bar and the completion refresh.
+  const [downloading, setDownloading] = useState<Record<string, api.ModelDownload>>({})
+  const downloadingCount = Object.keys(downloading).length
   const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({})
   const sectionRef = useRef<HTMLDivElement>(null)
 
@@ -102,38 +105,41 @@ function ModelVisibilitySection() {
       try {
         const { downloads } = await api.fetchModelDownloads()
         if (cancelled) return
-        const active = new Set<string>()
+        const active: Record<string, api.ModelDownload> = {}
         const errors: Record<string, string> = {}
         let anyCompleted = false
         for (const [mt, d] of Object.entries(downloads)) {
-          if (d.status === 'downloading') active.add(mt)
+          if (d.status === 'downloading') active[mt] = d
           else if (d.status === 'failed' && d.error) errors[mt] = d.error
           else if (d.status === 'completed') anyCompleted = true
         }
-        setDownloading(prev => {
-          if (prev.size === active.size && [...prev].every(mt => active.has(mt))) return prev
-          return active
-        })
+        // Replaced unconditionally (no identity short-circuit) — the record
+        // carries files_done/current_file, which change on every poll and
+        // are exactly what the row bar needs to re-render.
+        const activeCount = Object.keys(active).length
+        setDownloading(active)
         setDownloadErrors(errors)
         // A download finished since the last poll — refresh so the row
         // flips to the downloaded check mark.
-        if (anyCompleted && downloading.size > 0 && active.size < downloading.size) loadModels()
+        if (anyCompleted && downloadingCount > 0 && activeCount < downloadingCount) loadModels()
       } catch { /* endpoint unavailable — ignore */ }
     }
     tick()
-    if (downloading.size === 0) return
+    if (downloadingCount === 0) return
     const interval = setInterval(tick, 2000)
     return () => { cancelled = true; clearInterval(interval) }
-  }, [downloading.size, loadModels])
+  }, [downloadingCount, loadModels])
 
   const handleDownload = useCallback(async (modelType: string) => {
     setDownloadErrors(prev => { const next = { ...prev }; delete next[modelType]; return next })
-    setDownloading(prev => new Set(prev).add(modelType))
+    // Optimistic placeholder so the row shows a spinner before the first
+    // status poll fills in the file counts.
+    setDownloading(prev => ({ ...prev, [modelType]: { status: 'downloading', error: null } }))
     try {
       await api.downloadModel(modelType)
     } catch (e) {
       console.error('Download start failed:', e)
-      setDownloading(prev => { const next = new Set(prev); next.delete(modelType); return next })
+      setDownloading(prev => { const next = { ...prev }; delete next[modelType]; return next })
       setDownloadErrors(prev => ({ ...prev, [modelType]: String(e) }))
     }
   }, [])
@@ -320,7 +326,9 @@ function ModelVisibilitySection() {
                         </button>
                       </div>
                     )}
-                    {(!showFamilyHeader || !famCollapsed) && group.models.map(m => (
+                    {(!showFamilyHeader || !famCollapsed) && group.models.map(m => {
+                      const dl = downloading[m.model_type]
+                      return (
                       <div
                         key={m.model_type}
                         className="flex items-center gap-2 py-0.5 group"
@@ -339,7 +347,7 @@ function ModelVisibilitySection() {
                               their files fetch on first SFX generation. */}
                           {m.is_downloaded ? (
                             <Check size={10} className="text-indicator-success shrink-0" />
-                          ) : downloading.has(m.model_type) ? (
+                          ) : dl ? (
                             <Loader2 size={10} className="text-accent-blue shrink-0 animate-spin" />
                           ) : m.architecture === 'mmaudio' ? (
                             <Download size={10} className="text-text-muted shrink-0" />
@@ -366,6 +374,7 @@ function ModelVisibilitySection() {
                             {m.name}
                           </span>
                         </label>
+                        {dl && <ModelDownloadProgress download={dl} />}
                         {/* Delete button — only for downloaded models */}
                         {m.is_downloaded && (
                           <button
@@ -384,7 +393,8 @@ function ModelVisibilitySection() {
                           </button>
                         )}
                       </div>
-                    ))}
+                      )
+                    })}
                   </div>
                   )
                 })}
@@ -395,6 +405,32 @@ function ModelVisibilitySection() {
       })}
     </div>
       )}
+    </div>
+  )
+}
+
+/** Slim per-row download progress. Deliberately file-count based, not
+ *  byte based: the model status record knows how many files are done, and
+ *  only the file currently transferring has byte-level numbers (those show
+ *  in the global DownloadStatusBanner). No file count yet → nothing, the
+ *  row spinner already says "working". */
+function ModelDownloadProgress({ download }: { download: api.ModelDownload }) {
+  const total = download.files_total
+  if (!total) return null
+  const pct = Math.min(100, Math.round(((download.files_done ?? 0) / total) * 100))
+  return (
+    <div
+      className="flex items-center gap-1.5 shrink-0"
+      title={[
+        `File ${Math.min(total, (download.files_done ?? 0) + 1)} of ${total}`,
+        download.current_file,
+        download.bytes_total ? `${formatBytes(download.bytes_total)} total` : null,
+      ].filter(Boolean).join(' · ')}
+    >
+      <div className="w-14 h-1 rounded-full bg-bg-active overflow-hidden">
+        <div className="h-full bg-accent-blue transition-all duration-500" style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-[9px] text-text-muted tabular-nums w-7 text-right">{pct}%</span>
     </div>
   )
 }

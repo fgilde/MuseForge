@@ -88,7 +88,24 @@ export async function downloadModel(modelType: string): Promise<{ status: ModelD
   return res.json()
 }
 
-export async function fetchModelDownloads(): Promise<{ downloads: Record<string, { status: ModelDownloadStatus; error: string | null }> }> {
+export interface ModelDownload {
+  status: ModelDownloadStatus
+  error: string | null
+  /** Epoch seconds when the download was started. */
+  started?: number
+  /** Human-readable model name for banners. */
+  model_name?: string
+  /** Number of files to fetch — null until the file list is resolved. */
+  files_total?: number | null
+  files_done?: number
+  /** Basename of the file currently in flight. */
+  current_file?: string | null
+  /** Estimated total transfer size in bytes, null when it couldn't be
+   *  probed. Covers the model/module/text-encoder files only. */
+  bytes_total?: number | null
+}
+
+export async function fetchModelDownloads(): Promise<{ downloads: Record<string, ModelDownload> }> {
   const res = await fetch(`${BASE}/api/v1/models/downloads/status`)
   if (!res.ok) throw new Error('Failed to fetch model download status')
   return res.json()
@@ -1861,11 +1878,23 @@ export interface ActiveDownload {
   started_at: number
   last_active_at: number
   downloaded_bytes: number
+  /** null when the server sent no Content-Length — render an
+   *  indeterminate bar, not a fake percentage. */
   total_bytes: number | null
   status: 'downloading' | 'stalled' | 'retrying' | 'done' | 'incomplete'
   /** Seconds since the byte counter last advanced. UI uses this to
    *  flag stalled downloads (e.g. `> 15` → show "slow / retrying"). */
   seconds_since_progress: number
+  /** Transfer speed in bytes/s (tqdm's smoothed rate), null until known. */
+  rate?: number | null
+  /** Seconds the transfer has been running. */
+  elapsed?: number | null
+  /** Seconds remaining, derived from rate + remaining bytes. null when
+   *  either is unknown. */
+  eta_seconds?: number | null
+  /** Set while this file belongs to a model pre-download — match against
+   *  the keys of fetchModelDownloads() for the "file 3/7" context. */
+  model_type?: string | null
 }
 
 export async function fetchActiveDownloads(): Promise<{ downloads: ActiveDownload[] }> {

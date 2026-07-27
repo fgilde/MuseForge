@@ -35,6 +35,9 @@ layer can surface the state to the UI:
           "last_active_at": float,    # epoch (for stall detection)
           "downloaded_bytes": int,
           "total_bytes": int | None,
+          "rate": float | None,       # bytes/s (tqdm's smoothed rate)
+          "elapsed": float | None,    # seconds since the bar started
+          "model_type": str | None,   # set while a model pre-download runs
           "status": "downloading" | "stalled" | "retrying" | "done",
       },
       ...
@@ -128,12 +131,28 @@ def _install_request_timeouts() -> None:
 _active_downloads: dict = {}
 _active_downloads_lock = threading.Lock()
 
+# Which model pre-download the currently-running tqdm bars belong to, so
+# the UI can label a file with the model that asked for it.
+# ponytail: one global context, not per-thread — two model downloads running
+# at once would mislabel each other's files. Only the Settings download
+# button starts these and it refuses a second run for the same model, so
+# the mislabel window is narrow. Switch to threading.local() if concurrent
+# model downloads ever become a real feature.
+_download_context: Optional[str] = None
+
+
+def set_download_context(model_type: Optional[str]) -> None:
+    """Tag tqdm-tracked downloads with the model they belong to."""
+    global _download_context
+    _download_context = model_type
+
 
 def get_active_downloads() -> list:
     """Return a snapshot of currently-active downloads for the UI.
 
-    Each entry includes a derived `seconds_since_progress` so the UI
-    can render "stalled" states without doing math itself.
+    Each entry includes a derived `seconds_since_progress` and
+    `eta_seconds` so the UI can render "stalled" states and a countdown
+    without doing math itself.
     """
     now = time.time()
     with _active_downloads_lock:
@@ -146,11 +165,21 @@ def get_active_downloads() -> list:
             _active_downloads.pop(fid, None)
         results = []
         for file_id, state in _active_downloads.items():
+            rate = state.get("rate") or 0
+            total = state.get("total_bytes")
+            remaining = (
+                total - state.get("downloaded_bytes", 0)
+                if total else None
+            )
             results.append({
                 **state,
                 "file_id": file_id,
                 "seconds_since_progress": (
                     round(now - state.get("last_active_at", now), 1)
+                ),
+                "eta_seconds": (
+                    round(remaining / rate, 1)
+                    if rate > 0 and remaining and remaining > 0 else None
                 ),
             })
         return results
@@ -162,6 +191,8 @@ def _record_download_progress(
     downloaded: int,
     total: Optional[int],
     status: str = "downloading",
+    rate: Optional[float] = None,
+    elapsed: Optional[float] = None,
 ) -> None:
     now = time.time()
     with _active_downloads_lock:
@@ -172,6 +203,11 @@ def _record_download_progress(
             "last_active_at": now if downloaded > existing.get("downloaded_bytes", 0) else existing.get("last_active_at", now),
             "downloaded_bytes": downloaded,
             "total_bytes": total,
+            # tqdm's own smoothed rate — keep the last known value so a
+            # brief lull doesn't blank the speed readout in the UI.
+            "rate": rate if rate else existing.get("rate"),
+            "elapsed": elapsed,
+            "model_type": _download_context,
             "status": status,
         }
 
@@ -227,9 +263,12 @@ def _is_download_tqdm(self) -> bool:
     counters, dataset iteration, etc.) where filtering by `B`/scale
     cleanly excludes them.
 
-    Total-size > a few KB is also required to filter out trivial
-    progress bars from misc utilities. Genuine model downloads are
-    always millions of bytes minimum.
+    A KNOWN total under a few KB is rejected to filter out trivial
+    progress bars from misc utilities. An UNKNOWN total (no
+    Content-Length) is accepted — those are real downloads too, and
+    dropping them was why the banner went blank on some CDNs. They
+    surface with `total_bytes: null` and the UI shows an indeterminate
+    bar.
     """
     try:
         unit = getattr(self, "unit", "")
@@ -239,7 +278,7 @@ def _is_download_tqdm(self) -> bool:
             return False
         if not unit_scale:
             return False
-        if total is None or total < 16 * 1024:  # under 16 KB → not a real download
+        if total is not None and total < 16 * 1024:  # under 16 KB → not a real download
             return False
         return True
     except Exception:
@@ -270,6 +309,18 @@ def _install_tqdm_hook() -> None:
     except ImportError:
         return
 
+    def _rate_and_elapsed(bar):
+        """Pull tqdm's own smoothed rate (bytes/s) + elapsed seconds.
+
+        `format_dict` is a property that does arithmetic, so it can raise
+        on a half-initialized bar — never let that break tracking.
+        """
+        try:
+            fmt = bar.format_dict or {}
+            return fmt.get("rate"), fmt.get("elapsed")
+        except Exception:
+            return None, None
+
     Tqdm = getattr(tqdm_module, "tqdm", None)
     if Tqdm is None or not isinstance(Tqdm, type):
         return
@@ -294,11 +345,14 @@ def _install_tqdm_hook() -> None:
                 desc = str(desc).strip(": ()") or f"download-{id(self)}"
                 self._museforge_file_id = desc
                 self._museforge_filename = desc
+                rate, elapsed = _rate_and_elapsed(self)
                 _record_download_progress(
                     self._museforge_file_id,
                     self._museforge_filename,
                     downloaded=int(getattr(self, "n", 0) or 0),
                     total=int(self.total) if getattr(self, "total", None) else None,
+                    rate=rate,
+                    elapsed=elapsed,
                 )
             except Exception:
                 self._museforge_file_id = None
@@ -308,11 +362,14 @@ def _install_tqdm_hook() -> None:
             try:
                 file_id = getattr(self, "_museforge_file_id", None)
                 if file_id:
+                    rate, elapsed = _rate_and_elapsed(self)
                     _record_download_progress(
                         file_id,
                         getattr(self, "_museforge_filename", file_id),
                         downloaded=int(getattr(self, "n", 0) or 0),
                         total=int(self.total) if getattr(self, "total", None) else None,
+                        rate=rate,
+                        elapsed=elapsed,
                     )
             except Exception:
                 pass
@@ -363,3 +420,32 @@ def install() -> None:
 
 # Auto-install on import — this is the whole point of the module.
 install()
+
+
+if __name__ == "__main__":
+    # Self-check for the progress math + tqdm filter. `python -m
+    # services.safe_download` from app/.
+    class _Bar:
+        def __init__(self, unit="B", unit_scale=True, total=None):
+            self.unit, self.unit_scale, self.total = unit, unit_scale, total
+
+    assert _is_download_tqdm(_Bar(total=10 * 1024 * 1024))
+    assert _is_download_tqdm(_Bar(total=None)), "unknown total must be kept"
+    assert not _is_download_tqdm(_Bar(total=1024)), "tiny known total"
+    assert not _is_download_tqdm(_Bar(unit="it", total=None))
+    assert not _is_download_tqdm(_Bar(unit_scale=False, total=None))
+
+    set_download_context("t2v_14B")
+    _record_download_progress("f.safetensors", "f.safetensors", 25, 100, rate=5.0)
+    entry = get_active_downloads()[0]
+    assert entry["eta_seconds"] == 15.0, entry           # (100-25)/5
+    assert entry["model_type"] == "t2v_14B", entry
+
+    # No rate / no total → no ETA, and the last known rate survives a lull.
+    _record_download_progress("g.bin", "g.bin", 10, None)
+    assert get_active_downloads()[1]["eta_seconds"] is None
+    _record_download_progress("f.safetensors", "f.safetensors", 30, 100)
+    assert get_active_downloads()[0]["rate"] == 5.0
+
+    set_download_context(None)
+    print("safe_download self-check OK")

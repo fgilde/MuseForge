@@ -899,10 +899,21 @@ input[type="range"]::-webkit-slider-thumb {
   .banner-in {
     animation: banner-in 0.25s ease-out;
   }
+
+  /* Indeterminate progress sweep — for downloads whose server sent no
+   * Content-Length, where any fixed width would imply a percentage we
+   * don't actually know. Apply to a partial-width bar fill. */
+  .progress-indeterminate {
+    animation: progress-indeterminate 1.4s ease-in-out infinite;
+  }
 }
 @keyframes banner-in {
   from { opacity: 0; transform: translateY(0.5rem); }
   to { opacity: 1; transform: translateY(0); }
+}
+@keyframes progress-indeterminate {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(300%); }
 }
 /* NOTE: no backdrop-filter on <aside> — it would turn the sidebar into
  * a containing block for position:fixed descendants (the Advanced
