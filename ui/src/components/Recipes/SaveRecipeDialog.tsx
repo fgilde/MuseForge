@@ -3,8 +3,8 @@ import { BookMarked, Loader2 } from 'lucide-react'
 
 /**
  * SaveRecipeDialog — turns the current gallery output into a reusable
- * recipe. The output's sidecar supplies model + LoRAs + settings and the
- * media supplies the thumbnail; the user just names it.
+ * blueprint. The output's sidecar supplies model + LoRAs + settings and
+ * the media supplies the thumbnail; the user just names it.
  */
 export function SaveRecipeDialog({ defaultNsfw, onSave, onCancel }: {
   defaultNsfw: boolean
@@ -34,11 +34,11 @@ export function SaveRecipeDialog({ defaultNsfw, onSave, onCancel }: {
         onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-2 mb-3">
           <BookMarked size={16} className="text-accent-blue" />
-          <h2 className="text-sm font-semibold text-text-primary">Save as Recipe</h2>
+          <h2 className="text-sm font-semibold text-text-primary">Save as Blueprint</h2>
         </div>
         <p className="text-[11px] text-text-muted mb-3 leading-snug">
           Captures this generation's model, LoRAs, and settings as a one-click
-          preset. Its thumbnail comes from this output. Applying a recipe later
+          preset. Its thumbnail comes from this output. Applying a blueprint later
           prepopulates the prompt so you just edit the subject.
         </p>
 
@@ -63,7 +63,7 @@ export function SaveRecipeDialog({ defaultNsfw, onSave, onCancel }: {
 
         <label className="flex items-center gap-2 cursor-pointer mb-4">
           <input type="checkbox" checked={nsfw} onChange={e => setNsfw(e.target.checked)} className="accent-accent-blue" />
-          <span className="text-[11px] text-text-secondary">Mature recipe (hidden unless mature mode is on)</span>
+          <span className="text-[11px] text-text-secondary">Mature blueprint (hidden unless mature mode is on)</span>
         </label>
 
         {error && <div className="text-[11px] text-red-400 mb-3">{error}</div>}
@@ -75,7 +75,7 @@ export function SaveRecipeDialog({ defaultNsfw, onSave, onCancel }: {
           </button>
           <button onClick={submit} disabled={!name.trim() || saving}
             className="px-4 py-2 text-xs bg-accent-blue text-white rounded-lg hover:bg-accent-blue-hover transition-colors disabled:opacity-40 flex items-center gap-1.5">
-            {saving ? <><Loader2 size={12} className="animate-spin" /> Saving…</> : 'Save Recipe'}
+            {saving ? <><Loader2 size={12} className="animate-spin" /> Saving…</> : 'Save Blueprint'}
           </button>
         </div>
       </div>

@@ -13467,9 +13467,22 @@ try:
     async def _mcp_stop():
         await _mcp_stack.aclose()
 
+    _mcp_mounted = True
     print("[MuseForge] MCP server mounted at /mcp")
 except Exception as _mcp_e:  # noqa: BLE001 — optional integration
+    _mcp_mounted = False
     print(f"[MuseForge] WARNING: MCP server not mounted: {_mcp_e}")
+
+
+@api.get("/api/v1/mcp/info")
+def mcp_info():
+    """MCP endpoint status for the Settings UI. The URL is client-side
+    (window.location.origin + /mcp); this reports availability and
+    whether requests must carry a bearer token (MUSEFORGE_API_TOKEN)."""
+    return {
+        "mounted": _mcp_mounted,
+        "token_required": bool(os.environ.get("MUSEFORGE_API_TOKEN")),
+    }
 
 _ui_dist = os.path.normpath(os.path.join(_app_dir, "..", "ui", "dist"))
 if os.path.isdir(_ui_dist):
@@ -13577,22 +13590,45 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    # Starlette's Mount only serves the MCP sub-app under "/mcp/" — a
-    # bare "/mcp" (what MCP clients are configured with) misses it. This
-    # thin ASGI shim normalizes the path so both spellings work.
-    class _McpPathShim:
+    # MCP gateway shim. Two jobs:
+    #   1. Starlette's Mount only serves the MCP sub-app under "/mcp/" —
+    #      a bare "/mcp" (what MCP clients are configured with) misses
+    #      it, so normalize the path.
+    #   2. Optional bearer auth: when MUSEFORGE_API_TOKEN is set, every
+    #      /mcp request must carry "Authorization: Bearer <token>".
+    #      Scoped to /mcp only — the UI's own REST calls stay tokenless.
+    class _McpGateway:
         def __init__(self, app):
             self.app = app
+            self.token = (os.environ.get("MUSEFORGE_API_TOKEN") or "").strip()
 
         async def __call__(self, scope, receive, send):
-            if scope.get("type") == "http" and scope.get("path") == "/mcp":
-                scope = dict(scope)
-                scope["path"] = "/mcp/"
-                scope["raw_path"] = b"/mcp/"
+            if scope.get("type") == "http" and scope.get("path", "").startswith("/mcp"):
+                if self.token:
+                    auth = ""
+                    for k, v in scope.get("headers") or []:
+                        if k == b"authorization":
+                            auth = v.decode("latin-1")
+                            break
+                    if auth != f"Bearer {self.token}":
+                        await send({
+                            "type": "http.response.start",
+                            "status": 401,
+                            "headers": [(b"content-type", b"application/json")],
+                        })
+                        await send({
+                            "type": "http.response.body",
+                            "body": b'{"error": "unauthorized: /mcp requires Authorization: Bearer <MUSEFORGE_API_TOKEN>"}',
+                        })
+                        return
+                if scope["path"] == "/mcp":
+                    scope = dict(scope)
+                    scope["path"] = "/mcp/"
+                    scope["raw_path"] = b"/mcp/"
             await self.app(scope, receive, send)
 
     try:
-        uvicorn.run(_McpPathShim(api), host=host, port=port)
+        uvicorn.run(_McpGateway(api), host=host, port=port)
     except OSError as e:
         # The probe above narrows this to a genuine race (port taken in the
         # window between probe and uvicorn's own bind). Still fail loudly and

@@ -59,7 +59,7 @@ export function GenerateButton() {
       }`}
     >
       <Play size={13} fill={cooldown ? 'currentColor' : 'white'} />
-      {cooldown ? 'Queued' : queueCount > 0 ? `Go (${queueCount})` : 'Generate'}
+      {cooldown ? 'Queued' : queueCount > 0 ? `Go (${queueCount})` : 'Forge'}
     </button>
   )
 }

@@ -225,7 +225,7 @@ export function Sidebar() {
           <button
             onClick={() => useStore.getState().setRecipesOpen(true)}
             className="p-2 rounded-lg bg-bg-tertiary border border-border hover:border-border-light text-text-secondary hover:text-accent-blue transition-colors shrink-0"
-            title="Recipes — one-click presets"
+            title="Blueprints — one-click presets"
           >
             <BookMarked size={14} />
           </button>

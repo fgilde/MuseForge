@@ -12,6 +12,9 @@ services:
       # Optional HuggingFace token — not required (all default models are on
       # public repos) but lifts anonymous rate limits and unlocks gated models.
       # - HF_TOKEN=hf_xxx
+      # Require "Authorization: Bearer <token>" on the /mcp endpoint —
+      # set this before exposing MuseForge beyond localhost.
+      # - MUSEFORGE_API_TOKEN=change-me
       - HF_HOME=/data/huggingface
     volumes:
       - config:/data/config                       # wgp_config.json + queue autosave

@@ -31,32 +31,35 @@ export function PreflightBanner() {
   const hasError = checks.some(c => c.level === 'error')
 
   return (
-    <div className={`fixed top-0 inset-x-0 z-50 px-4 py-2 flex items-start gap-2.5 border-b backdrop-blur-sm ${
-      hasError
-        ? 'bg-red-500/20 border-red-500/40'
-        : 'bg-amber-500/20 border-amber-500/40'
-    }`}>
-      <AlertTriangle
-        size={15}
-        className={`shrink-0 mt-0.5 ${hasError ? 'text-chip-red' : 'text-indicator-warning'}`}
-      />
-      <div className="flex-1 min-w-0 space-y-0.5">
-        {checks.map(c => (
-          <div key={c.id} className="text-[11px] leading-snug text-text-primary">
-            {c.message}
+    <div className="fixed top-3 inset-x-0 z-50 px-4 flex justify-center pointer-events-none">
+      <div className={`glass-panel banner-in pointer-events-auto max-w-2xl w-full rounded-2xl shadow-2xl border-l-4 px-4 py-3 flex items-start gap-2.5 ${
+        hasError ? 'border-l-red-500/60' : 'border-l-amber-500/60'
+      }`}>
+        <AlertTriangle
+          size={16}
+          className={`shrink-0 mt-0.5 ${hasError ? 'text-red-400' : 'text-indicator-warning'}`}
+        />
+        <div className="flex-1 min-w-0 space-y-1">
+          <div className="text-sm font-semibold text-text-primary">
+            {hasError ? 'Environment check failed' : 'Environment warning'}
           </div>
-        ))}
+          {checks.map(c => (
+            <div key={c.id} className="text-xs leading-snug text-text-secondary">
+              {c.message}
+            </div>
+          ))}
+        </div>
+        <button
+          onClick={() => {
+            sessionStorage.setItem('museforge_preflight_dismissed', '1')
+            setDismissed(true)
+          }}
+          className="shrink-0 p-0.5 rounded text-text-muted hover:text-text-primary transition-colors"
+          aria-label="Dismiss"
+        >
+          <X size={16} />
+        </button>
       </div>
-      <button
-        onClick={() => {
-          sessionStorage.setItem('museforge_preflight_dismissed', '1')
-          setDismissed(true)
-        }}
-        className="shrink-0 p-0.5 rounded text-text-muted hover:text-text-primary transition-colors"
-        aria-label="Dismiss"
-      >
-        <X size={13} />
-      </button>
     </div>
   )
 }

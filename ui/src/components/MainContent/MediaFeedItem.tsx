@@ -483,7 +483,7 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
               <button
                 onClick={(e) => { e.stopPropagation(); setShowSaveRecipe(true) }}
                 className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-accent-blue transition-colors"
-                title="Save as Recipe — reuse this look with one click"
+                title="Save as Blueprint — reuse this look with one click"
               >
                 <BookMarked size={13} />
               </button>

@@ -92,8 +92,8 @@ export function OomRecoveryBanner() {
   // it's dismissed (the OOM key is in the dismissed set).
   if (appliedToast) {
     return (
-      <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-md">
-        <div className="bg-green-500/90 text-white text-sm rounded-lg shadow-xl px-4 py-2.5">
+      <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-md w-[calc(100%-2rem)]">
+        <div className="glass-panel banner-in rounded-2xl shadow-2xl border-l-4 border-l-green-500/60 text-sm text-text-primary px-4 py-2.5">
           {appliedToast}
         </div>
       </div>
@@ -109,13 +109,13 @@ export function OomRecoveryBanner() {
 
   return (
     <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-xl w-[calc(100%-2rem)]">
-      <div className="bg-bg-secondary border border-amber-500/40 rounded-lg shadow-2xl overflow-hidden">
+      <div className="glass-panel banner-in rounded-2xl shadow-2xl border-l-4 border-l-amber-500/60 overflow-hidden">
         {/* Header strip */}
-        <div className="flex items-start gap-2.5 px-4 py-3 bg-amber-500/10">
-          <AlertTriangle size={18} className="text-indicator-warning shrink-0 mt-0.5" />
+        <div className="flex items-start gap-2.5 px-4 py-3 border-b border-border">
+          <AlertTriangle size={16} className="text-indicator-warning shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-medium text-text-primary">Out of VRAM</div>
-            <div className="text-[12px] text-text-secondary mt-0.5">
+            <div className="text-sm font-semibold text-text-primary">Out of VRAM</div>
+            <div className="text-xs text-text-secondary mt-0.5">
               {context} {vramHint}
             </div>
           </div>
@@ -124,7 +124,7 @@ export function OomRecoveryBanner() {
             className="text-text-muted hover:text-text-primary p-0.5 rounded transition-colors shrink-0"
             title="Dismiss"
           >
-            <X size={14} />
+            <X size={16} />
           </button>
         </div>
 
@@ -132,7 +132,7 @@ export function OomRecoveryBanner() {
         <div className="px-4 py-3 space-y-2.5">
           {canLower ? (
             <>
-              <div className="text-[12px] text-text-secondary leading-snug">
+              <div className="text-xs text-text-secondary leading-snug">
                 Lower VRAM headroom from <span className="font-mono text-text-primary">{oom.current_coefficient.toFixed(2)}</span> to{' '}
                 <span className="font-mono text-indicator-warning">{oom.suggested_coefficient!.toFixed(2)}</span> to reserve more memory for generation spikes
                 (long videos, VAE decode). About ~5% slower per generation.
@@ -160,7 +160,7 @@ export function OomRecoveryBanner() {
             // current_coefficient is at the 0.50 floor — coefficient
             // can't help anymore. Need a different fix.
             <>
-              <div className="text-[12px] text-text-secondary leading-snug">
+              <div className="text-xs text-text-secondary leading-snug">
                 VRAM headroom is already at <span className="font-mono">{oom.current_coefficient.toFixed(2)}</span> (the safe minimum).
                 Lowering it further won't help. Try a smaller model variant (e.g. INT8 or GGUF), reduce resolution, or shorten video length.
               </div>

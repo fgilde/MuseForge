@@ -1,0 +1,129 @@
+import { useEffect, useState } from 'react'
+import { Check, Copy, Plug, ShieldCheck, ShieldOff } from 'lucide-react'
+
+/**
+ * "API & MCP" settings tab — shows where the MCP endpoint lives, how to
+ * connect an AI agent to it, the available tools, and whether the
+ * instance requires a bearer token (MUSEFORGE_API_TOKEN).
+ *
+ * Static except for one status fetch: the tool table documents the
+ * surface defined in app/services/mcp_server.py — keep the two in sync
+ * when adding tools.
+ */
+
+const TOOLS: Array<[string, string]> = [
+  ['list_models', 'Discover model types and their capabilities'],
+  ['model_defaults', 'Inspect tunable parameters of a model'],
+  ['generate', 'Submit a video/image/audio job, returns job_id'],
+  ['job_status', 'Poll a job until completed/failed'],
+  ['list_jobs', 'Recent generation jobs'],
+  ['cancel_job', 'Cancel a queued or running job'],
+  ['list_outputs', 'Generated files in the active workspace'],
+  ['get_output_url', 'Download URL for an output file'],
+  ['enhance_prompt', 'Rewrite a rough prompt via the local LLM'],
+  ['system_status', 'GPU/CUDA/disk readiness check'],
+]
+
+function CopyRow({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch { /* clipboard blocked */ }
+  }
+  return (
+    <div>
+      <div className="text-[11px] text-text-secondary mb-1">{label}</div>
+      <div className="flex items-center gap-2 bg-bg-tertiary border border-border rounded-lg px-3 py-2">
+        <code className="text-[11px] text-text-primary flex-1 overflow-x-auto whitespace-pre">{value}</code>
+        <button
+          onClick={copy}
+          className="p-1.5 rounded-md hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors shrink-0"
+          title="Copy"
+        >
+          {copied ? <Check size={14} className="text-indicator-success" /> : <Copy size={14} />}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+export function McpPanel() {
+  const [info, setInfo] = useState<{ mounted: boolean; token_required: boolean } | null>(null)
+
+  useEffect(() => {
+    fetch('/api/v1/mcp/info')
+      .then(r => (r.ok ? r.json() : null))
+      .then(setInfo)
+      .catch(() => setInfo(null))
+  }, [])
+
+  const mcpUrl = `${window.location.origin}/mcp`
+  const mounted = info?.mounted ?? false
+
+  return (
+    <div className="space-y-5">
+      {/* Status */}
+      <div className="flex items-center gap-2 text-xs">
+        <Plug size={14} className={mounted ? 'text-indicator-success' : 'text-red-400'} />
+        <span className="text-text-primary font-medium">
+          MCP endpoint {mounted ? 'active' : info === null ? 'status unknown' : 'not available'}
+        </span>
+        {info?.token_required ? (
+          <span className="flex items-center gap-1 text-indicator-success ml-auto">
+            <ShieldCheck size={13} /> token required
+          </span>
+        ) : (
+          <span className="flex items-center gap-1 text-text-muted ml-auto">
+            <ShieldOff size={13} /> no token set
+          </span>
+        )}
+      </div>
+
+      <p className="text-xs text-text-secondary">
+        MuseForge speaks the Model Context Protocol: AI agents (Claude Code,
+        IDE agents, custom orchestrators) can list models, submit generation
+        jobs, poll them and fetch the outputs — everything the UI can do.
+      </p>
+
+      <CopyRow label="MCP endpoint (streamable HTTP)" value={mcpUrl} />
+      <CopyRow label="Connect from Claude Code" value={`claude mcp add --transport http museforge ${mcpUrl}`} />
+      <CopyRow
+        label="mcp.json style config"
+        value={`{\n  "mcpServers": {\n    "museforge": { "type": "http", "url": "${mcpUrl}" }\n  }\n}`}
+      />
+
+      {/* Token */}
+      <div className="text-xs text-text-secondary space-y-1.5">
+        <div className="text-text-primary font-medium">Access token</div>
+        <p>
+          Set the <code className="text-[11px] bg-bg-tertiary px-1 py-0.5 rounded">MUSEFORGE_API_TOKEN</code>{' '}
+          environment variable (e.g. in docker-compose.yml) to require{' '}
+          <code className="text-[11px] bg-bg-tertiary px-1 py-0.5 rounded">Authorization: Bearer &lt;token&gt;</code>{' '}
+          on every MCP request. Without it the endpoint is open to anyone who
+          can reach this machine — fine on localhost, not on a shared network.
+        </p>
+      </div>
+
+      {/* Tools */}
+      <div className="space-y-1.5">
+        <div className="text-xs text-text-primary font-medium">Available tools</div>
+        <div className="border border-border rounded-lg overflow-hidden">
+          {TOOLS.map(([name, desc], i) => (
+            <div key={name} className={`flex items-baseline gap-3 px-3 py-1.5 text-[11px] ${i % 2 ? '' : 'bg-bg-tertiary/50'}`}>
+              <code className="text-text-primary shrink-0 w-32">{name}</code>
+              <span className="text-text-secondary">{desc}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <p className="text-xs text-text-muted">
+        The full REST API behind these tools is documented at{' '}
+        <a href="/docs" target="_blank" rel="noreferrer" className="text-accent-blue hover:underline">/docs</a>.
+      </p>
+    </div>
+  )
+}

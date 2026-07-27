@@ -69,29 +69,27 @@ export function DownloadStatusBanner() {
 
   return (
     <div className="fixed bottom-4 right-4 z-40 max-w-md w-[calc(100vw-2rem)] sm:w-auto">
-      {/* Outer container is always solid bg-bg-secondary so text
-          stays readable over images/videos in the main feed.
-          Border color switches to amber on stall to draw the eye
-          without sacrificing contrast. */}
-      <div className={`bg-bg-secondary rounded-lg border shadow-2xl overflow-hidden ${
-        incomplete ? 'border-red-500/60' : stalled ? 'border-amber-500/60' : 'border-border'
+      {/* Glass panel over the feed; status color appears only as the
+          left accent border + icon tint, never as a full background. */}
+      <div className={`glass-panel banner-in rounded-2xl shadow-2xl border-l-4 overflow-hidden ${
+        incomplete ? 'border-l-red-500/60' : stalled ? 'border-l-amber-500/60' : 'border-l-accent-blue/60'
       }`}>
-        {/* Interrupted download — red strip. The file is probably truncated;
-            re-running the download/generation fetches the rest. */}
+        {/* Interrupted download — red accent header. The file is probably
+            truncated; re-running the download/generation fetches the rest. */}
         {incomplete && (
-          <div className="px-4 py-2 bg-red-500/15 border-b border-red-500/30 flex items-center gap-2">
-            <AlertTriangle size={14} className="text-red-400 shrink-0" />
-            <div className="text-xs font-medium text-text-primary">
+          <div className="px-4 py-2 border-b border-border flex items-center gap-2">
+            <AlertTriangle size={16} className="text-red-400 shrink-0" />
+            <div className="text-sm font-semibold text-text-primary">
               A download was interrupted — re-run to finish it
             </div>
           </div>
         )}
-        {/* Optional amber accent strip on stall — semi-transparent
-            tint over the solid backdrop, same pattern as OomRecoveryBanner. */}
+        {/* Optional amber accent header on stall — same pattern as
+            OomRecoveryBanner. */}
         {stalled && !incomplete && (
-          <div className="px-4 py-2 bg-amber-500/15 border-b border-amber-500/30 flex items-center gap-2">
-            <AlertTriangle size={14} className="text-indicator-warning shrink-0" />
-            <div className="text-xs font-medium text-text-primary">
+          <div className="px-4 py-2 border-b border-border flex items-center gap-2">
+            <AlertTriangle size={16} className="text-indicator-warning shrink-0" />
+            <div className="text-sm font-semibold text-text-primary">
               Download is slow — waiting for retry
             </div>
           </div>
@@ -105,7 +103,7 @@ export function DownloadStatusBanner() {
             <div className="flex-1 min-w-0">
               {!stalled && (
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-xs font-medium text-text-primary truncate">
+                  <div className="text-sm font-semibold text-text-primary truncate">
                     Downloading model files
                   </div>
                   {downloads.length > 1 && (
@@ -125,7 +123,7 @@ export function DownloadStatusBanner() {
               </div>
               <DownloadProgressBar download={featured} stalled={!!stalled} />
               {stalled && (
-                <div className="text-[11px] text-text-secondary mt-1.5 leading-snug">
+                <div className="text-xs text-text-secondary mt-1.5 leading-snug">
                   No progress for {Math.round(featured.seconds_since_progress)}s.
                   The download will resume from where it left off as soon as
                   the connection recovers — no action needed from you.

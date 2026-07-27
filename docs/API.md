@@ -71,6 +71,20 @@ Typical agent flow: `list_models` → `generate` → poll `job_status` → fetch
 `get_output_url`. Generation takes minutes; the first use of a model also
 downloads its weights (potentially many GB).
 
+### Authentication
+
+By default `/mcp` is open (localhost use). Set the `MUSEFORGE_API_TOKEN`
+environment variable (see docker-compose.yml) and every MCP request must
+carry `Authorization: Bearer <token>` — clients that support headers:
+
+```bash
+claude mcp add --transport http museforge http://localhost:7860/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+The Settings dialog (**API & MCP** tab) shows the endpoint URL, ready-made
+client configs and whether a token is required on this instance.
+
 The MCP layer is a thin wrapper over the REST API (see
 `app/services/mcp_server.py`) — anything not covered by a tool can be done
 against `/api/v1` directly.

@@ -2,6 +2,7 @@ import { X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { SystemSettingsPanel } from './SystemSettingsPanel'
 import { ServicesSettingsPanel } from './ServicesSettingsPanel'
+import { McpPanel } from './McpPanel'
 
 /**
  * Settings dialog — global panel for hardware/perf and external-service
@@ -24,8 +25,9 @@ export function SettingsDrawer() {
   const setSettingsTab = useStore(s => s.setSettingsTab)
 
   const tabs = [
-    { id: 'performance' as const, label: 'Performance' },
-    { id: 'integrations' as const, label: 'Integrations' },
+    { id: 'performance' as const, label: 'System' },
+    { id: 'integrations' as const, label: 'Connections' },
+    { id: 'api' as const, label: 'API & MCP' },
   ]
 
   return (
@@ -80,6 +82,10 @@ export function SettingsDrawer() {
 
           {settingsTab === 'integrations' && (
             <ServicesSettingsPanel />
+          )}
+
+          {settingsTab === 'api' && (
+            <McpPanel />
           )}
         </div>
       </div>

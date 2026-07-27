@@ -5,10 +5,12 @@ import type { RecipeCard, RecipeLora } from '../../api/client'
 import * as api from '../../api/client'
 
 /**
- * RecipesOverlay — the one-click preset library. Bundled starters + the
- * user's own saved recipes as a thumbnail grid. Clicking a card applies
- * it (switches model + settings, prepopulates the prompt) and closes the
- * overlay so the user lands on a ready-to-generate Studio.
+ * RecipesOverlay — the one-click blueprint library, presented as a
+ * centered animated glass dialog (same pattern as SettingsDrawer).
+ * Bundled starters + the user's own saved blueprints as a thumbnail
+ * grid. Clicking a card applies it (switches model + settings,
+ * prepopulates the prompt) and closes the dialog so the user lands on
+ * a ready-to-forge Studio.
  */
 export function RecipesOverlay() {
   const open = useStore(s => s.recipesOpen)
@@ -26,8 +28,6 @@ export function RecipesOverlay() {
   const [missing, setMissing] = useState<{ modelType: string; loras: RecipeLora[] } | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  if (!open) return null
-
   const handleApply = async (card: RecipeCard) => {
     setApplying(card.id); setError(null); setMissing(null)
     try {
@@ -41,7 +41,7 @@ export function RecipesOverlay() {
         setOpen(false)
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to apply recipe')
+      setError(e instanceof Error ? e.message : 'Failed to apply blueprint')
     } finally {
       setApplying(null)
     }
@@ -70,11 +70,23 @@ export function RecipesOverlay() {
   }
 
   return (
-    <div className="fixed inset-0 z-[80] flex flex-col bg-bg-primary">
+    <div className={`fixed inset-0 z-50 flex items-center justify-center p-4 transition-opacity duration-300 ${
+      open ? 'opacity-100' : 'opacity-0 pointer-events-none'
+    }`}>
+      {/* Backdrop — dim + blur everything behind the dialog */}
+      <div
+        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        onClick={() => setOpen(false)}
+      />
+
+      {/* Dialog */}
+      <div className={`relative glass-panel w-full md:w-[720px] max-h-[85vh] rounded-2xl shadow-2xl flex flex-col transform transition-all duration-300 ease-out ${
+        open ? 'scale-100 translate-y-0' : 'scale-95 translate-y-3'
+      }`}>
       {/* Header */}
       <div className="px-4 py-3 border-b border-border flex items-center gap-2 shrink-0">
         <BookMarked size={16} className="text-accent-blue shrink-0" />
-        <h1 className="text-sm font-semibold text-text-primary">Recipes</h1>
+        <h2 className="text-sm font-semibold text-text-primary">Blueprints</h2>
         <span className="text-[11px] text-text-muted">one-click presets — pick a look, tweak the prompt, generate</span>
         <div className="flex-1" />
         <button
@@ -96,7 +108,7 @@ export function RecipesOverlay() {
             <AlertTriangle size={14} className="text-indicator-warning shrink-0 mt-0.5" />
             <div className="flex-1 text-[11px] text-text-primary">
               <div className="font-medium mb-1">
-                Applied — but this recipe uses {missing.loras.length} LoRA
+                Applied — but this blueprint uses {missing.loras.length} LoRA
                 {missing.loras.length > 1 ? 's' : ''} you don't have installed:
               </div>
               <div className="space-y-1">
@@ -112,7 +124,7 @@ export function RecipesOverlay() {
                 </div>
               )}
               <div className="mt-1.5 text-[10px] text-text-secondary">
-                The recipe is applied and ready — you just need the LoRA before you Generate.
+                The blueprint is applied and ready — you just need the LoRA before you Forge.
               </div>
             </div>
             <button onClick={() => { setMissing(null); setOpen(false) }}
@@ -125,7 +137,7 @@ export function RecipesOverlay() {
       )}
 
       {/* Grid */}
-      <div className="flex-1 overflow-y-auto p-4">
+      <div className="flex-1 overflow-y-auto min-h-0 p-4">
         {loading ? (
           <div className="flex items-center justify-center min-h-[300px] text-text-muted">
             <Loader2 size={22} className="animate-spin" />
@@ -133,8 +145,8 @@ export function RecipesOverlay() {
         ) : recipes.length === 0 ? (
           <div className="flex flex-col items-center justify-center min-h-[300px] gap-3 text-text-muted text-center">
             <BookMarked size={28} />
-            <p className="text-sm max-w-xs">No recipes yet. Generate something you like, then use
-              “Save as Recipe” on it — or Import a recipe file.</p>
+            <p className="text-sm max-w-xs">No blueprints yet. Forge something you like, then use
+              “Save as Blueprint” on it — or Import a blueprint file.</p>
           </div>
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
@@ -149,6 +161,7 @@ export function RecipesOverlay() {
             ))}
           </div>
         )}
+      </div>
       </div>
     </div>
   )
@@ -183,7 +196,7 @@ function RecipeGridCard({ card, applying, onApply, onDelete }: {
         <div className="flex items-start justify-between gap-1.5">
           <div className="text-xs font-medium text-text-primary leading-tight">{card.name}</div>
           {onDelete && (
-            <button onClick={onDelete} title="Delete recipe"
+            <button onClick={onDelete} title="Delete blueprint"
               className="shrink-0 p-0.5 rounded text-text-muted hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100">
               <Trash2 size={12} />
             </button>
