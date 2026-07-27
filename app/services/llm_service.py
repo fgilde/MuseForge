@@ -43,10 +43,24 @@ _api_key: str = ""           # API key for OpenAI/Anthropic
 _idle_timer: Optional[threading.Timer] = None
 _idle_timeout: float = 60.0  # seconds before auto-unload
 
-# Streaming state — accumulates tokens during generation
+# Streaming state — accumulates tokens during generation.
+#
+# _stream_buffer/_stream_done are the LEGACY single-slot view. They are
+# kept (and mirrored on every write) because several callers poll them
+# without knowing about stream ids: PromptInput.tsx, DirectorChat.tsx and
+# director_pipeline._capture_llm_pass all read the module globals.
+#
+# _streams is the real state: one slot per concurrent generation, keyed by
+# a caller-supplied stream_id. Without it a chat and a Director pass
+# running at the same time overwrite each other's output — the single
+# buffer was a process-wide bottleneck.
 _stream_buffer: str = ""
 _stream_done: bool = True
 _stream_lock = threading.Lock()
+
+DEFAULT_STREAM_ID = "default"
+_STREAM_TTL = 900.0  # seconds a finished slot stays readable before reaping
+_streams: dict = {}
 
 # Last call state — for pipeline dashboard capture. The user prompt is
 # captured alongside the system prompt so the Director Dashboard can
@@ -1673,10 +1687,54 @@ def generate(
     return content.strip()
 
 
-def get_stream_status() -> dict:
-    """Return current streaming state for polling."""
+def _reap_streams_unlocked() -> None:
+    """Drop finished slots older than the TTL. Caller holds _stream_lock."""
+    if len(_streams) <= 1:
+        return
+    cutoff = time.time() - _STREAM_TTL
+    for sid in [s for s, v in _streams.items()
+                if v.get("done") and v.get("updated_at", 0) < cutoff]:
+        _streams.pop(sid, None)
+
+
+def _stream_write(stream_id: str, *, text=None, done=None) -> None:
+    """Update a stream slot, mirroring into the legacy globals.
+
+    Every write is a full replacement (never an append) — that is how the
+    buffer has always worked, so mirroring stays correct.
+    """
+    global _stream_buffer, _stream_done
     with _stream_lock:
-        return {"text": _stream_buffer, "done": _stream_done}
+        slot = _streams.setdefault(
+            stream_id, {"text": "", "done": False, "updated_at": 0.0}
+        )
+        if text is not None:
+            slot["text"] = text
+            _stream_buffer = text
+        if done is not None:
+            slot["done"] = done
+            _stream_done = done
+        slot["updated_at"] = time.time()
+        _reap_streams_unlocked()
+
+
+def get_stream_status(stream_id: Optional[str] = None) -> dict:
+    """Return streaming state for polling.
+
+    Without stream_id this reports the legacy shared slot (whatever
+    generated most recently), preserving the original behaviour. With a
+    stream_id it reports exactly that generation, which is what concurrent
+    callers need. An unknown id reads as empty-and-not-done rather than
+    an error, so a poller that starts before its generation does simply
+    sees no text yet.
+    """
+    with _stream_lock:
+        if stream_id is None:
+            return {"text": _stream_buffer, "done": _stream_done}
+        slot = _streams.get(stream_id)
+        if slot is None:
+            return {"text": "", "done": False, "stream_id": stream_id}
+        return {"text": slot["text"], "done": slot["done"], "stream_id": stream_id}
 
 
 def generate_streaming(
@@ -1692,13 +1750,24 @@ def generate_streaming(
     frequency_penalty: float = 0.0,
     presence_penalty: float = 0.0,
     json_schema: Optional[dict] = None,
+    messages: Optional[list] = None,
+    stop: Optional[list] = None,
+    stream_id: str = DEFAULT_STREAM_ID,
 ) -> str:
     """Generate text using SSE streaming, populating the stream buffer in real-time.
 
-    Same interface as generate(), but tokens appear in _stream_buffer as they arrive.
-    Returns the final stripped content (same as generate()).
+    Same interface as generate(), but tokens appear in the stream slot as
+    they arrive. Returns the final stripped content (same as generate()).
 
     Args:
+        messages: Full OpenAI-style conversation to send instead of a
+            single prompt/system pair — this is what makes multi-turn chat
+            possible. When given, `prompt` is only used for the
+            dashboard-capture bookkeeping and `system_prompt` is prepended
+            if the list has no system message of its own.
+        stop: Optional stop sequences.
+        stream_id: Slot to stream into. Concurrent callers MUST pass
+            distinct ids; the default id is the legacy shared slot.
         thinking_budget: Extra tokens reserved for model reasoning/thinking.
             Added on top of max_new_tokens so thinking doesn't eat into
             the content budget. Set to 0 to use max_new_tokens as-is.
@@ -1706,7 +1775,7 @@ def generate_streaming(
             output to schema-valid JSON on local llama-server. Forces
             thinking OFF (see generate() for the rationale).
     """
-    global _stream_buffer, _stream_done, _last_system_prompt, _last_user_prompt, _last_thinking_text
+    global _last_system_prompt, _last_user_prompt, _last_thinking_text
     import re as _re
 
     if not is_loaded():
@@ -1734,16 +1803,42 @@ def generate_streaming(
 
     total_tokens = max_new_tokens + thinking_budget
 
-    with _stream_lock:
-        _stream_buffer = ""
-        _stream_done = False
+    _stream_write(stream_id, text="", done=False)
 
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
+    if messages:
+        # Caller supplied a conversation. Respect an existing system
+        # message; otherwise prepend ours so per-model thinking prep
+        # (which rewrites system_prompt above) is not silently dropped.
+        messages = list(messages)
+        if system_prompt and not any(m.get("role") == "system" for m in messages):
+            messages.insert(0, {"role": "system", "content": system_prompt})
+        _skip_user_message = True
+    else:
+        _skip_user_message = False
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
 
-    # Build user message — multimodal if images provided and vision is available
-    if image_paths and _vision_available:
+    # Build user message — multimodal if images provided and vision is
+    # available. Skipped when the caller supplied a full conversation:
+    # its last message already IS the user turn.
+    if _skip_user_message:
+        if image_paths and _vision_available and messages:
+            # Attach images to the final user turn of the conversation.
+            for _m in reversed(messages):
+                if _m.get("role") != "user":
+                    continue
+                parts = []
+                for img_path in image_paths:
+                    data_url = _image_to_data_url(img_path)
+                    if data_url:
+                        parts.append({"type": "image_url",
+                                      "image_url": {"url": data_url}})
+                if parts:
+                    parts.append({"type": "text", "text": _m.get("content") or ""})
+                    _m["content"] = parts
+                break
+    elif image_paths and _vision_available:
         content_parts = []
         for img_path in image_paths:
             data_url = _image_to_data_url(img_path)
@@ -1763,6 +1858,8 @@ def generate_streaming(
         "stream": True,
         "cache_prompt": False,  # Disable prompt caching — system prompt changes between calls
     }
+    if stop:
+        payload["stop"] = stop
     # Apply caller's penalty values FIRST so they're in the payload
     # before _apply_model_defaults runs. The registry-defaults pass below
     # then overrides them when the active model has tuned values
@@ -1839,7 +1936,7 @@ def generate_streaming(
         pass
 
     if _provider == "anthropic":
-        return _generate_streaming_anthropic(messages, total_tokens, max(temperature, 0.01), top_p)
+        return _generate_streaming_anthropic(messages, total_tokens, max(temperature, 0.01), top_p, stream_id=stream_id)
 
     raw_content = ""
     reasoning_content = ""
@@ -1872,8 +1969,7 @@ def generate_streaming(
                     if not in_reasoning:
                         in_reasoning = True
                     # Show reasoning in the stream buffer wrapped in <think> tags
-                    with _stream_lock:
-                        _stream_buffer = f"<think>{reasoning_content}</think>"
+                    _stream_write(stream_id, text=f"<think>{reasoning_content}</think>")
 
                 token = delta.get("content", "")
                 if token:
@@ -1883,20 +1979,17 @@ def generate_streaming(
                     if reasoning_content:
                         display = f"<think>{reasoning_content}</think>\n"
                     display += raw_content
-                    with _stream_lock:
-                        _stream_buffer = display
+                    _stream_write(stream_id, text=display)
             except Exception:
                 continue
 
     except requests.exceptions.RequestException as e:
         # Server socket died mid-stream (common: subprocess crash). Surface
         # the real cause so the Director run reports it instead of hanging.
-        with _stream_lock:
-            _stream_done = True
+        _stream_write(stream_id, done=True)
         raise _diagnose_llm_request_failure(e) from e
     except Exception:
-        with _stream_lock:
-            _stream_done = True
+        _stream_write(stream_id, done=True)
         raise
 
     # Capture thinking text for the pipeline dashboard. Two sources:
@@ -1925,9 +2018,8 @@ def generate_streaming(
     # Strip thinking/reasoning blocks for the return value
     content = _strip_thinking_tags(full_raw)
 
-    with _stream_lock:
-        _stream_buffer = full_raw  # keep full raw for the UI to show thinking
-        _stream_done = True
+    # keep full raw so the UI can show thinking
+    _stream_write(stream_id, text=full_raw, done=True)
 
     _reset_idle_timer()
     return content.strip()
@@ -1978,9 +2070,9 @@ def _generate_anthropic(messages: list, max_tokens: int, temperature: float, top
     return content.strip()
 
 
-def _generate_streaming_anthropic(messages: list, max_tokens: int, temperature: float, top_p: float) -> str:
+def _generate_streaming_anthropic(messages: list, max_tokens: int, temperature: float, top_p: float,
+                                  stream_id: str = DEFAULT_STREAM_ID) -> str:
     """Streaming generation via Anthropic Messages API with SSE."""
-    global _stream_buffer, _stream_done
     import re as _re
 
     system_text = ""
@@ -2034,21 +2126,16 @@ def _generate_streaming_anthropic(messages: list, max_tokens: int, temperature: 
                 if delta.get("type") == "text_delta":
                     text = delta.get("text", "")
                     raw_content += text
-                    with _stream_lock:
-                        _stream_buffer = raw_content
+                    _stream_write(stream_id, text=raw_content)
 
     except Exception as e:
         print(f"[LLM/Anthropic] Streaming error: {e}")
-        with _stream_lock:
-            _stream_buffer = raw_content or f"Error: {e}"
-            _stream_done = True
+        _stream_write(stream_id, text=raw_content or f"Error: {e}", done=True)
         return ""
 
     content = _strip_thinking_tags(raw_content)
 
-    with _stream_lock:
-        _stream_buffer = raw_content
-        _stream_done = True
+    _stream_write(stream_id, text=raw_content, done=True)
 
     _reset_idle_timer()
     return content.strip()

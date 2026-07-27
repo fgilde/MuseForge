@@ -6495,10 +6495,131 @@ def list_llm_models(provider: str = ""):
 
 
 @api.get("/api/v1/llm/stream-status")
-def llm_stream_status():
-    """Return current LLM streaming state for real-time display."""
+def llm_stream_status(stream_id: str = None):
+    """Return LLM streaming state for real-time display.
+
+    Without stream_id this reports the shared slot, which is what the
+    prompt-enhancer and Director pollers have always read. Chat and
+    Storywriter pass their own id so concurrent generations don't read
+    each other's tokens.
+    """
     from services import llm_service
-    return llm_service.get_stream_status()
+    return llm_service.get_stream_status(stream_id)
+
+
+# ============================================================================
+# Chat threads (Text mode) — server-side conversations so a reload, a second
+# tab or an MCP client all see the same state.
+# ============================================================================
+
+
+def _chat_dir() -> str:
+    return _workspace_dir()
+
+
+@api.get("/api/v1/chat/threads")
+def chat_list_threads():
+    """Thread summaries, newest first (no message bodies)."""
+    from services import chat_store
+    return {"threads": chat_store.list_threads(_chat_dir())}
+
+
+@api.post("/api/v1/chat/threads")
+async def chat_create_thread(request: Request):
+    """Create an empty thread. Body: {title?, system_prompt?, model_id?}."""
+    from services import chat_store
+    body = await request.json() if await request.body() else {}
+    return chat_store.create_thread(
+        _chat_dir(),
+        title=body.get("title", ""),
+        system_prompt=body.get("system_prompt", ""),
+        model_id=body.get("model_id", ""),
+    )
+
+
+@api.get("/api/v1/chat/threads/{tid}")
+def chat_get_thread(tid: str):
+    """Full thread including all messages."""
+    from services import chat_store
+    thread = chat_store.load_thread(_chat_dir(), tid)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return thread
+
+
+@api.delete("/api/v1/chat/threads/{tid}")
+def chat_delete_thread(tid: str):
+    from services import chat_store
+    if not chat_store.delete_thread(_chat_dir(), tid):
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return {"status": "deleted", "id": tid}
+
+
+@api.put("/api/v1/chat/threads/{tid}")
+async def chat_update_thread(tid: str, request: Request):
+    """Rename a thread or change its system prompt / model."""
+    from services import chat_store
+    out_dir = _chat_dir()
+    thread = chat_store.load_thread(out_dir, tid)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    body = await request.json()
+    for key in ("title", "system_prompt", "model_id"):
+        if key in body:
+            thread[key] = body[key]
+    chat_store.save_thread(out_dir, thread)
+    return thread
+
+
+@api.post("/api/v1/chat/threads/{tid}/messages")
+async def chat_send_message(tid: str, request: Request):
+    """Send a message and stream the reply.
+
+    Body: {content, images?, max_new_tokens?, temperature?, top_p?}.
+    Returns the assistant message once complete; poll
+    /api/v1/llm/stream-status?stream_id=chat-<tid> while it runs to render
+    tokens as they arrive.
+    """
+    from services import chat_store, llm_service
+
+    out_dir = _chat_dir()
+    thread = chat_store.load_thread(out_dir, tid)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    body = await request.json()
+    content = (body.get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required")
+
+    chat_store.append_message(thread, "user", content)
+    # First message doubles as the thread title until the user renames it.
+    if thread.get("title") in ("", "New chat"):
+        thread["title"] = chat_store.title_from_first_message(content)
+    chat_store.save_thread(out_dir, thread)
+
+    _ensure_llm_loaded()
+    stream_id = f"chat-{tid}"
+    try:
+        text = await asyncio.to_thread(
+            llm_service.generate_streaming,
+            prompt=content,
+            system_prompt=thread.get("system_prompt", ""),
+            messages=chat_store.build_messages(thread),
+            max_new_tokens=int(body.get("max_new_tokens", 2048)),
+            temperature=float(body.get("temperature", 0.7)),
+            top_p=float(body.get("top_p", 0.9)),
+            image_paths=body.get("images") or None,
+            stream_id=stream_id,
+        )
+    except Exception as e:
+        # Keep the user turn — the conversation stays intact and the user
+        # can retry without retyping.
+        raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
+
+    msg = chat_store.append_message(thread, "assistant", text, stream_id=stream_id)
+    chat_store.save_thread(out_dir, thread)
+    return {"message": msg, "thread_id": tid, "stream_id": stream_id}
 
 
 def _ensure_llm_loaded():
@@ -12871,9 +12992,15 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
     if not os.path.isdir(out_dir):
         return {"outputs": [], "total": 0}
 
-    media_exts = {".mp4", ".webm", ".gif", ".png", ".jpg", ".jpeg", ".webp", ".wav", ".mp3"}
+    # .txt/.md are listed too: the Storywriter writes prose into the
+    # workspace, and a story is as much an output as a clip. Internal
+    # state files (_chat_*.json, _story_*.json, ...) are JSON and never
+    # match, so they stay invisible here.
+    media_exts = {".mp4", ".webm", ".gif", ".png", ".jpg", ".jpeg", ".webp",
+                  ".wav", ".mp3", ".txt", ".md"}
     video_exts = {".mp4", ".webm", ".gif"}
     audio_exts = {".wav", ".mp3"}
+    text_exts = {".txt", ".md"}
 
     favs = _load_favorites()
 
@@ -12933,7 +13060,10 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False, 
     # Second pass: build the file list using the cached sidecar data.
     files = []
     for name, filepath, ext, mtime in raw_entries:
-        ftype = "video" if ext in video_exts else ("audio" if ext in audio_exts else "image")
+        ftype = ("video" if ext in video_exts
+                 else "audio" if ext in audio_exts
+                 else "text" if ext in text_exts
+                 else "image")
         cached = sidecar_cache.get(name) or {}
         mode = cached.get("mode")
         edit_sub_mode = cached.get("edit_sub_mode")
