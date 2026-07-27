@@ -13577,8 +13577,22 @@ if __name__ == "__main__":
     except Exception:
         pass
 
+    # Starlette's Mount only serves the MCP sub-app under "/mcp/" — a
+    # bare "/mcp" (what MCP clients are configured with) misses it. This
+    # thin ASGI shim normalizes the path so both spellings work.
+    class _McpPathShim:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") == "http" and scope.get("path") == "/mcp":
+                scope = dict(scope)
+                scope["path"] = "/mcp/"
+                scope["raw_path"] = b"/mcp/"
+            await self.app(scope, receive, send)
+
     try:
-        uvicorn.run(api, host=host, port=port)
+        uvicorn.run(_McpPathShim(api), host=host, port=port)
     except OSError as e:
         # The probe above narrows this to a genuine race (port taken in the
         # window between probe and uvicorn's own bind). Still fail loudly and
