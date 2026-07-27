@@ -6523,6 +6523,184 @@ def llm_stream_status(stream_id: str = None):
 
 
 # ============================================================================
+# AudioBook Creator — projects live as JSON in the workspace; the service
+# layer in services/audiobook/ owns the data model, import, TTS mapping and
+# ffmpeg planning. These endpoints are the transport plus the job wiring.
+# ============================================================================
+
+
+def _ab_dir(workspace: str = None) -> str:
+    return _workspace_dir(workspace)
+
+
+def _ab_load(pid: str, workspace: str = None):
+    """Load a project or 404. Returns (out_dir, project)."""
+    from services.audiobook import store as ab_store
+    out_dir = _ab_dir(workspace)
+    project = ab_store.load_project(out_dir, pid)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    return out_dir, project
+
+
+@api.get("/api/v1/audiobook/projects")
+def ab_list_projects(workspace: str = None):
+    """Project summaries in the workspace."""
+    from services.audiobook import store as ab_store
+    return {"projects": ab_store.list_projects(_ab_dir(workspace))}
+
+
+@api.post("/api/v1/audiobook/projects")
+async def ab_create_project(request: Request):
+    """Create a project. Body: {title?, language?, workspace?}."""
+    from services.audiobook import store as ab_store
+    body = await request.json() if await request.body() else {}
+    project = ab_store.create_project(
+        _ab_dir(body.get("workspace")),
+        title=body.get("title") or "Untitled audiobook",
+        language=body.get("language") or "en",
+    )
+    return project.to_dict()
+
+
+@api.get("/api/v1/audiobook/projects/{pid}")
+def ab_get_project(pid: str, workspace: str = None):
+    _out_dir, project = _ab_load(pid, workspace)
+    return project.to_dict()
+
+
+@api.delete("/api/v1/audiobook/projects/{pid}")
+def ab_delete_project(pid: str, workspace: str = None):
+    """Delete the project file. Rendered audio stays — it is a normal
+    workspace output and removing it is a separate, explicit action."""
+    from services.audiobook import store as ab_store
+    if not ab_store.delete_project(_ab_dir(workspace), pid):
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    return {"status": "deleted", "id": pid}
+
+
+@api.put("/api/v1/audiobook/projects/{pid}")
+async def ab_update_project(pid: str, request: Request):
+    """Replace the mutable parts of a project.
+
+    Body may carry any of: title, language, chapters, voice_profiles, sfx,
+    music, default_profile_id, render_settings. Everything goes through
+    store.update_project so a concurrent render cannot lose its writes,
+    and the result is re-sanitised on the way in and out.
+    """
+    from services.audiobook import model as ab_model, store as ab_store
+
+    body = await request.json()
+    out_dir = _ab_dir(body.get("workspace"))
+    fields = ("title", "language", "default_profile_id", "render_settings")
+    lists = {"chapters": ab_model.Chapter, "voice_profiles": ab_model.VoiceProfile,
+             "sfx": ab_model.SfxAsset, "music": ab_model.MusicAsset}
+
+    def _apply(project):
+        for key in fields:
+            if key in body:
+                setattr(project, key, body[key])
+        for key, cls in lists.items():
+            if key in body:
+                setattr(project, key, [cls.from_dict(item) if isinstance(item, dict) else item
+                                       for item in (body[key] or [])])
+
+    project = ab_store.update_project(out_dir, pid, _apply)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    return project.to_dict()
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/import")
+async def ab_import_text(pid: str, request: Request):
+    """Import a document into the project as chapters.
+
+    Body: {path, auto_split?, profile_id?, replace?, workspace?}. `path` is
+    a file already on the server — upload it via /api/v1/upload first.
+    replace=true swaps the whole chapter list, otherwise chapters append.
+    """
+    from services.audiobook import importer as ab_importer, store as ab_store
+
+    body = await request.json()
+    path = body.get("path") or ""
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    safe = _safe_join(_workspace_dir(body.get("workspace")), os.path.basename(path))
+    candidate = path if os.path.isfile(path) else safe
+    if not candidate or not os.path.isfile(candidate):
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+
+    out_dir = _ab_dir(body.get("workspace"))
+    try:
+        result = ab_importer.import_document(
+            candidate,
+            profile_id=body.get("profile_id"),
+            auto_split=bool(body.get("auto_split", True)),
+        )
+    except Exception as e:
+        # Missing optional parser (python-docx / pypdf / EbookLib) surfaces
+        # here with the package name in the message — pass it through.
+        raise HTTPException(status_code=400, detail=str(e))
+
+    chapters = result.get("chapters") or []
+
+    def _apply(project):
+        if body.get("replace"):
+            project.chapters = list(chapters)
+        else:
+            project.chapters = list(project.chapters) + list(chapters)
+        if result.get("language"):
+            project.language = result["language"]
+
+    project = ab_store.update_project(out_dir, pid, _apply)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    return {"project": project.to_dict(),
+            "imported_chapters": len(chapters),
+            "language": result.get("language")}
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/plan")
+async def ab_plan_chapter(pid: str, request: Request):
+    """Dry-run the TTS mapping for a chapter.
+
+    Body: {chapter_id | chapter_index, workspace?}. Returns one plan per
+    speech run plus the errors that would block a render (a paragraph with
+    no voice, a model that needs a reference clip, ...) so the UI can show
+    them before the user waits on a job.
+    """
+    from services.audiobook import tts as ab_tts
+
+    body = await request.json()
+    _out_dir, project = _ab_load(pid, body.get("workspace"))
+    chapter = _ab_pick_chapter(project, body)
+    plans, errors = ab_tts.plan_chapter(project, chapter)
+    return {
+        "chapter_id": chapter.id,
+        "runs": [p.to_dict() for p in plans],
+        "errors": errors,
+        "ready": not errors,
+    }
+
+
+def _ab_pick_chapter(project, body: dict):
+    """Resolve chapter_id or chapter_index from a request body."""
+    cid = body.get("chapter_id")
+    if cid:
+        chapter = project.chapter(cid)
+        if chapter is None:
+            raise HTTPException(status_code=404, detail=f"Chapter {cid} not found")
+        return chapter
+    idx = body.get("chapter_index")
+    if idx is None:
+        raise HTTPException(status_code=400, detail="chapter_id or chapter_index is required")
+    try:
+        return project.chapters[int(idx)]
+    except (ValueError, TypeError, IndexError):
+        raise HTTPException(status_code=404, detail=f"Chapter index {idx} out of range")
+
+
+# ============================================================================
 # Chat threads (Text mode) — server-side conversations so a reload, a second
 # tab or an MCP client all see the same state.
 # ============================================================================
