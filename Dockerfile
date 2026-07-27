@@ -32,7 +32,9 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 
 ENV TORCH_CUDA_ARCH_LIST="${CUDA_ARCHITECTURES}"
 ENV FORCE_CUDA="1"
-ENV MAX_JOBS="4"
+# ponytail: 2 parallel nvcc jobs — each eats ~8 GB RAM compiling the sage
+# kernels; raise if the build machine has >48 GB.
+ENV MAX_JOBS="2"
 
 # SageAttention's setup.py detects GPUs at build time — there are none in a
 # Docker build, so patch it to use the arch list from the env var instead.
@@ -68,15 +70,18 @@ RUN git clone https://github.com/thu-ml/SageAttention.git /tmp/sageattention && 
     pip wheel --no-build-isolation --no-deps -w /wheels .
 
 # ============================================================================
-# Stage 3 — runtime image
+# Stage 3 — runtime image (build with --target runtime to skip SageAttention;
+# the app then falls back to sdpa attention)
 # ============================================================================
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
+# build-essential: insightface ships as sdist on Linux (needs a C++
+# compiler) and torch.compile needs a C compiler at runtime too.
 RUN apt-get update && \
-    apt-get install -y python3 python3-pip git wget curl libgl1 libglib2.0-0 ffmpeg && \
+    apt-get install -y python3 python3-pip build-essential git wget curl libgl1 libglib2.0-0 ffmpeg && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -89,9 +94,6 @@ RUN pip install --no-cache-dir torch==2.10.0+cu128 torchvision==0.25.0+cu128 tor
 
 COPY app/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
-
-RUN --mount=type=bind,from=sage-build,source=/wheels,target=/wheels \
-    pip install --no-cache-dir /wheels/*.whl
 
 COPY VERSION ./VERSION
 COPY app/ ./app/
@@ -111,3 +113,10 @@ WORKDIR /workspace/app
 # --settings stays at the default app/settings (wgp only auto-creates that
 # relative path); persistence comes from the volume mounts in compose.
 CMD ["python3", "launch.py", "--config", "/data/config"]
+
+# ============================================================================
+# Stage 4 (default) — runtime + SageAttention kernels
+# ============================================================================
+FROM runtime
+RUN --mount=type=bind,from=sage-build,source=/wheels,target=/wheels \
+    pip install --no-cache-dir /wheels/*.whl

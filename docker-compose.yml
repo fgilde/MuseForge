@@ -1,7 +1,9 @@
 services:
   amazevideogen:
-    image: ghcr.io/OWNER/amazevideogen:latest   # or: build: .
-    # build: .
+    build: .
+    image: amazevideogen:latest
+    # Prebuilt image instead of building locally:
+    # image: ghcr.io/OWNER/amazevideogen:latest
     container_name: amazevideogen
     restart: unless-stopped
     ports:
