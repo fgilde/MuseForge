@@ -738,3 +738,161 @@ input[type="range"]::-webkit-slider-thumb {
     height: 20px;
   }
 }
+
+/* ─── Aurora theme (glassmorphism, dark) ─────────────────────────────────
+ * MuseForge's default look. A fixed aurora gradient lives on <body>;
+ * every surface token is translucent so the glow shines through, and
+ * structural panels (sidebar, dialogs via .glass-panel) add real
+ * backdrop blur. Alpha stays >= 0.8 on content surfaces so text
+ * contrast holds — the strong transparency is reserved for the
+ * showpiece glass panels.
+ */
+[data-theme="aurora"] {
+  --color-bg-primary: rgba(7, 10, 20, 0.55);
+  --color-bg-secondary: rgba(15, 20, 35, 0.82);
+  --color-bg-tertiary: rgba(23, 30, 50, 0.85);
+  --color-bg-hover: rgba(38, 48, 75, 0.9);
+  --color-bg-active: rgba(51, 63, 97, 0.95);
+
+  --color-border: rgba(126, 150, 199, 0.22);
+  --color-border-light: rgba(148, 178, 235, 0.34);
+
+  --color-text-primary: #edf2fc;
+  --color-text-secondary: #9aa8c7;
+  --color-text-muted: #8b98b8;
+
+  /* Cyan action / emerald success — cool glass identity */
+  --color-accent-blue: #06b6d4;
+  --color-accent-blue-hover: #0891b2;
+  --color-accent-green: #10b981;
+  --color-accent-green-hover: #34d399;
+
+  --color-accent-warm: #a78bfa;
+  --color-accent-warm-hover: #c4b5fd;
+
+  --color-accent-cool-from: #22d3ee;
+  --color-accent-cool-to: #818cf8;
+
+  /* Indigo -> cyan sweep for primary actions */
+  --color-gradient-cta-from: #6366f1;
+  --color-gradient-cta-to: #06b6d4;
+  --color-gradient-toggle-from: #6366f1;
+  --color-gradient-toggle-to: #06b6d4;
+  --color-gradient-active-frame-from: #22d3ee;
+  --color-gradient-active-frame-to: #a78bfa;
+
+  /* Solid dark letterbox — media must not sit on translucency */
+  --color-media-canvas: #0b0f1c;
+
+  --shadow-accent-glow: 0 0 18px rgba(34, 211, 238, 0.35);
+  --shadow-active-ring: 0 0 10px rgba(34, 211, 238, 0.25);
+
+  /* Glass tokens consumed by .glass-panel / aside below */
+  --glass-bg: rgba(17, 24, 42, 0.65);
+  --glass-border: rgba(148, 178, 235, 0.28);
+}
+
+[data-theme="aurora"] body {
+  background:
+    radial-gradient(90rem 60rem at 12% -10%, rgba(20, 184, 166, 0.16), transparent 60%),
+    radial-gradient(80rem 55rem at 105% 15%, rgba(99, 102, 241, 0.18), transparent 60%),
+    radial-gradient(70rem 60rem at 50% 115%, rgba(168, 85, 247, 0.12), transparent 60%),
+    #05070f;
+  background-attachment: fixed;
+}
+
+/* ─── Frost theme (glassmorphism, light) ─────────────────────────────────
+ * Aurora in daylight: pastel gradient canvas, milky translucent
+ * panels, deep teal accents. Chip/indicator stops reuse the shared
+ * light-theme calibration (see daylight/ivory).
+ */
+[data-theme="frost"] {
+  color-scheme: light;
+
+  --color-bg-primary: rgba(240, 245, 252, 0.6);
+  --color-bg-secondary: rgba(255, 255, 255, 0.78);
+  --color-bg-tertiary: rgba(255, 255, 255, 0.9);
+  --color-bg-hover: rgba(226, 233, 245, 0.9);
+  --color-bg-active: rgba(209, 220, 238, 0.95);
+
+  --color-border: rgba(100, 130, 180, 0.25);
+  --color-border-light: rgba(90, 120, 170, 0.4);
+
+  --color-text-primary: #16202f;
+  --color-text-secondary: #4a5a74;
+  --color-text-muted: #5d6c86;
+
+  /* cyan-700 action / teal-700 success — white text passes AA on both */
+  --color-accent-blue: #0e7490;
+  --color-accent-blue-hover: #155e75;
+  --color-accent-green: #0f766e;
+  --color-accent-green-hover: #115e59;
+
+  --color-accent-warm: #7c3aed;
+  --color-accent-warm-hover: #6d28d9;
+
+  --color-accent-cool-from: #0891b2;
+  --color-accent-cool-to: #6366f1;
+
+  --color-indicator-success: #15803d;
+  --color-indicator-warning: #b45309;
+
+  /* Shared light chip stops (same as daylight/ivory) */
+  --color-chip-yellow: #a16207;
+  --color-chip-green: #15803d;
+  --color-chip-cyan: #0e7490;
+  --color-chip-blue: #1d4ed8;
+  --color-chip-purple: #7e22ce;
+  --color-chip-pink: #be185d;
+  --color-chip-teal: #0f766e;
+  --color-chip-orange: #c2410c;
+  --color-chip-gray: #4b5563;
+  --color-chip-red: #b91c1c;
+
+  --color-gradient-cta-from: #0e7490;
+  --color-gradient-cta-to: #6366f1;
+  --color-gradient-toggle-from: #0e7490;
+  --color-gradient-toggle-to: #6366f1;
+  --color-gradient-active-frame-from: #0891b2;
+  --color-gradient-active-frame-to: #8b5cf6;
+
+  --color-media-canvas: #101625;
+
+  --shadow-accent-glow: 0 2px 12px rgba(14, 116, 144, 0.25);
+  --shadow-active-ring: 0 0 0 2px rgba(14, 116, 144, 0.35);
+
+  --glass-bg: rgba(255, 255, 255, 0.6);
+  --glass-border: rgba(255, 255, 255, 0.75);
+}
+
+[data-theme="frost"] body {
+  background:
+    radial-gradient(90rem 60rem at 10% -10%, rgba(45, 212, 191, 0.28), transparent 60%),
+    radial-gradient(80rem 55rem at 105% 20%, rgba(129, 140, 248, 0.25), transparent 60%),
+    radial-gradient(70rem 60rem at 50% 115%, rgba(192, 132, 252, 0.18), transparent 60%),
+    #eef3fb;
+  background-attachment: fixed;
+}
+
+/* ─── Glass helpers ──────────────────────────────────────────────────────
+ * .glass-panel is used by floating dialogs (Settings). In non-glass
+ * themes it degrades to a normal solid panel; Aurora/Frost add the
+ * translucency + blur. The sidebar <aside> gets the same treatment
+ * scoped to the glass themes only.
+ */
+.glass-panel {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+}
+[data-theme="aurora"] .glass-panel,
+[data-theme="frost"] .glass-panel {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: blur(24px) saturate(1.3);
+  backdrop-filter: blur(24px) saturate(1.3);
+}
+[data-theme="aurora"] aside,
+[data-theme="frost"] aside {
+  -webkit-backdrop-filter: blur(24px) saturate(1.3);
+  backdrop-filter: blur(24px) saturate(1.3);
+}

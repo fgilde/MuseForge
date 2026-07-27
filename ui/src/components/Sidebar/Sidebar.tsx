@@ -289,7 +289,7 @@ export function Sidebar() {
 
   // Desktop: static sidebar
   return (
-    <aside className="w-[420px] h-full bg-bg-secondary border-r border-border flex flex-col shrink-0">
+    <aside className="w-[420px] h-full bg-bg-secondary border-l border-border flex flex-col shrink-0">
       {/* Header */}
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">

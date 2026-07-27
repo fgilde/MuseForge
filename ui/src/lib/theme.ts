@@ -25,8 +25,8 @@
  * the index.html pre-mount script.
  */
 
-export type ThemeId = 'default' | 'golden-hour' | 'onyx' | 'ivory' | 'daylight' | 'pearl'
-export type FamilyId = 'default' | 'golden-hour' | 'onyx'
+export type ThemeId = 'aurora' | 'default' | 'golden-hour' | 'onyx' | 'frost' | 'ivory' | 'daylight' | 'pearl'
+export type FamilyId = 'aurora' | 'default' | 'golden-hour' | 'onyx'
 export type ThemeMode = 'dark' | 'light' | 'auto'
 
 export interface ThemeVariant {
@@ -50,10 +50,18 @@ export interface ThemeFamily {
  * break — only the LABEL says 'Classic'. */
 export const FAMILIES: ThemeFamily[] = [
   {
+    id: 'aurora',
+    label: 'Aurora Glass',
+    description:
+      'Default. Frosted-glass panels over an aurora gradient — cyan and indigo glow at night; milky glass on pastel light in daylight.',
+    dark: { id: 'aurora', swatch: { bg: '#05070f', surface: '#131a2b', accent: '#22d3ee' } },
+    light: { id: 'frost', swatch: { bg: '#eef3fb', surface: '#ffffff', accent: '#0e7490' } },
+  },
+  {
     id: 'golden-hour',
     label: 'Golden Hour',
     description:
-      'Default. Warm cinematic palette — near-black surfaces and amber highlights at night; warm paper and burnt orange in daylight.',
+      'Warm cinematic palette — near-black surfaces and amber highlights at night; warm paper and burnt orange in daylight.',
     dark: { id: 'golden-hour', swatch: { bg: '#0a0a0a', surface: '#181818', accent: '#f97316' } },
     light: { id: 'ivory', swatch: { bg: '#f2ede2', surface: '#f9f6ee', accent: '#c2410c' } },
   },
@@ -77,6 +85,8 @@ export const FAMILIES: ThemeFamily[] = [
 
 /** Any theme id (either variant) -> its family. */
 const FAMILY_OF: Record<ThemeId, FamilyId> = {
+  aurora: 'aurora',
+  frost: 'aurora',
   'golden-hour': 'golden-hour',
   ivory: 'golden-hour',
   default: 'default',
@@ -85,7 +95,7 @@ const FAMILY_OF: Record<ThemeId, FamilyId> = {
   pearl: 'onyx',
 }
 
-const LIGHT_IDS: ReadonlySet<string> = new Set(['ivory', 'daylight', 'pearl'])
+const LIGHT_IDS: ReadonlySet<string> = new Set(['frost', 'ivory', 'daylight', 'pearl'])
 
 export interface ThemePrefs {
   mode: ThemeMode
@@ -100,7 +110,7 @@ const INTERIM_DARK_KEY = 'museforge-theme-dark'
  * with the resolved theme so downgrades show something sensible. */
 const LEGACY_KEY = 'museforge-theme'
 
-const DEFAULT_PREFS: ThemePrefs = { mode: 'dark', family: 'golden-hour' }
+const DEFAULT_PREFS: ThemePrefs = { mode: 'dark', family: 'aurora' }
 
 function isFamily(id: string | null): id is FamilyId {
   return !!id && FAMILIES.some(f => f.id === id)

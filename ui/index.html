@@ -25,15 +25,17 @@
       (function () {
         // Family -> its light-variant CSS id. Keys double as the
         // valid family-id set.
-        var LIGHT_OF = { 'golden-hour': 'ivory', 'default': 'daylight', 'onyx': 'pearl' };
+        var LIGHT_OF = { 'aurora': 'frost', 'golden-hour': 'ivory', 'default': 'daylight', 'onyx': 'pearl' };
         // Any theme id (either variant) -> its family.
-        var FAMILY_OF = { 'golden-hour': 'golden-hour', 'ivory': 'golden-hour',
+        var FAMILY_OF = { 'aurora': 'aurora', 'frost': 'aurora',
+                          'golden-hour': 'golden-hour', 'ivory': 'golden-hour',
                           'default': 'default', 'daylight': 'default',
                           'onyx': 'onyx', 'pearl': 'onyx' };
         // Page-background hex per theme, for the browser-chrome tint.
-        var bg = { 'golden-hour': '#0a0a0a', 'default': '#0a0a0f', 'onyx': '#000000',
+        var bg = { 'aurora': '#05070f', 'frost': '#eef3fb',
+                   'golden-hour': '#0a0a0a', 'default': '#0a0a0f', 'onyx': '#000000',
                    'ivory': '#f2ede2', 'daylight': '#f4f5f7', 'pearl': '#f2f2f2' };
-        var mode = 'dark', family = 'golden-hour';
+        var mode = 'dark', family = 'aurora';
         try {
           var legacy = localStorage.getItem('museforge-theme');
           if (legacy && !FAMILY_OF[legacy]) legacy = null;
@@ -43,7 +45,7 @@
           var f = localStorage.getItem('museforge-theme-family');
           var d = localStorage.getItem('museforge-theme-dark'); // interim two-picker build
           family = LIGHT_OF[f] ? f : LIGHT_OF[d] ? d
-                 : legacy ? FAMILY_OF[legacy] : 'golden-hour';
+                 : legacy ? FAMILY_OF[legacy] : 'aurora';
         } catch (e) {
           // localStorage blocked (private mode etc) — fall through with
           // the hardcoded defaults so the user still gets the intended look.

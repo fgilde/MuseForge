@@ -76,8 +76,9 @@ function App() {
         </header>
       )}
 
-      <Sidebar />
+      {/* MuseForge layout: content first, control sidebar docked right */}
       <MainContent />
+      <Sidebar />
       <SettingsDrawer />
       <LoraBrowser />
       <DirectorDashboard />

@@ -4,25 +4,18 @@ import { SystemSettingsPanel } from './SystemSettingsPanel'
 import { ServicesSettingsPanel } from './ServicesSettingsPanel'
 
 /**
- * Settings drawer — global panel for hardware/perf and external-service
- * configuration. Two tabs in both Studio and Director modes:
+ * Settings dialog — global panel for hardware/perf and external-service
+ * configuration, presented as a centered animated glass modal. Two tabs
+ * in both Studio and Director modes:
  *
  *   Performance    — VRAM coefficient, profile, hardware tier, etc.
  *                    (mounts <SystemSettingsPanel />)
  *   Integrations   — LLM provider, API keys, NSFW master gate, etc.
  *                    (mounts <ServicesSettingsPanel />)
  *
- * Director-mode-specific controls used to live in a third "Parameters"
- * tab here, but everything in that tab was either:
- *   - a duplicate of Studio's selection (image/video model, LoRAs)
- *   - a duplicate of Integrations (LLM model + device)
- *   - or a post-processing knob that's now in the Director chat sidebar
- *     under the "Advanced" accordion.
- *
- * Removing the tab makes Settings mode-agnostic — same layout in Studio
- * and Director — which matches the user's mental model of Settings as
- * "global preferences" vs Director's per-shoot setup which lives in
- * the chat sidebar where the work is happening.
+ * The dialog stays mounted and animates via opacity/scale so opening
+ * feels instant and closing doesn't unmount mid-edit; pointer-events
+ * are disabled while hidden.
  */
 export function SettingsDrawer() {
   const settingsOpen = useStore(s => s.settingsOpen)
@@ -36,21 +29,21 @@ export function SettingsDrawer() {
   ]
 
   return (
-    <>
-      {/* Backdrop */}
-      {settingsOpen && (
-        <div
-          className="fixed inset-0 bg-black/40 z-40"
-          onClick={() => setSettingsOpen(false)}
-        />
-      )}
+    <div className={`fixed inset-0 z-50 flex items-center justify-center p-4 transition-opacity duration-300 ${
+      settingsOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'
+    }`}>
+      {/* Backdrop — dim + blur everything behind the dialog */}
+      <div
+        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        onClick={() => setSettingsOpen(false)}
+      />
 
-      {/* Drawer */}
-      <div className={`fixed top-0 left-0 h-full w-full md:w-[420px] bg-bg-secondary border-r border-border z-50 transform transition-transform duration-300 ease-in-out ${
-        settingsOpen ? 'translate-x-0' : '-translate-x-full'
+      {/* Dialog */}
+      <div className={`relative glass-panel w-full md:w-[560px] max-h-[85vh] rounded-2xl shadow-2xl flex flex-col transform transition-all duration-300 ease-out ${
+        settingsOpen ? 'scale-100 translate-y-0' : 'scale-95 translate-y-3'
       }`}>
         {/* Header */}
-        <div className="px-5 py-3 border-b border-border flex items-center justify-between">
+        <div className="px-5 py-3 border-b border-border flex items-center justify-between shrink-0">
           <h2 className="font-semibold text-sm">Settings</h2>
           <button
             onClick={() => setSettingsOpen(false)}
@@ -61,7 +54,7 @@ export function SettingsDrawer() {
         </div>
 
         {/* Tab Bar */}
-        <div className="px-5 pt-3">
+        <div className="px-5 pt-3 shrink-0">
           <div className="flex bg-bg-tertiary rounded-lg p-0.5 border border-border">
             {tabs.map(tab => (
               <button
@@ -80,7 +73,7 @@ export function SettingsDrawer() {
         </div>
 
         {/* Content */}
-        <div className="overflow-y-auto h-[calc(100%-96px)] px-5 py-4 space-y-5">
+        <div className="overflow-y-auto px-5 py-4 space-y-5 min-h-0">
           {settingsTab === 'performance' && (
             <SystemSettingsPanel />
           )}
@@ -90,6 +83,6 @@ export function SettingsDrawer() {
           )}
         </div>
       </div>
-    </>
+    </div>
   )
 }
