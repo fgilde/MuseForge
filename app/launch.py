@@ -13445,6 +13445,32 @@ _mimetypes.add_type("text/javascript", ".mjs")
 _mimetypes.add_type("text/css", ".css")
 _mimetypes.add_type("image/svg+xml", ".svg")
 
+# ── MCP server ─────────────────────────────────────────────────────────
+# Model Context Protocol endpoint at /mcp (streamable HTTP) so AI agents
+# can drive MuseForge — see services/mcp_server.py for the tool surface.
+# Mounted BEFORE the StaticFiles catch-all so /mcp wins routing. Failure
+# to mount (missing dep, version drift) degrades gracefully: the UI and
+# REST API work without it.
+try:
+    from contextlib import AsyncExitStack as _AsyncExitStack
+
+    from services import mcp_server as _mcp_mod
+
+    api.mount("/mcp", _mcp_mod.mcp.streamable_http_app())
+    _mcp_stack = _AsyncExitStack()
+
+    @api.on_event("startup")
+    async def _mcp_start():
+        await _mcp_stack.enter_async_context(_mcp_mod.mcp.session_manager.run())
+
+    @api.on_event("shutdown")
+    async def _mcp_stop():
+        await _mcp_stack.aclose()
+
+    print("[MuseForge] MCP server mounted at /mcp")
+except Exception as _mcp_e:  # noqa: BLE001 — optional integration
+    print(f"[MuseForge] WARNING: MCP server not mounted: {_mcp_e}")
+
 _ui_dist = os.path.normpath(os.path.join(_app_dir, "..", "ui", "dist"))
 if os.path.isdir(_ui_dist):
     api.mount("/", StaticFiles(directory=_ui_dist, html=True))
@@ -13544,6 +13570,12 @@ if __name__ == "__main__":
                 return True
             return not any(noisy in msg for noisy in _UVICORN_POLL_NOISE)
     _logging.getLogger("uvicorn.access").addFilter(_SilencePollingAccessLog())
+
+    try:
+        from services import mcp_server as _mcp_port_mod
+        _mcp_port_mod.set_api_port(port)
+    except Exception:
+        pass
 
     try:
         uvicorn.run(api, host=host, port=port)

@@ -163,6 +163,19 @@ Open the web UI (default <http://localhost:7860>).
 
 The Edit-mode Inpaint feature needs a separate SAM 3.1 segmentation service that is **not bundled** (it requires its own Python 3.12 environment and several GB of extra dependencies, and is currently unsupported in the Docker image). To set it up on a manual install: create a Python 3.12 venv at `app/services/sam/env` and install `app/services/sam/requirements.txt` into it — the backend starts the service on demand. All other features work without it.
 
+## API & MCP — drive MuseForge from code or AI agents
+
+Everything the UI does goes through a REST API (`/api/v1`, interactive docs
+at <http://localhost:7860/docs>), and an **MCP endpoint** at
+<http://localhost:7860/mcp> exposes the generation workflow as tools for AI
+agents (list models, generate, poll jobs, fetch outputs, prompt enhancement):
+
+```bash
+claude mcp add --transport http museforge http://localhost:7860/mcp
+```
+
+See [docs/API.md](docs/API.md) for details.
+
 ## Sharing on the local network
 
 The server binds to `127.0.0.1` by default; set the `SERVER_NAME` environment variable to `0.0.0.0` for LAN access (`SERVER_PORT` picks the port). In Docker the container already binds `0.0.0.0` internally — control exposure via the compose port mapping (`127.0.0.1:7860:7860` for loopback-only). Note the API has no authentication; don't expose it to untrusted networks.

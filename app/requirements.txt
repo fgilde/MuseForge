@@ -109,6 +109,9 @@ wetext==0.1.2
 # from these very common Gemma / Qwen JSON output bugs.
 json_repair==0.59.5
 
+# MCP endpoint (/mcp) so AI agents can drive MuseForge — services/mcp_server.py
+mcp>=1.9,<2
+
 # Optional / commented out
 # transformers==4.46.3  # for llamallava pre-patch
 # rembg==2.0.65         # non-GPU fallback
