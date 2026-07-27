@@ -5,8 +5,8 @@ Model Context Protocol (MCP) endpoint so AI agents can drive it directly.
 
 ## REST API
 
-Base URL: `http://localhost:7860/api/v1`. Interactive OpenAPI docs with the
-full endpoint list and schemas: **`http://localhost:7860/docs`**.
+Base URL: `http://localhost:7861/api/v1`. Interactive OpenAPI docs with the
+full endpoint list and schemas: **`http://localhost:7861/docs`**.
 
 The core generation workflow:
 
@@ -33,13 +33,13 @@ Don't expose the port to untrusted networks.
 
 ## MCP (Model Context Protocol)
 
-Endpoint: **`http://localhost:7860/mcp`** (streamable HTTP transport, same
+Endpoint: **`http://localhost:7861/mcp`** (streamable HTTP transport, same
 port as the UI — no extra process).
 
 Example client config (Claude Code):
 
 ```bash
-claude mcp add --transport http museforge http://localhost:7860/mcp
+claude mcp add --transport http museforge http://localhost:7861/mcp
 ```
 
 Or in an `mcp.json`-style config:
@@ -47,7 +47,7 @@ Or in an `mcp.json`-style config:
 ```json
 {
   "mcpServers": {
-    "museforge": { "type": "http", "url": "http://localhost:7860/mcp" }
+    "museforge": { "type": "http", "url": "http://localhost:7861/mcp" }
   }
 }
 ```
@@ -78,7 +78,7 @@ environment variable (see docker-compose.yml) and every MCP request must
 carry `Authorization: Bearer <token>` — clients that support headers:
 
 ```bash
-claude mcp add --transport http museforge http://localhost:7860/mcp \
+claude mcp add --transport http museforge http://localhost:7861/mcp \
   --header "Authorization: Bearer <token>"
 ```
 

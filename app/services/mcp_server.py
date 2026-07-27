@@ -129,9 +129,12 @@ def list_outputs() -> dict:
 
 @mcp.tool()
 def get_output_url(name: str) -> str:
-    """HTTP URL for downloading an output file returned by list_outputs()
-    or job_status().output_files. Fetch it with a plain GET."""
-    return f"http://127.0.0.1:{_api_port}/api/v1/file/{name}"
+    """Download path for an output file returned by list_outputs() or
+    job_status().output_files. Returns a path relative to this MCP
+    server's origin — append it to the host:port you connected to
+    (inside Docker the container port may be mapped elsewhere on the
+    host, so an absolute internal URL would be wrong)."""
+    return f"/api/v1/file/{name}"
 
 
 @mcp.tool()
