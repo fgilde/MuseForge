@@ -37,13 +37,13 @@ Requirements: [Docker](https://docs.docker.com/engine/install/) with the
 an NVIDIA GPU (6 GB+ VRAM), and disk headroom for model weights (50–300 GB).
 
 ```bash
-git clone https://github.com/OWNER/MuseForge.git
+git clone https://github.com/fgilde/MuseForge.git
 cd MuseForge
 docker compose up -d
 ```
 
 Open <http://localhost:7861>. The compose file builds locally by default; switch to
-the prebuilt `ghcr.io/OWNER/museforge:latest` image by swapping two lines in
+the prebuilt `ghcr.io/fgilde/museforge:latest` image by swapping two lines in
 [docker-compose.yml](docker-compose.yml). Port 7861 is deliberate — a Maestro
 instance on the same machine keeps 7860, so both can run side by side.
 

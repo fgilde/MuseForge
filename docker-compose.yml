@@ -3,7 +3,7 @@ services:
     build: .
     image: museforge:latest
     # Prebuilt image instead of building locally:
-    # image: ghcr.io/OWNER/museforge:latest
+    # image: ghcr.io/fgilde/museforge:latest
     container_name: museforge
     restart: unless-stopped
     ports:
