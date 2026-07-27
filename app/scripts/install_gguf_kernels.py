@@ -6,7 +6,7 @@ Without this, mmgp prints
 
     [GGUF][llama.cpp CUDA] kernels unavailable, using fallback
 
-at every AmazeVideoGen startup, and GGUF model variants (the ones with
+at every MuseForge startup, and GGUF model variants (the ones with
 "_gguf_" in the model_type) load with a slow CPU dequant path. With
 it, GGUF dequant runs on-GPU and the warning disappears.
 
@@ -15,7 +15,7 @@ https://github.com/deepbeepmeep/kernels/releases. They're built per
 (Python minor, PyTorch major.minor, CUDA major.minor, OS) combination,
 so we detect the runtime env and pick the matching wheel. If no entry
 matches -an unreleased combo, or Linux where wheels aren't published
-yet -this is a soft no-op. AmazeVideoGen keeps working with the slower
+yet -this is a soft no-op. MuseForge keeps working with the slower
 fallback path; only GGUF-variant generation is affected, and the
 default INT8 / BF16 model variants don't use these kernels at all.
 
@@ -49,7 +49,7 @@ import sys
 # CUDA values as they appear in `torch.version.cuda` (e.g. "12.8", "13.0").
 _WHEELS_WINDOWS: dict[tuple[int, str, str], str] = {
     # Python 3.10 + PyTorch 2.7.x + CUDA 12.8 -the current default
-    # AmazeVideoGen venv on Windows.
+    # MuseForge venv on Windows.
     (10, "2.7", "12.8"): (
         "https://github.com/deepbeepmeep/kernels/releases/download/"
         "GGUF_Kernels/llamacpp_gguf_cuda-1.0.2+torch271cu128py310-"
@@ -134,7 +134,7 @@ def main() -> int:
         print(
             "[GGUF kernels] Install OK. The "
             "'kernels unavailable, using fallback' warning should be gone "
-            "on next AmazeVideoGen startup."
+            "on next MuseForge startup."
         )
         return 0
     except subprocess.CalledProcessError as e:

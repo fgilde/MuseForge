@@ -34,7 +34,7 @@ from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.autoencoders.vae import DecoderOutput, DiagonalGaussianDistribution
 # Tile-blend helpers inlined from upstream Wan2GP models/wan/modules/vae.py
-# (AmazeVideoGen's wan module predates them; inlining avoids touching it).
+# (MuseForge's wan module predates them; inlining avoids touching it).
 def _vae_float_to_cpu_uint8(frames):
     frames.clamp_(-1.0, 1.0).add_(1.0).mul_(127.5).round_().clamp_(0.0, 255.0)
     return frames.to(device="cpu", dtype=torch.uint8)

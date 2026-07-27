@@ -1,4 +1,4 @@
-"""Static wiring checks that avoid importing AmazeVideoGen's heavyweight server."""
+"""Static wiring checks that avoid importing MuseForge's heavyweight server."""
 from __future__ import annotations
 
 import ast

@@ -538,7 +538,7 @@ function DirectorDashboardInner() {
         || p.repair_status === 'running'
         || p.repair_status === 'cancelling')
       const pid = (active || pipelineList[0]).id
-      // A stale list entry (for example, a pipeline removed outside AmazeVideoGen)
+      // A stale list entry (for example, a pipeline removed outside MuseForge)
       // must not create an endless load/fail/render loop. Explicit selection
       // and closing/reopening the Dashboard still provide retry paths.
       if (autoLoadAttemptedPid.current === pid) return

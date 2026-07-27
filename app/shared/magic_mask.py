@@ -13,7 +13,7 @@ from shared.utils.audio_video import _get_codec_params
 from shared.utils.utils import get_video_info, has_image_file_extension, rgb_bw_to_rgba_mask, sanitize_file_name
 
 # Ported from upstream WanGP (v12.x). Upstream reads media through its
-# virtual-media layer and get_resampled_video_transparent; AmazeVideoGen has
+# virtual-media layer and get_resampled_video_transparent; MuseForge has
 # neither, so videos are decoded with wgp.get_resampled_video instead
 # (masks never need an alpha channel).
 

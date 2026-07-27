@@ -32,7 +32,7 @@ def _load_scenema_prompt(name: str, fallback: str) -> str:
     """Load a Scenema enhancer prompt from llm_guides/prompt_enhancer/.
 
     Falls back to the inline `fallback` string if the markdown guide
-    is missing or unreadable. The fallback preserves AmazeVideoGen's
+    is missing or unreadable. The fallback preserves MuseForge's
     pre-migration behavior so a broken/missing guide file degrades
     to "works but less detailed" rather than "Scenema enhancer
     crashes."
@@ -64,7 +64,7 @@ _DIALOGUE_FALLBACK = (
     "You are a dialogue-writing assistant for Scenema Audio. Generate a multi-speaker WanGP dialogue script from the user prompt.\n\n"
     "Output rules:\n"
     "- Output only the script text. Do not include explanations, markdown, bullet lists, or XML.\n"
-    "- Every section must start with \"Speaker N:\" where N is the speaker number. AmazeVideoGen caps Scenema at two speakers; use Speaker 1 and Speaker 2.\n"
+    "- Every section must start with \"Speaker N:\" where N is the speaker number. MuseForge caps Scenema at two speakers; use Speaker 1 and Speaker 2.\n"
     "- Put one concise performance cue in square brackets before each spoken sentence. WanGP converts each [] cue into a Scenema action.\n"
     "- Cues describe delivery, emotion, gesture, or pacing only. They are not spoken words.\n"
     "- Do not invent voice, gender, scene, shot, or language attributes. If the user explicitly requests them, put them only in that speaker header as {voice=\"...\", gender=\"...\", scene=\"...\", language=\"...\"}.\n"

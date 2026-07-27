@@ -1,8 +1,8 @@
-# AmazeVideoGen
+# MuseForge
 
-A one-click AI **video, image, and audio studio** for creators. AmazeVideoGen pairs a modern React UI with a powerful generation backend and adds a **Director mode** that uses an LLM to plan music videos and short films from a single prompt. Optimized for the latest LTX-2.3 models & LoRAs, with support for virtually all open weight models.  
+A one-click AI **video, image, and audio studio** for creators. MuseForge pairs a modern React UI with a powerful generation backend and adds a **Director mode** that uses an LLM to plan music videos and short films from a single prompt. Optimized for the latest LTX-2.3 models & LoRAs, with support for virtually all open weight models.  
 
-![AmazeVideoGen UI](docs/screenshot.jpg)
+![MuseForge UI](docs/screenshot.jpg)
 
 ## What it does
 
@@ -33,7 +33,7 @@ Direct access to every model and every knob:
 - **Spatial upsampling, film grain, codec selection** as post-processing options
 
 ### 🤖 Local LLM — built-in, no setup
-AmazeVideoGen auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF model on first use. Defaults to **Gemma 4 4B (Recommended)** — fast, capable, and runs comfortably on smaller GPUs. Auto-detects CUDA and binds the LLM to GPU when available.
+MuseForge auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF model on first use. Defaults to **Gemma 4 4B (Recommended)** — fast, capable, and runs comfortably on smaller GPUs. Auto-detects CUDA and binds the LLM to GPU when available.
 
 - Pre-curated registry: Gemma 4 (2B / 4B / 26B MoE / 31B) and Qwen3.6 27B — uncensored/abliterated instruct variants tuned for creative prompting
 - **External providers** also supported: OpenAI, Anthropic, custom OpenAI-compatible endpoints (currently experimental)
@@ -41,7 +41,7 @@ AmazeVideoGen auto-downloads `llama-server` (~600 MB one-time) and your chosen G
 - Auto-unloads after 60s idle to free VRAM for video gen
 
 ### 🛒 Built-in CivitAI LoRA browser
-- Search, filter, and one-click install any LoRA from CivitAI without leaving AmazeVideoGen
+- Search, filter, and one-click install any LoRA from CivitAI without leaving MuseForge
 - **LoRA update detection** — Check button refreshes from CivitAI, shows update badges on outdated LoRAs
 - **My LoRAs view** with filters for Updates and direct uninstall
 - **AI-generated LoRA prompting guides** Helps remove the guesswork from LoRAs. AI generates LoRA guides when LoRA is downloaded based on CIVITAI and HuggingFace repos. The guides explain what each LoRA does and how to use it, provide prompt examples, and recommend weight settings that are automatically applied when LoRA is selected. 
@@ -93,7 +93,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | **12–16 GB** (3060 12GB / 4070 / 4080) | good — auto-tune picks an offload profile | ~4–10 min |
 | **6–8 GB** | works, but expect heavy offloading | slow; stick to short/low-res clips |
 
-The first video is always the slow one: install is ~10–20 min, then the first generation on each model downloads its weights (the default video model is ~18 GB). After that, weights are cached and only generation time applies. AmazeVideoGen's auto-tune sizes the settings to your card on first launch so you don't have to.
+The first video is always the slow one: install is ~10–20 min, then the first generation on each model downloads its weights (the default video model is ~18 GB). After that, weights are cached and only generation time applies. MuseForge's auto-tune sizes the settings to your card on first launch so you don't have to.
 
 > ⚠ **AMD GPUs and macOS are not currently supported.** The pipeline depends on CUDA and several NVIDIA-only kernels. MacOS support is in development.  
 
@@ -106,15 +106,15 @@ The first video is always the slow one: install is ~10–20 min, then the first 
 Requirements: [Docker](https://docs.docker.com/engine/install/) and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
 ```bash
-git clone https://github.com/OWNER/AmazeVideoGen.git
-cd AmazeVideoGen
+git clone https://github.com/OWNER/MuseForge.git
+cd MuseForge
 docker compose up -d
 ```
 
 Then open <http://localhost:7860>. The compose file pulls the prebuilt image from GHCR; uncomment `build: .` to build locally instead. The image is compiled for CUDA compute capabilities 8.0/8.6/8.9 (A100, RTX 30xx/40xx) by default — for other cards rebuild with e.g.:
 
 ```bash
-docker build --build-arg CUDA_ARCHITECTURES="8.6;8.9;12.0" -t amazevideogen .
+docker build --build-arg CUDA_ARCHITECTURES="8.6;8.9;12.0" -t museforge .
 ```
 
 All state (model weights, LoRAs, outputs, settings) lives in named Docker volumes — see [docker-compose.yml](docker-compose.yml). The first generation on each model triggers a one-time weight download.
@@ -122,8 +122,8 @@ All state (model weights, LoRAs, outputs, settings) lives in named Docker volume
 ### Manual install (Linux / Windows)
 
 ```bash
-git clone https://github.com/OWNER/AmazeVideoGen.git
-cd AmazeVideoGen
+git clone https://github.com/OWNER/MuseForge.git
+cd MuseForge
 
 # Python env (3.10)
 python3.10 -m venv app/env
@@ -149,7 +149,7 @@ Docker: `docker compose pull && docker compose up -d`. Manual: `git pull`, re-ru
 
 ### Resetting
 
-Docker: `docker compose down` and remove the volumes you want to reset (`docker volume ls | grep amazevideogen`). Model weights live in the `ckpts` volume — leave it alone unless you want to re-download 50+ GB.
+Docker: `docker compose down` and remove the volumes you want to reset (`docker volume ls | grep museforge`). Model weights live in the `ckpts` volume — leave it alone unless you want to re-download 50+ GB.
 
 ## Usage
 
@@ -169,9 +169,9 @@ The server binds to `127.0.0.1` by default; set the `SERVER_NAME` environment va
 
 ## Credits
 
-AmazeVideoGen is built on top of, and indebted to, the following projects:
+MuseForge is built on top of, and indebted to, the following projects:
 
-- [**Wan2GP / WanGP**](https://github.com/deepbeepmeep/Wan2GP) by [@deepbeepmeep](https://github.com/deepbeepmeep) — the entire generation pipeline. AmazeVideoGen inherits WanGP's non-commercial license.
+- [**Wan2GP / WanGP**](https://github.com/deepbeepmeep/Wan2GP) by [@deepbeepmeep](https://github.com/deepbeepmeep) — the entire generation pipeline. MuseForge inherits WanGP's non-commercial license.
 - [**LTX-Video**](https://github.com/Lightricks/LTX-Video) by Lightricks — LTX-2 and LTX-2.3 distilled models.
 - [**Wan 2.1 / 2.2**](https://github.com/Wan-Video/Wan2.1) by Alibaba — text-to-video and image-to-video.
 - [**Flux**](https://github.com/black-forest-labs/flux) by Black Forest Labs — image generation.
@@ -185,7 +185,7 @@ AmazeVideoGen is built on top of, and indebted to, the following projects:
 
 ## License
 
-AmazeVideoGen is released under the **WanGP Non-Commercial Evaluation License 1.1**, inherited from the upstream Wan2GP project. See [LICENSE](LICENSE) for the summary and [app/LICENSE.txt](app/LICENSE.txt) for the full text.
+MuseForge is released under the **WanGP Non-Commercial Evaluation License 1.1**, inherited from the upstream Wan2GP project. See [LICENSE](LICENSE) for the summary and [app/LICENSE.txt](app/LICENSE.txt) for the full text.
 
 **TL;DR**: free to use and modify for non-commercial purposes; the *outputs* you generate are yours to use commercially (with attribution); commercial use of the *software itself* (including hosted services and APIs) requires a separate commercial license from the WanGP licensor.
 

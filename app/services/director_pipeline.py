@@ -384,7 +384,7 @@ def _normalize_interrupted_repair(state: dict, pid: str) -> bool:
     """Mark a persisted active repair interrupted when its worker is gone.
 
     Browser reloads leave the non-daemon worker registered, so they continue
-    normally.  A AmazeVideoGen process restart removes the registry; changing the
+    normally.  A MuseForge process restart removes the registry; changing the
     saved status makes that distinction visible and leaves Repair available as
     an idempotent resume-from-disk operation.
     """
@@ -408,8 +408,8 @@ def _normalize_interrupted_repair(state: dict, pid: str) -> bool:
         "status": "interrupted",
         "phase": "interrupted",
         "clip_index": None,
-        "message": "Repair was interrupted when AmazeVideoGen stopped. Start Repair again to continue.",
-        "error": "AmazeVideoGen stopped before the repair finished.",
+        "message": "Repair was interrupted when MuseForge stopped. Start Repair again to continue.",
+        "error": "MuseForge stopped before the repair finished.",
         "updated_at": now,
         "completed_at": now,
     })

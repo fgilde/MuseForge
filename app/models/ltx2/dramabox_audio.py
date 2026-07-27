@@ -583,14 +583,14 @@ class DramaBoxAudioPipeline(LTXAudioTTSPipelineBase):
         frames_relative_positions_list=None,
         frames_to_inject=None,
         verbose_level: int = 0,
-        # Swallow any extra kwargs our AmazeVideoGen-customized wgp.py passes that
+        # Swallow any extra kwargs our MuseForge-customized wgp.py passes that
         # DramaBox doesn't know about (e.g. audio_guide3..audio_guide6 from
         # 3+ speaker support in other models, Director-mode params, etc).
         # Upstream WanGP's wgp.py only ever passes the args we explicitly
         # declare above; ours has additional fields. Silently ignoring
         # unknown kwargs is the cleanest way to keep DramaBox usable here
         # without touching the shared generation pipeline.
-        **_amazevideogen_extra_kwargs,
+        **_museforge_extra_kwargs,
     ) -> Optional[dict]:
         self._interrupt = False
         self._early_stop = False
@@ -615,7 +615,7 @@ class DramaBoxAudioPipeline(LTXAudioTTSPipelineBase):
         audio_prompt_type = str(audio_prompt_type or "").upper()
         # Default ON to match WanGP's UI default (their "Remove Unexpected
         # Words" checkbox is ticked by default and gates the same code path
-        # via "0" in audio_prompt_type). AmazeVideoGen's UI doesn't yet surface
+        # via "0" in audio_prompt_type). MuseForge's UI doesn't yet surface
         # the audio_prompt_type_custom_option mechanism that exposes this
         # flag, so we default to True here. Explicit opt-out: include "NO0"
         # in audio_prompt_type to disable.
@@ -652,7 +652,7 @@ class DramaBoxAudioPipeline(LTXAudioTTSPipelineBase):
         # per-segment counts. Each segment runs `sampling_steps` (default
         # 30). Without this remapping, every segment fires its own
         # callback(-1, override_num_inference_steps=30, ...) which the
-        # AmazeVideoGen UI collapses into a "Step N/<segments>" display. Tell the
+        # MuseForge UI collapses into a "Step N/<segments>" display. Tell the
         # UI up front that there are total_cumulative_steps total, then
         # offset each segment's per-step callback index by the segments
         # already completed.

@@ -37,7 +37,7 @@ class family_handler:
             # "video_guide_outpainting": [1, 2],
             # "outpainting_quantize_margins": 16,
             # Upstream ships a WIP "Control Image" selector here (key
-            # guide_custom_choices_image) with visible: False. AmazeVideoGen's
+            # guide_custom_choices_image) with visible: False. MuseForge's
             # Studio UI ignores the visible flag and would render it as a
             # dead-end dropdown (no upload zone without guide_preprocessing;
             # selecting it writes "V" into video_prompt_type and the task is
@@ -66,7 +66,7 @@ class family_handler:
                 build_hf_url(_PROJECT_REPO, _TEXT_ENCODER_FOLDER, "Qwen3-VL-4B-Instruct_quanto_bf16_int8.safetensors"),
             ],
             # Turbo is CFG-free (guide_scale forced to 0), so its negative
-            # prompt only acts through NAG — which AmazeVideoGen's Studio UI does
+            # prompt only acts through NAG — which MuseForge's Studio UI does
             # not expose yet. Hide the input for turbo rather than show a
             # field that silently does nothing; raw uses real CFG and keeps it.
             "no_negative_prompt": base_model_type == _TURBO_MODEL_TYPE,
@@ -158,7 +158,7 @@ class family_handler:
     @staticmethod
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
         ui_defaults.setdefault("image_mode", 1)
-        # Upstream's < 2.66 migration blocks are removed for AmazeVideoGen: no
+        # Upstream's < 2.66 migration blocks are removed for MuseForge: no
         # pre-existing krea2 settings can exist in this fork (family added at
         # settings_version 2.57), and fix_settings also runs on LIVE
         # generation params whose settings_version is <= 2.57 -- the upstream

@@ -62,7 +62,7 @@ const MODE_LABELS: { mode: GenerationMode; label: string }[] = [
 // Family collapse state persists so "collapse the families I never use"
 // (issue #14) sticks across sessions — unlike the mode groups, which are
 // navigational and reset each visit.
-const COLLAPSED_FAMILIES_KEY = 'amazevideogen-collapsed-model-families'
+const COLLAPSED_FAMILIES_KEY = 'museforge-collapsed-model-families'
 
 function ModelVisibilitySection() {
   const models = useStore(s => s.models)
@@ -473,7 +473,7 @@ function LinkedModelFoldersSection() {
           <p className="text-[10px] text-text-muted leading-relaxed">
             Search other apps&apos; model folders for checkpoints you already have — e.g. an existing
             Wan2GP install — instead of re-downloading them. Linked folders are read-only:
-            new downloads always go to AmazeVideoGen&apos;s own ckpts folder.
+            new downloads always go to MuseForge&apos;s own ckpts folder.
           </p>
 
           {folders.length > 0 && (

@@ -1391,7 +1391,7 @@ class ScenemaAudioPipeline:
         frames_relative_positions_list=None,
         frames_to_inject=None,
         verbose_level: int = 0,
-        # AmazeVideoGen forwards audio_guide3..audio_guide6 (UI exposes 6 voice slots);
+        # MuseForge forwards audio_guide3..audio_guide6 (UI exposes 6 voice slots);
         # Scenema only consumes slots 1-2 (audio_guide + audio_guide2). Absorb the
         # rest so the call doesn't raise "unexpected keyword argument".
         **_unused_extra_voice_slots,

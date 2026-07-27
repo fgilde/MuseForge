@@ -122,7 +122,7 @@ function NsfwDisclaimerModal({
           <div className="space-y-2">
             <p><span className="font-medium text-text-primary">1. Age Requirement.</span> You confirm that you are at least 18 years of age (or the age of majority in your jurisdiction, whichever is higher).</p>
 
-            <p><span className="font-medium text-text-primary">2. Legal Responsibility.</span> You are solely responsible for ensuring that all content you generate complies with the laws of your jurisdiction. This includes but is not limited to laws governing obscenity, pornography, intellectual property, privacy, consent, and the depiction of real persons. AmazeVideoGen and its developers do not monitor, review, or approve generated content.</p>
+            <p><span className="font-medium text-text-primary">2. Legal Responsibility.</span> You are solely responsible for ensuring that all content you generate complies with the laws of your jurisdiction. This includes but is not limited to laws governing obscenity, pornography, intellectual property, privacy, consent, and the depiction of real persons. MuseForge and its developers do not monitor, review, or approve generated content.</p>
 
             <p><span className="font-medium text-text-primary">3. Prohibited Content.</span> You agree to NEVER use this software to generate child sexual abuse material (CSAM) or any content depicting minors in sexual or exploitative contexts. This is strictly prohibited regardless of jurisdiction and may constitute a criminal offense.</p>
 
@@ -709,7 +709,7 @@ export function ServicesSettingsPanel() {
           Anthropic) are gated by the experimental toggle — non-power
           users running the local LLM exclusively never need them, and
           surfacing them in the default UI invites confused calls about
-          "do I need these to use AmazeVideoGen?"
+          "do I need these to use MuseForge?"
           The CivitAI key stays visible always since LoRA download
           rate-limit relief is broadly useful, not a power-user feature. */}
       <div className="space-y-4">

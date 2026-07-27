@@ -12,7 +12,7 @@ import { fetchActiveDownloads, type ActiveDownload } from '../api/client'
  * badge if the byte counter hasn't advanced in >15s.
  *
  * Polling is unconditional (vs gated on "is a job running") because
- * model downloads can fire from several paths in AmazeVideoGen: job
+ * model downloads can fire from several paths in MuseForge: job
  * submission, model selection, etc. Polling
  * is cheap (a 2s GET every 2s) and only ever returns data when the
  * banner needs to be visible.

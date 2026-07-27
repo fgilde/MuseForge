@@ -4,7 +4,7 @@ Extracted from upstream Wan2GP's `shared/deepy/transcription.py`. Only the
 constants + `_load_whisper_medium` are needed by Scenema's pipeline; the rest
 of the module (transcribe_media, segment serialization, ffmpeg integration)
 is intentionally omitted. Strip the upstream dev-fallback path
-(`e:/ml/wan2gp/ckpts`) — AmazeVideoGen's `files_locator` is the canonical resolver.
+(`e:/ml/wan2gp/ckpts`) — MuseForge's `files_locator` is the canonical resolver.
 """
 
 from __future__ import annotations

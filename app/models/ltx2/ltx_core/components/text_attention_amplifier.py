@@ -143,7 +143,7 @@ def install_text_amplifier(
     def make_hook(block_idx: int):
         def hook(_module, _inputs, output):
             try:
-                # AmazeVideoGen's Attention.forward returns a single tensor.
+                # MuseForge's Attention.forward returns a single tensor.
                 # ComfyUI's version had to handle (tensor, ...) tuples,
                 # dict outputs, etc. Our path is simpler.
                 if not torch.is_tensor(output):

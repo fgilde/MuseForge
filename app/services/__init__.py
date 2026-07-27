@@ -1,1 +1,1 @@
-"""AmazeVideoGen AI services (LLM, audio analysis, etc.)."""
+"""MuseForge AI services (LLM, audio analysis, etc.)."""

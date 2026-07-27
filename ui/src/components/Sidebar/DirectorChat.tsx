@@ -595,7 +595,7 @@ export function DirectorChat() {
         {/* Welcome message */}
         <SystemBubble>
           <p className="text-xs text-text-secondary">
-            Welcome to AmazeVideoGen Director. Choose a skill to get started.
+            Welcome to MuseForge Director. Choose a skill to get started.
           </p>
         </SystemBubble>
 

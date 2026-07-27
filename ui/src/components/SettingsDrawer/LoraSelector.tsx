@@ -120,11 +120,11 @@ export function LoraSelector() {
   // Sticky across sessions (localStorage) — gated by nsfw_mode below, so a
   // persisted "on" is inert until Mature Mode is enabled.
   const [showNsfw, setShowNsfw] = useState(() => {
-    try { return localStorage.getItem('amazevideogen_loras_show_nsfw') === '1' } catch { return false }
+    try { return localStorage.getItem('museforge_loras_show_nsfw') === '1' } catch { return false }
   })
   const setShowNsfwSticky = (v: boolean) => {
     setShowNsfw(v)
-    try { localStorage.setItem('amazevideogen_loras_show_nsfw', v ? '1' : '0') } catch { /* private mode */ }
+    try { localStorage.setItem('museforge_loras_show_nsfw', v ? '1' : '0') } catch { /* private mode */ }
   }
   // Master gate: only honor "show NSFW LoRAs" when the user has
   // enabled NSFW mode in Settings → Services (which requires the

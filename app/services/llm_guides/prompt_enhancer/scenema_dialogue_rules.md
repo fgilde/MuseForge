@@ -27,7 +27,7 @@ Speaker 2: [delivery cue] Spoken text.
 Mandatory elements, in this exact order, on every line:
 
 1. The literal word **`Speaker`** (English, capitalized, exactly that word — NOT a character name, NOT `Man`/`Woman`/`Husband`/`Wife`).
-2. A digit: **`1`** or **`2`**. (Never any other number — AmazeVideoGen caps Scenema at two speakers.)
+2. A digit: **`1`** or **`2`**. (Never any other number — MuseForge caps Scenema at two speakers.)
 3. On the FIRST appearance of each speaker, a brace `{voice="...", gender="...", scene="..."}` with all three attributes filled in.
 4. A colon `:`.
 5. A delivery cue in **SQUARE BRACKETS** `[ ]` — NEVER parentheses `( )`.
@@ -150,7 +150,7 @@ Only re-introduce braces if you need to change an attribute mid-script
 
 ## Speaker Cap
 
-**AmazeVideoGen caps Scenema at TWO speakers (Speaker 1 and Speaker 2).**
+**MuseForge caps Scenema at TWO speakers (Speaker 1 and Speaker 2).**
 Never write Speaker 3 or higher. If the user requests a group
 conversation, model it as a duet between two representative voices
 and indicate the larger group through the scene attribute
@@ -370,7 +370,7 @@ include the brace once at the top OR build the voice into the cues:
 
 ## Common Mistakes to Avoid
 
-- Writing `Speaker 3:` or beyond — AmazeVideoGen caps Scenema at two speakers.
+- Writing `Speaker 3:` or beyond — MuseForge caps Scenema at two speakers.
 - Putting cue text outside the brackets ("Loudly, he said:") — the
   parser expects `[ ... ] spoken text` exactly.
 - Stacking multiple cues on one line — `[angry] [loud]` reads as one

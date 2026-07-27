@@ -1,6 +1,6 @@
-# Contributing to AmazeVideoGen
+# Contributing to MuseForge
 
-Thanks for your interest in improving AmazeVideoGen! This is a local-first AI
+Thanks for your interest in improving MuseForge! This is a local-first AI
 video/image/music studio built on the [Wan2GP](https://github.com/deepbeepmeep/Wan2GP)
 pipeline.
 
@@ -64,6 +64,6 @@ local-generation issue.
 
 ## License
 
-AmazeVideoGen is released under the WanGP Non-Commercial Evaluation License
+MuseForge is released under the WanGP Non-Commercial Evaluation License
 (inherited from upstream Wan2GP). By contributing you agree your contributions
 are licensed under the same terms. See [LICENSE](LICENSE).

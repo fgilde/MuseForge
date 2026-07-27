@@ -429,7 +429,7 @@ def apply_voice_clone_to_file(
 
         # SeedVC's class hardcodes `app_vc.device = torch.device("cpu")` at
         # load time (seedvc/__init__.py:175). It's designed to be loaded on
-        # CPU and moved to GPU by AmazeVideoGen's mmgp offload system at runtime.
+        # CPU and moved to GPU by MuseForge's mmgp offload system at runtime.
         # Scenema integrates with mmgp and gets GPU placement automatically;
         # we use SeedVC standalone for postprocessing, so we have to move
         # the modules ourselves.

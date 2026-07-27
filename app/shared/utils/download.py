@@ -113,7 +113,7 @@ def process_files_def(repoId=None, sourceFolderList=None, fileList=None, targetF
 
     Ported from upstream Wan2GP's shared/utils/download.py to support seedvc's
     download path (`from shared.utils.download import process_download_defs`).
-    AmazeVideoGen's wgp.py has its own copy of this helper for legacy callers; this
+    MuseForge's wgp.py has its own copy of this helper for legacy callers; this
     is the canonical version that postprocessing/seedvc/__init__.py calls.
     """
     from huggingface_hub import hf_hub_download, snapshot_download

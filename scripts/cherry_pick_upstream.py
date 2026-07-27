@@ -4,7 +4,7 @@ Cherry-pick upstream Wan2GP commits with path rewriting.
 
 Upstream (deepbeepmeep/Wan2GP) puts `wgp.py`, `models/`, `shared/`,
 `preprocessing/`, `postprocessing/`, `defaults/`, `profiles/`, and
-`plugins/` at the repo root. AmazeVideoGen nests all of these under `app/`.
+`plugins/` at the repo root. MuseForge nests all of these under `app/`.
 
 A naive `git cherry-pick <upstream-hash>` fails because the paths don't
 match. This script generates a patch via `git format-patch`, rewrites
@@ -60,7 +60,7 @@ REMOTE = "upstream-wgp"
 
 
 def rewrite_path(p: str) -> str:
-    """Return the AmazeVideoGen-side path for an upstream path.
+    """Return the MuseForge-side path for an upstream path.
 
     Leaves untouched any path that doesn't match a known prefix/file —
     e.g. README.md, .gitignore, scripts/* stay at the repo root.

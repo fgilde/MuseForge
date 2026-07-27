@@ -175,7 +175,7 @@ class FlashVSRBridge:
 
         device_mem_capacity = torch.cuda.get_device_properties(0).total_memory / 1048576 if torch.cuda.is_available() else 0
         mixed_precision = self.server_config.get("vae_precision", "16") == "32"
-        # AmazeVideoGen's fork of WanVAE.get_VAE_tile_size predates upstream's optional
+        # MuseForge's fork of WanVAE.get_VAE_tile_size predates upstream's optional
         # output_height/output_width args. Use them when available (better
         # output-resolution-aware tiling), fall back to the 3-arg signature.
         try:

@@ -6,7 +6,7 @@
  * runtime. That means a runtime override on `html[data-theme="..."]`
  * cascades into every utility class without recompilation.
  *
- * The default values below are the original AmazeVideoGen palette (cool
+ * The default values below are the original MuseForge palette (cool
  * charcoal). The Golden Hour theme overrides each variable to a warm
  * cinematic palette. To add a new theme, add another `[data-theme="..."]`
  * block below — no code changes elsewhere are required for elements

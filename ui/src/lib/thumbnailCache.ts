@@ -1,4 +1,4 @@
-const DB_NAME = 'amazevideogen-thumbnails'
+const DB_NAME = 'museforge-thumbnails'
 const STORE_NAME = 'thumbnails'
 const DB_VERSION = 1
 

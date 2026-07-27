@@ -1785,7 +1785,7 @@ class LTX2:
         voice_ref_sr = kwargs.get("voice_reference_sample_rate", 16000)
         identity_guidance_scale = kwargs.get("identity_guidance_scale", 0.0)
         # ID-LoRA voice-clone runs use the EXACT optimum.quanto int8 path (no
-        # AmazeVideoGen Triton-kernel injection), staying symbol-identical to upstream
+        # MuseForge Triton-kernel injection), staying symbol-identical to upstream
         # Wan2GP — the configuration the CelebVHQ ID-LoRA was validated against.
         #
         # NOTE: the actual root cause of the earlier gibberish was an

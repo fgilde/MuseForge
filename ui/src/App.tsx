@@ -64,7 +64,7 @@ function App() {
             <div className="w-7 h-7 rounded-lg bg-accent-blue flex items-center justify-center text-white font-bold text-sm">
               M
             </div>
-            <span className="font-semibold text-sm">AmazeVideoGen</span>
+            <span className="font-semibold text-sm">MuseForge</span>
             {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
           </div>
           <button

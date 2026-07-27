@@ -214,7 +214,7 @@ def _get_scenema_model_def():
         # content (50%+ of each chunk's audio doesn't match the prompt).
         # bf16 Gemma → clean dialogue matching the prompt. This is a
         # ~11 GB extra download (24 GB bf16 vs 13 GB int8) for the
-        # quality gain. Other AmazeVideoGen models continue to use the user's
+        # quality gain. Other MuseForge models continue to use the user's
         # global setting (int8 by default for VRAM savings).
         "text_encoder_quantization": "bf16",
         "dtype": "bf16",
@@ -383,11 +383,11 @@ class family_handler:
         **kwargs,
     ):
         # ---------------------------------------------------------------
-        # AmazeVideoGen / Triton-INT8 defensive workarounds — mirror HiDream port.
+        # MuseForge / Triton-INT8 defensive workarounds — mirror HiDream port.
         # See commit cbc3118 for full rationale. Verified in commit 7db773c that
         # these run as intended (state dumped pre/post). Even after these run
         # Scenema still hallucinates some content vs upstream wan.git2 — the
-        # remaining divergence is in some other AmazeVideoGen-runtime layer.
+        # remaining divergence is in some other MuseForge-runtime layer.
         # Keeping these in place because they bring numerical state closer to
         # upstream and are a strict improvement; the symptom is reduced (less
         # severe trim losses) but not eliminated.
@@ -405,7 +405,7 @@ class family_handler:
                 _qbytes.WeightQBytesLinearFunction.forward = staticmethod(_inj._BASE_PATCH_STATE.orig_forward)
                 _inj._BASE_PATCH_STATE.enabled = False
                 _inj._BASE_PATCH_STATE.orig_forward = None
-                print("[Scenema] Restored optimum.quanto's true original linear forward (was wrapped by AmazeVideoGen default-kernel patch)")
+                print("[Scenema] Restored optimum.quanto's true original linear forward (was wrapped by MuseForge default-kernel patch)")
         except Exception as e:
             print(f"[Scenema] Could not restore optimum.quanto's original forward: {e}")
 
@@ -483,7 +483,7 @@ class family_handler:
         ui_defaults["audio_prompt_type"] = "AB2" if "2" in audio_prompt_type and "B" in audio_prompt_type else "A2" if "2" in audio_prompt_type and "A" in audio_prompt_type else ""
         ui_defaults["alt_prompt"] = ""
         ui_defaults.setdefault("duration_seconds", model_def.get("duration_slider", {}).get("default", SCENEMA_DEFAULT_DURATION_SECONDS))
-        # AmazeVideoGen uses integer multi_prompts_gen_type (0/1/2/3 — see wgp.py); upstream
+        # MuseForge uses integer multi_prompts_gen_type (0/1/2/3 — see wgp.py); upstream
         # bumped to string codes ("FG"/etc.) at settings_version 2.56. Coerce any
         # legacy string here so wgp.py's integer comparisons (~13 sites) still work.
         # Full settings_version migration to string codes is deferred to Phase 7.

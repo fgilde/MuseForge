@@ -1,10 +1,10 @@
 services:
-  amazevideogen:
+  museforge:
     build: .
-    image: amazevideogen:latest
+    image: museforge:latest
     # Prebuilt image instead of building locally:
-    # image: ghcr.io/OWNER/amazevideogen:latest
-    container_name: amazevideogen
+    # image: ghcr.io/OWNER/museforge:latest
+    container_name: museforge
     restart: unless-stopped
     ports:
       - "7860:7860"

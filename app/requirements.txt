@@ -1,6 +1,6 @@
 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/
 # All versions below are pinned to the set that was tested against the
-# AmazeVideoGen release. If you need to upgrade, do it one package at a time and
+# MuseForge release. If you need to upgrade, do it one package at a time and
 # re-test Studio + Director end-to-end before committing. Do NOT loosen
 # pins without testing — many of these have known breakage on newer releases
 # (HuggingFace tokenizers/accelerate, torch/torchcodec/xformers ABI, etc).

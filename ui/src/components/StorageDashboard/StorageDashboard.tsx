@@ -144,9 +144,9 @@ export function StorageDashboard() {
               Scan
             </button>
             <span className="text-[10px] text-text-muted">
-              same file in AmazeVideoGen AND a linked install — deleting AmazeVideoGen's copy is free, the linked one keeps working
+              same file in MuseForge AND a linked install — deleting MuseForge's copy is free, the linked one keeps working
             </span>
-            <label className="ml-auto flex items-center gap-1.5 text-[10px] text-text-secondary cursor-pointer shrink-0" title="The inverse direction: keep AmazeVideoGen's copy and remove the duplicate FROM the linked install. Removals go to the Windows Recycle Bin so they can be undone. Off by default because it modifies other installs.">
+            <label className="ml-auto flex items-center gap-1.5 text-[10px] text-text-secondary cursor-pointer shrink-0" title="The inverse direction: keep MuseForge's copy and remove the duplicate FROM the linked install. Removals go to the Windows Recycle Bin so they can be undone. Off by default because it modifies other installs.">
               <input
                 type="checkbox"
                 checked={allowLinkedRemoval}
@@ -177,7 +177,7 @@ export function StorageDashboard() {
                   })}
                   {allowLinkedRemoval && rowBtn(`dupl:${d.linked_path}`, 'Remove linked', async () => {
                     await removeLinkedDuplicate(d.linked_path)
-                    // Pair broken the other way: AmazeVideoGen's copy stays, the
+                    // Pair broken the other way: MuseForge's copy stays, the
                     // linked one is in that install's Recycle Bin.
                     setDupes(prev => prev ? {
                       ...prev,
@@ -191,7 +191,7 @@ export function StorageDashboard() {
           )}
           {dupes && dupes.conflicts.length > 0 && (
             <div className="mt-2 text-[10px] text-indicator-warning">
-              {dupes.conflicts.length} same-name files differ in size between installs (not listed as reclaimable — AmazeVideoGen's copy is the one in use).
+              {dupes.conflicts.length} same-name files differ in size between installs (not listed as reclaimable — MuseForge's copy is the one in use).
             </div>
           )}
         </section>

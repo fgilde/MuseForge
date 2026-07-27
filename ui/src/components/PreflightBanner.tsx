@@ -15,7 +15,7 @@ import { fetchPreflight, type PreflightCheck } from '../api/client'
 export function PreflightBanner() {
   const [checks, setChecks] = useState<PreflightCheck[]>([])
   const [dismissed, setDismissed] = useState(
-    () => sessionStorage.getItem('amazevideogen_preflight_dismissed') === '1'
+    () => sessionStorage.getItem('museforge_preflight_dismissed') === '1'
   )
 
   useEffect(() => {
@@ -49,7 +49,7 @@ export function PreflightBanner() {
       </div>
       <button
         onClick={() => {
-          sessionStorage.setItem('amazevideogen_preflight_dismissed', '1')
+          sessionStorage.setItem('museforge_preflight_dismissed', '1')
           setDismissed(true)
         }}
         className="shrink-0 p-0.5 rounded text-text-muted hover:text-text-primary transition-colors"

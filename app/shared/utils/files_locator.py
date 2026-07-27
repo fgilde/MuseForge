@@ -23,7 +23,7 @@ def is_external_root(root):
     """True for a checkpoints path that lives OUTSIDE the app's own directory
     (e.g. another app's ckpts folder, linked via the "model folders"
     setting). External roots are searched for reads but are never chosen as
-    a write/delete target — AmazeVideoGen must not modify another app's install.
+    a write/delete target — MuseForge must not modify another app's install.
 
     Classification uses the RESOLVED path, so a hand-edited relative entry
     like "../wan.git2/app/ckpts" counts as external, while "ckpts" and "."
@@ -47,8 +47,8 @@ def is_protected_path(path):
     """True when path lives inside a LINKED install — under a non-primary
     external root's parent app folder (covering its ckpts AND its sibling
     loras). Anything protected must never be deleted or overwritten by
-    AmazeVideoGen. The primary root (index 0) is exempt even when external: it is
-    the user-chosen, AmazeVideoGen-managed download target."""
+    MuseForge. The primary root (index 0) is exempt even when external: it is
+    the user-chosen, MuseForge-managed download target."""
     if not path:
         return False
     p = os.path.normcase(os.path.abspath(path))

@@ -145,7 +145,7 @@ class family_handler:
         # Per upstream WanGP (commit 5da7f23 "unlocked ltx2 dev"), Dev variants
         # now get the same Control-Video Audio Track ("K") and Generate-Audio-
         # From-Control-Video ("2") options as distilled. The narrower default
-        # without "A1OF" (ID-LoRA voice option) is a AmazeVideoGen backward-compat
+        # without "A1OF" (ID-LoRA voice option) is a MuseForge backward-compat
         # choice — see CLAUDE.md.
         audio_prompt_selection = ["", "A", "K", "2"]
         audio_prompt_labels = {

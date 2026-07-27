@@ -2,7 +2,7 @@
 SAM 3.1 Segmentation Microservice
 
 Runs as a standalone FastAPI server in its own Python 3.12+ venv.
-The main AmazeVideoGen backend communicates with this service via HTTP.
+The main MuseForge backend communicates with this service via HTTP.
 
 Endpoints:
   POST /segment/image  — Segment objects in a single image by text prompt

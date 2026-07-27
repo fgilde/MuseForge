@@ -1,4 +1,4 @@
-"""AmazeVideoGen Launch Server
+"""MuseForge Launch Server
 
 FastAPI wrapper around WanGP (wgp.py) that:
 - Serves the new React UI at /
@@ -55,7 +55,7 @@ sys.argv = _wgp_argv
 # instead of hanging indefinitely; HF's resumable-download retry
 # layer picks up from the partial file. Also hooks tqdm to track
 # download progress for the UI's downloads-in-progress banner.
-print("[AmazeVideoGen] Installing download stall protection...")
+print("[MuseForge] Installing download stall protection...")
 from services import safe_download  # noqa: F401 (side-effect import)
 
 # HuggingFace token-path robustness (fixes the "Permission denied:
@@ -76,7 +76,7 @@ if _hf_token_path:
     except FileNotFoundError:
         pass  # absent → huggingface_hub handles this gracefully (anonymous)
     except OSError as _hf_err:
-        print(f"[AmazeVideoGen] HF_TOKEN_PATH is set but unreadable "
+        print(f"[MuseForge] HF_TOKEN_PATH is set but unreadable "
               f"({type(_hf_err).__name__}) — using anonymous HuggingFace "
               "access for public models.")
         os.environ.pop("HF_TOKEN_PATH", None)
@@ -89,12 +89,12 @@ if _hf_token_path:
         _hf_const = sys.modules.get("huggingface_hub.constants")
         if _hf_const is not None:
             import tempfile
-            _hf_const.HF_TOKEN_PATH = os.path.join(tempfile.gettempdir(), "amazevideogen_no_hf_token")
+            _hf_const.HF_TOKEN_PATH = os.path.join(tempfile.gettempdir(), "museforge_no_hf_token")
 
 # Now safe to import wgp - all module-level code will run with patched argv
-print("[AmazeVideoGen] Importing WanGP engine...")
+print("[MuseForge] Importing WanGP engine...")
 import wgp
-print(f"[AmazeVideoGen] WanGP loaded: {len(wgp.displayed_model_types)} models available")
+print(f"[MuseForge] WanGP loaded: {len(wgp.displayed_model_types)} models available")
 # Base save path always comes from server_config["save_path"] (never from wgp.save_path which gets workspace-modified)
 
 # Apply active workspace on startup
@@ -134,9 +134,9 @@ if "auto_performance" not in _services:
     try:
         with open(wgp.server_config_filename, "w", encoding="utf-8") as _f:
             _f.write(json.dumps(wgp.server_config, indent=4))
-        print("[AmazeVideoGen] Migration: existing config detected, auto_performance set to False (manual mode preserved)")
+        print("[MuseForge] Migration: existing config detected, auto_performance set to False (manual mode preserved)")
     except Exception as _e:
-        print(f"[AmazeVideoGen] Migration: failed to persist auto_performance default: {_e}")
+        print(f"[MuseForge] Migration: failed to persist auto_performance default: {_e}")
 
 # First-boot auto-tune: a fresh install has auto_performance=True but the
 # recommended profile was only ever WRITTEN when the user opened Settings and
@@ -159,12 +159,12 @@ if _services.get("auto_performance") and not _services.get("auto_performance_app
             _services["auto_performance_applied"] = True
             with open(wgp.server_config_filename, "w", encoding="utf-8") as _f:
                 _f.write(json.dumps(wgp.server_config, indent=4))
-            print(f"[AmazeVideoGen] First-boot auto-tune applied: {_rec.get('_recommendation_label', 'recommended profile')} "
+            print(f"[MuseForge] First-boot auto-tune applied: {_rec.get('_recommendation_label', 'recommended profile')} "
                   f"(video_profile={_rec.get('video_profile')}, vram_safety_coefficient={_rec.get('vram_safety_coefficient')})")
         else:
-            print("[AmazeVideoGen] First-boot auto-tune skipped: no CUDA GPU detected.")
+            print("[MuseForge] First-boot auto-tune skipped: no CUDA GPU detected.")
     except Exception as _e:
-        print(f"[AmazeVideoGen] First-boot auto-tune skipped ({_e}); using defaults until Settings → Performance is applied.")
+        print(f"[MuseForge] First-boot auto-tune skipped ({_e}); using defaults until Settings → Performance is applied.")
 
 # Restore argv
 sys.argv = _original_argv
@@ -186,7 +186,7 @@ class _QuietAccessFilter(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_QuietAccessFilter())
 
-api = FastAPI(title="AmazeVideoGen API", version="1.0.0")
+api = FastAPI(title="MuseForge API", version="1.0.0")
 
 # Upload size caps — enforced in upload handlers. Tuned for real-world
 # media the app actually ingests; anything larger is almost certainly
@@ -858,7 +858,7 @@ def _is_system_managed_lora(filename: str) -> bool:
 
 
 # ── video_prompt_type normalization ─────────────────────────────────
-# AmazeVideoGen's video_prompt_type is a string of single-letter mode flags
+# MuseForge's video_prompt_type is a string of single-letter mode flags
 # the wgp.py pipeline uses to decide what optional inputs are needed
 # (e.g. "I" → image_refs required, "V" → video/image guide required).
 # wgp.py rejects the job with a friendly UI error if a flag is set but
@@ -918,7 +918,7 @@ def _normalize_video_prompt_type(body: dict) -> None:
 # I2V (image-to-video) start/end frames are expected. When "S" is set
 # but no image_start is attached, wgp rejects the job with "You must
 # provide a Start Image" instead of falling back to T2V — even though
-# AmazeVideoGen's UX promises "no start image → T2V automatically."
+# MuseForge's UX promises "no start image → T2V automatically."
 #
 # Stale UI state is the usual cause: model defaults, sidecar metadata
 # from a previous re-roll, or the user clearing the start-image
@@ -939,7 +939,7 @@ def _normalize_image_prompt_type(body: dict) -> None:
 
     Effect: a body with image_prompt_type='S' but no image_start gets
     its prompt_type rewritten to '' (or stripped of just 'S' if other
-    flags survive), turning the job into T2V — matching AmazeVideoGen's
+    flags survive), turning the job into T2V — matching MuseForge's
     documented behavior of auto-falling-back to T2V when no start
     image is provided.
     """
@@ -1436,10 +1436,10 @@ def list_loras_details(model_type: str):
             "released_at": None,
             "lora_id": f"local:{basename}",  # overwritten below if sidecar has modelId
         }
-        # Guides and sidecars for LINKED loras are stored in AmazeVideoGen's own
+        # Guides and sidecars for LINKED loras are stored in MuseForge's own
         # lora dir keyed by the same basename — check there first, then
         # fall back to a sidecar sitting next to the file itself (read-only,
-        # e.g. when the linked install is another AmazeVideoGen/Wan2GP).
+        # e.g. when the linked install is another MuseForge/Wan2GP).
         _primary_base = os.path.join(lora_dir, os.path.splitext(basename)[0])
         _own_base = os.path.splitext(f)[0]
         guide_file = next(
@@ -1814,7 +1814,7 @@ def get_lora_update_manifest():
 
 CIVITAI_BASE_URL = "https://civitai.com/api/v1"
 CIVITAI_IMAGE_CDN = "https://imagecache.civitai.com/xG1nkqKTMzGDvpLrqFT7WA"
-CIVITAI_USER_AGENT = "AmazeVideoGen/1.0 (CivitAI LoRA Browser)"
+CIVITAI_USER_AGENT = "MuseForge/1.0 (CivitAI LoRA Browser)"
 
 
 def _fix_civitai_image_url(url: str, width: int = 450, is_video: bool = False) -> str:
@@ -2474,7 +2474,7 @@ def _release_download_target(download_id: str, target_path: str):
 
 
 def _validate_safetensors_payload(path: str):
-    """Apply AmazeVideoGen's minimum-size and header checks to a safetensors file."""
+    """Apply MuseForge's minimum-size and header checks to a safetensors file."""
     file_size = os.path.getsize(path)
     if file_size < 100 * 1024:
         raise ValueError(
@@ -4445,7 +4445,7 @@ async def generate_lora_guide(request: Request):
         raise HTTPException(status_code=404, detail="Unknown model type")
 
     # The lora binary may live in a linked (read-only) folder; the guide and
-    # sidecar ALWAYS live in AmazeVideoGen's own lora dir keyed by the basename,
+    # sidecar ALWAYS live in MuseForge's own lora dir keyed by the basename,
     # so linked installs are never written to.
     lora_path = wgp.resolve_lora_path(model_type, filename)
     if not os.path.isfile(lora_path):
@@ -4455,7 +4455,7 @@ async def generate_lora_guide(request: Request):
     sidecar_path = os.path.splitext(primary_path)[0] + ".civitai.json"
     if not os.path.isfile(sidecar_path):
         # A linked install may carry its own sidecar next to the file —
-        # adopt a copy into AmazeVideoGen's dir so guide + weight updates have a
+        # adopt a copy into MuseForge's dir so guide + weight updates have a
         # writable home.
         linked_sidecar = os.path.splitext(lora_path)[0] + ".civitai.json"
         if os.path.isfile(linked_sidecar):
@@ -4611,7 +4611,7 @@ async def scan_and_generate_guides(request: Request):
     # Walk the primary loras root plus each linked install's loras root
     # (derived from Linked Model Folders). For linked files, all writes
     # (sidecars, guides) target the PRIMARY MIRROR path — same family
-    # subfolder and filename under AmazeVideoGen's own loras root — so linked
+    # subfolder and filename under MuseForge's own loras root — so linked
     # installs stay read-only while their LoRAs still get guides.
     walk_roots = [(lora_root, lora_root)]
     for _linked_ckpts in _get_linked_model_folders():
@@ -4636,7 +4636,7 @@ async def scan_and_generate_guides(request: Request):
                 mirror_dir = os.path.normpath(os.path.join(mirror_root, rel_dir))
                 write_base = os.path.join(mirror_dir, os.path.splitext(f)[0])
                 # Guides live at the write target; sidecars may exist at the
-                # write target (AmazeVideoGen's) or beside a linked file.
+                # write target (MuseForge's) or beside a linked file.
                 sidecar_read = next(
                     (p for p in (write_base + ".civitai.json", own_base + ".civitai.json") if os.path.isfile(p)),
                     None,
@@ -5020,7 +5020,7 @@ def delete_preset(preset_id: str):
 
 
 def _read_app_version() -> str:
-    """AmazeVideoGen release version from the repo-root VERSION file."""
+    """MuseForge release version from the repo-root VERSION file."""
     try:
         vpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")
         with open(vpath, "r", encoding="utf-8") as f:
@@ -5098,7 +5098,7 @@ def _apply_linked_model_folders(folders):
         if not os.path.isdir(ap):
             raise HTTPException(status_code=400, detail=f"Folder does not exist: {ap}")
         if not is_external_root(ap):
-            raise HTTPException(status_code=400, detail=f"Folder is inside the AmazeVideoGen install (already searched): {ap}")
+            raise HTTPException(status_code=400, detail=f"Folder is inside the MuseForge install (already searched): {ap}")
         ap_n = os.path.normcase(ap)
         if ap_n == primary_n:
             raise HTTPException(status_code=400, detail=f"Folder is the primary download root: {ap}")
@@ -5590,7 +5590,7 @@ def system_preflight():
             "id": "ffmpeg",
             "level": "error",
             "message": "ffmpeg was not found on PATH. Video and audio "
-                       "export will fail. Install ffmpeg and restart AmazeVideoGen.",
+                       "export will fail. Install ffmpeg and restart MuseForge.",
         })
 
     # CUDA — the generation pipeline is NVIDIA-only.
@@ -5600,7 +5600,7 @@ def system_preflight():
             checks.append({
                 "id": "cuda",
                 "level": "error",
-                "message": "No CUDA GPU detected. AmazeVideoGen's generation "
+                "message": "No CUDA GPU detected. MuseForge's generation "
                            "pipeline requires an NVIDIA GPU; generation will "
                            "not work on this machine.",
             })
@@ -6136,13 +6136,13 @@ async def storage_reclaim(request: Request):
 
 @api.post("/api/v1/storage/duplicates/remove-linked")
 async def storage_remove_linked(request: Request):
-    """The inverse of reclaim: keep AmazeVideoGen's copy, remove the LINKED
+    """The inverse of reclaim: keep MuseForge's copy, remove the LINKED
     install's duplicate — to the Recycle Bin, never a hard delete.
 
     Gated on the opt-in services.storage_allow_linked_removal flag:
     deleting from another install is the one sanctioned exception to the
     is_protected_path rule, and only with an identical different-physical
-    copy verified in AmazeVideoGen's primary root at this exact moment."""
+    copy verified in MuseForge's primary root at this exact moment."""
     services = wgp.server_config.get("services", {})
     if not services.get("storage_allow_linked_removal", False):
         raise HTTPException(status_code=403, detail="Removing files from linked installs is disabled. Enable it in the Storage Manager first.")
@@ -6152,7 +6152,7 @@ async def storage_remove_linked(request: Request):
         raise HTTPException(status_code=404, detail="File not found.")
     target = os.path.abspath(path)
     if not wgp.fl.is_protected_path(target):
-        raise HTTPException(status_code=400, detail="That file is not in a linked install — use Reclaim for AmazeVideoGen's own copies.")
+        raise HTTPException(status_code=400, detail="That file is not in a linked install — use Reclaim for MuseForge's own copies.")
     target_real = os.path.realpath(target)
     try:
         psize = os.path.getsize(target_real)
@@ -6182,11 +6182,11 @@ async def storage_remove_linked(request: Request):
         if surviving:
             break
     if not surviving:
-        raise HTTPException(status_code=409, detail="AmazeVideoGen does not hold an identical copy of that file — refusing to remove the linked install's only version.")
+        raise HTTPException(status_code=409, detail="MuseForge does not hold an identical copy of that file — refusing to remove the linked install's only version.")
     from services.win_safe_files import recycle_file
     if not recycle_file(target):
         raise HTTPException(status_code=423, detail="Could not move the file to the Recycle Bin (it may be locked, or too large for the Bin). Nothing was deleted.")
-    print(f"[Storage] Removed linked duplicate to Recycle Bin: {target} ({psize} bytes; AmazeVideoGen's copy: {surviving})")
+    print(f"[Storage] Removed linked duplicate to Recycle Bin: {target} ({psize} bytes; MuseForge's copy: {surviving})")
     return {"status": "ok", "freed_bytes": psize, "recycled": True, "surviving_copy": surviving}
 
 
@@ -7936,7 +7936,7 @@ async def generate(request: Request):
     # where image_prompt_type='S' persisted after the user cleared the
     # start-image preview (or never set one), causing wgp to reject T2V
     # generations with "You must provide a Start Image" instead of
-    # falling back to T2V as AmazeVideoGen's UX promises.
+    # falling back to T2V as MuseForge's UX promises.
     _normalize_image_prompt_type(body)
 
     # ── SCAIL-2 operating guards ────────────────────────────────────
@@ -8273,7 +8273,7 @@ EDIT_ANYTHING_LORA_FILENAME = "ltx23_edit_anything_global_rank128_v1_9000steps_a
 
 
 # ── Managed auto-download LoRAs ──────────────────────────────────────────
-# LoRAs that AmazeVideoGen fetches on first use so a fresh install doesn't error
+# LoRAs that MuseForge fetches on first use so a fresh install doesn't error
 # out with "file not found" when the user triggers a feature that requires
 # one (these are multi-hundred-MB files we don't ship in the repo). The
 # frontend pre-downloads them when the relevant panel mounts; this registry
@@ -10526,7 +10526,7 @@ def _apply_per_job_coefficient(job: dict) -> None:
 
         stage_count = _stage_count_from_params(params)
         resolution = params.get("resolution")
-        # video_length is in frames (AmazeVideoGen convention). For images
+        # video_length is in frames (MuseForge convention). For images
         # video_length is typically 1 — the helper handles both.
         video_length = params.get("video_length")
         try:
@@ -13421,9 +13421,9 @@ try:
         api, _demo, path="/classic",
         allowed_paths=[wgp.save_path, wgp.image_save_path, "icons"],
     )
-    print("[AmazeVideoGen] Gradio classic UI mounted at /classic")
+    print("[MuseForge] Gradio classic UI mounted at /classic")
 except Exception as e:
-    print(f"[AmazeVideoGen] WARNING: Could not mount Gradio UI at /classic: {e}")
+    print(f"[MuseForge] WARNING: Could not mount Gradio UI at /classic: {e}")
     traceback.print_exc()
 
 
@@ -13448,12 +13448,12 @@ _mimetypes.add_type("image/svg+xml", ".svg")
 _ui_dist = os.path.normpath(os.path.join(_app_dir, "..", "ui", "dist"))
 if os.path.isdir(_ui_dist):
     api.mount("/", StaticFiles(directory=_ui_dist, html=True))
-    print(f"[AmazeVideoGen] React UI serving from {_ui_dist}")
+    print(f"[MuseForge] React UI serving from {_ui_dist}")
 else:
     @api.get("/")
     def index():
         return {"message": "React UI not built. Run: cd ui && npm install && npm run build"}
-    print(f"[AmazeVideoGen] React UI not found at {_ui_dist} - serving API only")
+    print(f"[MuseForge] React UI not found at {_ui_dist} - serving API only")
 
 
 # ============================================================================
@@ -13493,8 +13493,8 @@ if __name__ == "__main__":
     resolved_port = _first_bindable_port(host, port)
     if resolved_port is None:
         print(
-            f"\n[AmazeVideoGen] ERROR: could not find a free port in "
-            f"{port}-{port + 20}. Another app (or a stale AmazeVideoGen instance) "
+            f"\n[MuseForge] ERROR: could not find a free port in "
+            f"{port}-{port + 20}. Another app (or a stale MuseForge instance) "
             f"is holding them.\n"
             f"  • Close the other program or stop the existing instance, "
             f"then start again.\n"
@@ -13505,7 +13505,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if resolved_port != port:
         print(
-            f"[AmazeVideoGen] Port {port} was busy — using {resolved_port} instead.",
+            f"[MuseForge] Port {port} was busy — using {resolved_port} instead.",
             flush=True,
         )
         port = resolved_port
@@ -13518,7 +13518,7 @@ if __name__ == "__main__":
     display_host = "127.0.0.1" if host == "0.0.0.0" else host
 
     print(f"\n{'='*50}")
-    print(f"  AmazeVideoGen UI:    http://{display_host}:{port}/")
+    print(f"  MuseForge UI:    http://{display_host}:{port}/")
     # Trailing slash required: the Gradio submount 404s the bare path.
     print(f"  Classic UI:    http://{display_host}:{port}/classic/")
     print(f"  API docs:      http://{display_host}:{port}/docs")
@@ -13552,7 +13552,7 @@ if __name__ == "__main__":
         # window between probe and uvicorn's own bind). Still fail loudly and
         # actionably rather than dumping a bare traceback into the launcher.
         print(
-            f"\n[AmazeVideoGen] ERROR: failed to bind {host}:{port} ({e}). "
+            f"\n[MuseForge] ERROR: failed to bind {host}:{port} ({e}). "
             f"The port was taken just after we checked it — Start again to "
             f"pick a fresh port.\n",
             flush=True,

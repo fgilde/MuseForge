@@ -2,7 +2,7 @@ import re
 
 # Scenema's per-speaker option lines look like:
 #   Speaker 1{voice="...", gender="male", scene="..."}: text
-# AmazeVideoGen's prompt_parser would otherwise interpret `{voice="..."}` as a
+# MuseForge's prompt_parser would otherwise interpret `{voice="..."}` as a
 # variable reference and fail with "Unknown variable". Skip variable-check
 # for these lines (upstream Wan2GP does the same). Match Scenema only:
 # starts with "Speaker N{" through to the closing "}:" on the same line.

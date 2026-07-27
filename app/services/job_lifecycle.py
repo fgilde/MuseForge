@@ -1,4 +1,4 @@
-"""Thread-safe state transitions for AmazeVideoGen's in-process generation jobs.
+"""Thread-safe state transitions for MuseForge's in-process generation jobs.
 
 Jobs are mutable dictionaries shared by API handlers and background workers.
 This module keeps terminal-state changes and abort-state registration atomic so
@@ -164,7 +164,7 @@ def call_with_sticky_interrupt(
     relay = threading.Thread(
         target=_relay,
         daemon=True,
-        name="amazevideogen_abort_relay",
+        name="museforge_abort_relay",
     )
     relay.start()
     try:

@@ -1,4 +1,4 @@
-"""Audio analysis service for the AmazeVideoGen Music Video Director.
+"""Audio analysis service for the MuseForge Music Video Director.
 
 Analyzes audio files to extract:
 - BPM and beat positions (librosa)
@@ -375,7 +375,7 @@ def get_diarizer_pipeline(profile: str = "speech"):
          pipeline manually via pyannote.audio.pipelines. Bypasses
          HuggingFace's gated download entirely. This is the same
          approach app/preprocessing/speakers_separator.py uses, and
-         it works against the .bin files that ship with AmazeVideoGen's
+         it works against the .bin files that ship with MuseForge's
          install (the user's actual on-disk state):
              ckpts/pyannote/pyannote_model_wespeaker-voxceleb-resnet34-LM.bin
              ckpts/pyannote/pytorch_model_segmentation-3.0.bin

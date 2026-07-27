@@ -61,11 +61,11 @@ export function LoraBrowser() {
   // Sticky across sessions (localStorage) — the master nsfw_mode gate below
   // still applies, so a persisted "on" is inert until Mature Mode is enabled.
   const [nsfw, setNsfw] = useState(() => {
-    try { return localStorage.getItem('amazevideogen_civitai_nsfw') === '1' } catch { return false }
+    try { return localStorage.getItem('museforge_civitai_nsfw') === '1' } catch { return false }
   })
   const setNsfwSticky = (v: boolean) => {
     setNsfw(v)
-    try { localStorage.setItem('amazevideogen_civitai_nsfw', v ? '1' : '0') } catch { /* private mode */ }
+    try { localStorage.setItem('museforge_civitai_nsfw', v ? '1' : '0') } catch { /* private mode */ }
   }
   // Master gate from Settings → Services. NSFW filter UI + data flow
   // is only honored when the user has enabled NSFW mode (which itself
@@ -740,7 +740,7 @@ export function LoraBrowser() {
                         {lora.linked && (
                           <span
                             className="text-[9px] px-1.5 py-0.5 rounded bg-accent-blue/70 text-white"
-                            title="From a linked install's loras folder (read-only) — guides and metadata are stored in AmazeVideoGen"
+                            title="From a linked install's loras folder (read-only) — guides and metadata are stored in MuseForge"
                           >
                             Linked
                           </span>

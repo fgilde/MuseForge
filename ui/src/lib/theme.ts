@@ -1,5 +1,5 @@
 /**
- * Theme management for AmazeVideoGen.
+ * Theme management for MuseForge.
  *
  * Themes are CSS-variable overrides applied via `[data-theme="..."]` on
  * the <html> element. The actual variable values live in src/index.css.
@@ -12,11 +12,11 @@
  * scheme the mode resolves to. The light variants (ivory / daylight /
  * pearl) are internal CSS ids, not user-facing names.
  *
- * Persistence: localStorage under "amazevideogen-theme-mode" and
- * "amazevideogen-theme-family". Legacy keys are migrated on first load so
+ * Persistence: localStorage under "museforge-theme-mode" and
+ * "museforge-theme-family". Legacy keys are migrated on first load so
  * nobody's chosen look changes: the original single-theme key
- * ("amazevideogen-theme", may hold a light variant id) and the short-lived
- * per-variant key ("amazevideogen-theme-dark") both seed the family. An
+ * ("museforge-theme", may hold a light variant id) and the short-lived
+ * per-variant key ("museforge-theme-dark") both seed the family. An
  * inline script in index.html applies the resolved theme to <html>
  * before React mounts so there's no flash of the default theme.
  *
@@ -92,13 +92,13 @@ export interface ThemePrefs {
   family: FamilyId
 }
 
-const MODE_KEY = 'amazevideogen-theme-mode'
-const FAMILY_KEY = 'amazevideogen-theme-family'
+const MODE_KEY = 'museforge-theme-mode'
+const FAMILY_KEY = 'museforge-theme-family'
 /** Short-lived key from the interim two-picker build; holds a dark id. */
-const INTERIM_DARK_KEY = 'amazevideogen-theme-dark'
+const INTERIM_DARK_KEY = 'museforge-theme-dark'
 /** Original single-theme key; may hold either variant. Still written
  * with the resolved theme so downgrades show something sensible. */
-const LEGACY_KEY = 'amazevideogen-theme'
+const LEGACY_KEY = 'museforge-theme'
 
 const DEFAULT_PREFS: ThemePrefs = { mode: 'dark', family: 'golden-hour' }
 

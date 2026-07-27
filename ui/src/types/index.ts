@@ -231,7 +231,7 @@ export interface ModelOptions {
 }
 
 export interface SystemConfig {
-  // AmazeVideoGen release version (repo-root VERSION file), shown next to the
+  // MuseForge release version (repo-root VERSION file), shown next to the
   // app title. Optional: older backends don't send it.
   app_version?: string
   attention_mode: string
@@ -247,9 +247,9 @@ export interface SystemConfig {
   prompt_enhancer_quantization: string
   attention_modes_available: string[]
   vram_safety_coefficient: number
-  // Linked model folders (absolute paths outside the AmazeVideoGen install,
+  // Linked model folders (absolute paths outside the MuseForge install,
   // e.g. an existing Wan2GP install's ckpts). Searched read-only for
-  // already-downloaded checkpoints; new downloads always go to AmazeVideoGen's
+  // already-downloaded checkpoints; new downloads always go to MuseForge's
   // own ckpts folder.
   model_folders: string[]
 }

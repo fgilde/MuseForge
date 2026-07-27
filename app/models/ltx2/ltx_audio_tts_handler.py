@@ -407,10 +407,10 @@ def _is_dramabox(model_type: str) -> bool:
 class family_handler:
     @staticmethod
     def query_supported_types():
-        # AmazeVideoGen fork divergence: upstream returns ["scenema_audio", "dramabox_audio"]
+        # MuseForge fork divergence: upstream returns ["scenema_audio", "dramabox_audio"]
         # because their refactor consolidated ScenemaAudioPipeline under
         # LTXAudioTTSPipelineBase. Our fork keeps scenema_audio_handler.py
-        # active for "scenema_audio" (AmazeVideoGen's ScenemaAudioPipeline is
+        # active for "scenema_audio" (MuseForge's ScenemaAudioPipeline is
         # standalone, not a subclass of LTXAudioTTSPipelineBase). Returning
         # both here would cause map_family_handlers() to throw a duplicate
         # registration error in wgp.py. Keep ONLY dramabox_audio here.

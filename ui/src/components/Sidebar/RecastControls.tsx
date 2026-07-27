@@ -6,7 +6,7 @@ import * as api from '../../api/client'
 
 /**
  * Recast sub-mode — SCAIL-2 Replace: swap a person in an existing video
- * for the character in a reference image. AmazeVideoGen builds the tracking
+ * for the character in a reference image. MuseForge builds the tracking
  * mask automatically from the "who to replace" keyword (SAM3), so no
  * manual masking is needed. The prompt below is optional; describing the
  * new character in the scene helps identity.

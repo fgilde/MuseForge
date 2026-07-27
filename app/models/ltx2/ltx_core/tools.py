@@ -77,7 +77,7 @@ class LatentTools(Protocol):
              identity reference). Detects the prepended ref tokens via
              positions[..., 1] < 0 and slices past them.
 
-        Ported from upstream Wan2GP. AmazeVideoGen's original version sliced
+        Ported from upstream Wan2GP. MuseForge's original version sliced
         `latent[:, :num_tokens]` unconditionally — when ref tokens were
         prepended this returned the REFERENCE audio (e.g. chunk 1's
         tail) as if it were the new chunk's output, causing speakers

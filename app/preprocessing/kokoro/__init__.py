@@ -1,6 +1,6 @@
 # NOTE: This is the Scenema-aligned Kokoro TTS copy. It forces CPU placement
 # so mmgp_offload can control device transfers from outside the model.
-# AmazeVideoGen also has a SECOND copy at `app/models/wan/multitalk/kokoro/` that is
+# MuseForge also has a SECOND copy at `app/models/wan/multitalk/kokoro/` that is
 # intentionally divergent — it auto-picks CUDA and is used by multitalk's
 # in-process TTS path. Do NOT cross-wire them: changing this copy to auto-CUDA
 # breaks Scenema's offload contract; changing multitalk's copy to force-CPU

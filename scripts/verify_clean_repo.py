@@ -2,7 +2,7 @@
 Clean-repo guard — fails if mature/explicit prose or locally-generated model
 guides have leaked into VERSION-CONTROLLED source.
 
-This is the single boundary guard for AmazeVideoGen's clean-by-construction repo. The
+This is the single boundary guard for MuseForge's clean-by-construction repo. The
 strategy across the mature-content refactor was to keep all explicit *specifics*
 OUT of git:
   - Studio + Director mature-mode direction ships as clinically-worded,
@@ -142,7 +142,7 @@ ALLOWED_PATH_FRAGMENTS = [
     # leet-coded LoRA trigger applies and what each sentence sanitizer catches.
     # Strings live in code comments and rule text, not user-facing output.
     "services/director/prompt_polish.py",
-    # AmazeVideoGen internal docs
+    # MuseForge internal docs
     "docs/PROMPTS.md",
     "docs/CHANGELOG.md",
     # Upstream third-party MMAudio component licenses

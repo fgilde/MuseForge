@@ -624,7 +624,7 @@ def resolve_window_position_token(
     source_video_overlap_frames_count,
     total_frames,
 ):
-    """Resolve a AmazeVideoGen window-relative injected-frame token to an absolute frame.
+    """Resolve a MuseForge window-relative injected-frame token to an absolute frame.
 
     Token form: "W<k>:<pct>" — window number k (1-based) and a percent
     0..100 into that window's FRESH span (after the reused overlap prefix,
@@ -972,7 +972,7 @@ def validate_settings(state, model_type, single_prompt, inputs):
             positions = frames_positions.replace(","," ").split(" ")
             for pos_str in positions:
                 if not pos_str in ["L", "l"] and len(pos_str)>0:
-                    # AmazeVideoGen window-relative tokens ("W<k>:<pct>") are resolved
+                    # MuseForge window-relative tokens ("W<k>:<pct>") are resolved
                     # against the exact window layout at generation time
                     # (resolve_window_position_token); out-of-range window
                     # numbers and percents clamp there, so the token shape is
@@ -2608,9 +2608,9 @@ if not Path(config_load_filename).is_file():
         # Mark the config as auto-tuned so the UI shows the auto card
         # by default. User can flip it off in Settings later.
         server_config.setdefault("services", {})["auto_performance"] = True
-        print(f"[AmazeVideoGen] Auto-tuned for {_hw.get('gpu_name', 'CPU')}: {_rec.get('_recommendation_label', 'fallback profile')}")
+        print(f"[MuseForge] Auto-tuned for {_hw.get('gpu_name', 'CPU')}: {_rec.get('_recommendation_label', 'fallback profile')}")
     except Exception as _e:
-        print(f"[AmazeVideoGen] Auto-tune failed, using conservative defaults: {_e}")
+        print(f"[MuseForge] Auto-tune failed, using conservative defaults: {_e}")
 
     with open(server_config_filename, "w", encoding="utf-8") as writer:
         writer.write(json.dumps(server_config))
@@ -7755,7 +7755,7 @@ def generate_video(
                                 frames_positions_list.append(cur_end_pos)
                                 cur_end_pos -= sliding_window_discard_last_frames + reuse_frames
                             else:
-                                # AmazeVideoGen "W<k>:<pct>" window-relative tokens resolve against
+                                # MuseForge "W<k>:<pct>" window-relative tokens resolve against
                                 # the backend's exact window layout (already absolute, source
                                 # included — no alignment_shift). Anything else is the legacy
                                 # numeric path: 1-based absolute frames, shifted to the new

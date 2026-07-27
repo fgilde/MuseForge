@@ -117,16 +117,16 @@ class family_handler:
         text_encoder_filename=None,
         **kwargs,
     ):
-        # AmazeVideoGen's Triton int8 kernel injection (shared/kernels/quanto_int8_inject.py)
+        # MuseForge's Triton int8 kernel injection (shared/kernels/quanto_int8_inject.py)
         # is faster than optimum.quanto's default int8 forward, but it produces
         # incorrect outputs for HiDream's Qwen3VL layer pattern — confirmed by
         # log comparison: upstream Wan2GP (no Triton injection) generates clean
-        # images, our AmazeVideoGen install with the injection generates pure noise.
+        # images, our MuseForge install with the injection generates pure noise.
         # Disable globally before loading HiDream so the model uses the slower
         # but correct optimum.quanto path. Other models that loaded earlier in
         # the session keep their existing patched state; future models will
         # follow this disabled state until the user re-enables in Settings or
-        # restarts AmazeVideoGen.
+        # restarts MuseForge.
         try:
             from shared.kernels.quanto_int8_inject import disable_quanto_int8_kernel
             disable_quanto_int8_kernel(notify_disabled=True)
@@ -134,7 +134,7 @@ class family_handler:
             print(f"[HiDream] Could not disable Triton int8 kernel injection: {e}")
 
         # disable_quanto_int8_kernel only undoes the Triton-kernel patch but
-        # LEAVES IN PLACE the AmazeVideoGen "default" Quanto patch
+        # LEAVES IN PLACE the MuseForge "default" Quanto patch
         # (_default_quanto_qbytes_linear_forward in quanto_int8_inject.py:208)
         # which replaces optimum.quanto's WeightQBytesLinearFunction.forward
         # with a custom implementation. That custom implementation works for
@@ -151,7 +151,7 @@ class family_handler:
                 _qbytes.WeightQBytesLinearFunction.forward = staticmethod(_inj._BASE_PATCH_STATE.orig_forward)
                 _inj._BASE_PATCH_STATE.enabled = False
                 _inj._BASE_PATCH_STATE.orig_forward = None
-                print("[HiDream] Restored optimum.quanto's true original linear forward (was wrapped by AmazeVideoGen default-kernel patch)")
+                print("[HiDream] Restored optimum.quanto's true original linear forward (was wrapped by MuseForge default-kernel patch)")
         except Exception as e:
             print(f"[HiDream] Could not restore optimum.quanto's original forward: {e}")
 

@@ -128,7 +128,7 @@ REF_STG_SCHEDULE = [1.0, 1.0, 1.0, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 # Transformer blocks whose self-attention is perturbed for STG. The 10S node
 # documents "14, 19" as matching upstream Lightricks; the block-28 value that
-# used to live in AmazeVideoGen's 10Eros defaults has no source in the reference.
+# used to live in MuseForge's 10Eros defaults has no source in the reference.
 REF_STG_BLOCKS = [14, 19]
 
 from .utils.helpers import post_process_latent

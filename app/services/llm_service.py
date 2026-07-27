@@ -209,7 +209,7 @@ def _estimate_kv_gb(arch_key: str, extra_flags: list) -> float:
 # knows it fits, vs. seeing "9.96 GB" and having to do mental math about
 # headroom.
 #
-# Headroom note: the bucket is the recommended *minimum*. AmazeVideoGen's
+# Headroom note: the bucket is the recommended *minimum*. MuseForge's
 # generation pipelines also need VRAM concurrently if you're running an
 # LLM during video gen — in that case, pick a card with the LLM's bucket
 # size PLUS your video model's footprint, or run the LLM on a remote
@@ -479,7 +479,7 @@ MODEL_REGISTRY = {
         # builds cannot load gemma4_unified at all and will fail at load time.
         "weights_gb": 7.5, "mmproj_gb": 0.0, "arch": "gemma4-12b",
         # Template (verified from the GGUF) honors enable_thinking and activates
-        # with <|think|>; AmazeVideoGen already sends the kwarg + launches with --jinja,
+        # with <|think|>; MuseForge already sends the kwarg + launches with --jinja,
         # so "gemma" (kwarg) activation is correct here — do NOT switch to
         # gemma_prefix (this template emits an empty <|channel>thought<channel|>
         # when thinking is off, which would fight a manually-injected token).
@@ -587,7 +587,7 @@ def _find_free_port() -> int:
 
 
 def get_model_dir() -> str:
-    d = os.environ.get("AMAZEVIDEOGEN_LLM_CACHE", DEFAULT_CACHE_DIR)
+    d = os.environ.get("MUSEFORGE_LLM_CACHE", DEFAULT_CACHE_DIR)
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -850,7 +850,7 @@ def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
     return downloaded
 
 
-# Minimum llama.cpp build AmazeVideoGen requires. Builds below this lack correct
+# Minimum llama.cpp build MuseForge requires. Builds below this lack correct
 # support for newer model architectures we ship — notably Qwen3.5's hybrid
 # attention/SSM arch ("qwen35") used by the Sulphur prompt enhancer, which
 # crashes on older builds with: "error loading model: missing tensor
@@ -883,7 +883,7 @@ def _ensure_llama_server(bin_dir: str) -> None:
     """Auto-download llama-server from llama.cpp GitHub releases if missing.
 
     Picks the appropriate prebuilt binary for the current platform:
-      - Windows + CUDA (default for AmazeVideoGen on NVIDIA): bin-win-cuda-12.4-x64.zip
+      - Windows + CUDA (default for MuseForge on NVIDIA): bin-win-cuda-12.4-x64.zip
       - Linux: bin-ubuntu-x64.tar.gz (includes CUDA backend if libs are present)
       - macOS / AMD: not supported (this app is NVIDIA-only),
         but if someone gets here, raise with a clear message.
@@ -1087,7 +1087,7 @@ def _get_server_exe() -> str:
     download is one-time (~50-100 MB) and cached in bin_dir, so
     subsequent loads are instant.
     """
-    bin_dir = os.environ.get("AMAZEVIDEOGEN_LLAMA_BIN", DEFAULT_BIN_DIR)
+    bin_dir = os.environ.get("MUSEFORGE_LLAMA_BIN", DEFAULT_BIN_DIR)
     _ensure_llama_server(bin_dir)
     if os.name == "nt":
         return os.path.join(bin_dir, "llama-server.exe")
@@ -1806,7 +1806,7 @@ def generate_streaming(
             print(f"[LLM] json_schema requested but provider={_provider} — sending unconstrained (grammar is local llama-server only)")
 
     # Diagnostic — log every payload field except `messages` so we can
-    # compare what AmazeVideoGen sends to llama-server vs what LM Studio sends
+    # compare what MuseForge sends to llama-server vs what LM Studio sends
     # for the same model. The messages array gets summarized (length per
     # role) instead of dumped, since system prompts can be multi-KB and
     # multimodal content includes base64-encoded images.

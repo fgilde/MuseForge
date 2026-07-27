@@ -623,7 +623,7 @@ def _auto_ref_mask(image_ref, custom_settings, model_def, height, width, device,
     ref_image = convert_tensor_to_image(image_ref).convert("RGB")
     frame = np.asarray(ref_image, dtype=np.uint8)[None]
 
-    # AmazeVideoGen: SAM3's text grounding is brittle with the default
+    # MuseForge: SAM3's text grounding is brittle with the default
     # "human character" phrase — field report: a clear full-frame photo
     # of a woman matched NOTHING while "person"/"woman" matched at 32%
     # coverage on the same pixels. Cascade through generic person

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Sparkles, Download, Cpu, ShieldAlert, X } from 'lucide-react'
 
-const SEEN_KEY = 'amazevideogen_welcome_seen_v1'
+const SEEN_KEY = 'museforge_welcome_seen_v1'
 
 /**
  * WelcomeModal — a one-time first-run intro. Sets the expectations that
@@ -34,7 +34,7 @@ export function WelcomeModal() {
             <Sparkles size={22} className="text-accent-blue" />
           </div>
           <div className="flex-1">
-            <h2 className="text-base font-semibold text-text-primary">Welcome to AmazeVideoGen</h2>
+            <h2 className="text-base font-semibold text-text-primary">Welcome to MuseForge</h2>
             <p className="text-xs text-text-muted mt-0.5">
               A local AI studio for video, images, and music — including a Director mode
               that plans a whole music video or short film from a sentence.

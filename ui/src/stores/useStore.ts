@@ -74,7 +74,7 @@ if (import.meta.hot) {
 }
 
 // --- LocalStorage persistence for per-mode settings ---
-const STORAGE_KEY = 'amazevideogen_mode_settings'
+const STORAGE_KEY = 'museforge_mode_settings'
 
 // Persistence schema version. Bump when changing the LoRA-key strategy or
 // adding fields that need migration. Currently:
@@ -211,7 +211,7 @@ function _modeBlobToFilenameKeyed(
  *  wants remembered (model settings, slider values, video_prompt_type
  *  letter codes, etc.) stays out of this list and continues to persist.
  *
- *  Workaround for users on a AmazeVideoGen version before this fix: use a
+ *  Workaround for users on a MuseForge version before this fix: use a
  *  private/incognito browser window (skips localStorage rehydration).
  */
 const EPHEMERAL_PARAM_FIELDS: ReadonlyArray<keyof SavedModeParams> = [
@@ -561,7 +561,7 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.3.0: SCAIL-2 character animation, base + lightx2v-distilled Fast.
   3: ['scail2_14B', 'scail2_14B_fast'],
 }
-const DEFAULTS_VERSION_KEY = 'amazevideogen_defaults_version'
+const DEFAULTS_VERSION_KEY = 'museforge_defaults_version'
 
 /* The music default changed in v1.2.0 (Turbo LM_4B -> SFT LM_4B).
  * A saved selection equal to the OLD default means the user was riding
@@ -571,7 +571,7 @@ const DEFAULTS_VERSION_KEY = 'amazevideogen_defaults_version'
 const OLD_MUSIC_DEFAULT = 'ace_step_v1_5_xl_turbo_lm_4b'
 const NEW_MUSIC_DEFAULT = 'ace_step_v1_5_xl_sft_lm_4b'
 
-const ENABLED_MODELS_KEY = 'amazevideogen_enabled_models'
+const ENABLED_MODELS_KEY = 'museforge_enabled_models'
 
 function _saveEnabledModels(models: Set<string>) {
   try {
@@ -4272,7 +4272,7 @@ export const useStore = create<AppState>((set, get) => ({
       // keeps the snapshot itself sensible.
       const vpt = (params.video_prompt_type as string) || ''
       if (vpt) {
-        // Default ref letters used by AmazeVideoGen when image refs are
+        // Default ref letters used by MuseForge when image refs are
         // present. If imageRefType is configured we trust that;
         // otherwise fall back to the conservative "I" — the most common
         // and the one we've actually observed leaking.
@@ -6607,10 +6607,10 @@ export const useStore = create<AppState>((set, get) => ({
   setStorageDashboardOpen: (open) => set({ storageDashboardOpen: open }),
 
   loraPickerSort: (() => {
-    try { return localStorage.getItem('amazevideogen_lora_picker_sort') === 'newest' ? 'newest' as const : 'name' as const } catch { return 'name' as const }
+    try { return localStorage.getItem('museforge_lora_picker_sort') === 'newest' ? 'newest' as const : 'name' as const } catch { return 'name' as const }
   })(),
   setLoraPickerSort: (sort) => {
-    try { localStorage.setItem('amazevideogen_lora_picker_sort', sort) } catch { /* private mode */ }
+    try { localStorage.setItem('museforge_lora_picker_sort', sort) } catch { /* private mode */ }
     set({ loraPickerSort: sort })
   },
 

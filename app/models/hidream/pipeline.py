@@ -132,7 +132,7 @@ def generate_image(
     tokenizer = processor.tokenizer if hasattr(processor, 'tokenizer') else processor
     ref_image_paths = [] if ref_image_paths is None else ref_image_paths
     ref_images = [] if ref_images is None else ref_images
-    # HiDream requires both dimensions divisible by PATCH_SIZE (32). AmazeVideoGen's
+    # HiDream requires both dimensions divisible by PATCH_SIZE (32). MuseForge's
     # resolution presets (720p / 1080p) don't all satisfy this — e.g. 1280×720
     # has H=720 which 720/32=22.5 is not integer. Snap down to nearest
     # multiple of PATCH_SIZE before any downstream patchify. The ref-image
