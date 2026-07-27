@@ -29,6 +29,7 @@ import { BlendControls } from './BlendControls'
 import { AnchorReturnBanner } from './AnchorReturnBanner'
 import { VoiceRefSection } from './VoiceRefSection'
 import { ToolsPanel } from './ToolsPanel'
+import { TextPanel } from './TextPanel'
 import { HardwareStatusBar } from './HardwareStatusBar'
 
 export function Sidebar() {
@@ -52,6 +53,7 @@ export function Sidebar() {
   const audioSubMode = useStore(s => s.audioSubMode)
   const isEdit = generationMode === 'avatar'
   const isTools = generationMode === 'tools'
+  const isText = generationMode === 'text'
   const isRetake = isEdit && editSubMode === 'retake'
   const isRestyle = isEdit && editSubMode === 'restyle'
   const isInpaint = isEdit && editSubMode === 'inpaint'
@@ -153,8 +155,10 @@ export function Sidebar() {
         <GenerationModeSelector />
 
         {/* Tools mode: standalone post-processing (upscale / revoice) on any
-            existing clip. Renders in place of the generation controls. */}
-        {isTools ? <ToolsPanel /> : (
+            existing clip. Renders in place of the generation controls.
+            Text mode: LLM chat controls, same substitution — the
+            conversation itself renders in the main area. */}
+        {isTools ? <ToolsPanel /> : isText ? <TextPanel /> : (
         <>
         {/* Edit mode: sub-mode toggle + sub-controls */}
         {isEdit && <EditSubModeToggle />}
@@ -217,8 +221,9 @@ export function Sidebar() {
 
       {/* Bottom Bar: Advanced + LoRA Browser + Model + Generate.
           Hidden in Tools mode — ToolsPanel has its own Run button and
-          owns no model. */}
-      {!isTools && (
+          owns no model — and in Text mode, which owns no generation
+          model either and sends from its own composer. */}
+      {!isTools && !isText && (
       <div className="px-3 py-2.5 border-t border-border">
         <div className="flex items-center gap-2">
           <AdvancedSettings />

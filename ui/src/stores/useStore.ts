@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineRepairState, SavedPipelineState, SystemDetectResponse, SystemStats } from '../types'
+import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, GenerationJob, ModelFamily, ModelDef, GenerationMode, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineRepairState, SavedPipelineState, SystemDetectResponse, SystemStats, TextSubMode } from '../types'
+import type { ChatThread, ChatThreadSummary } from '../api/client'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 
@@ -594,6 +595,7 @@ const modeDefaultModel: Record<GenerationMode, string> = {
   audio: 'kugelaudio_0_open',
   avatar: '',  // will fallback to first available
   tools: '',   // Tools is non-generative post-processing — owns no model
+  text: '',    // Text (chat) runs on the LLM service, not a generation model
 }
 
 export function getFamilyMode(familyId: string): GenerationMode {
@@ -624,6 +626,9 @@ export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamil
     if (audioSubMode === 'mixer') return []  // Mixer has no model selector
     return audioSubFamilies
   }
+  // Text mode talks to the LLM service — no generation-model families at all
+  // (same reasoning as the audio Mixer branch above).
+  if (mode === 'text') return []
   return allFamilies.filter(f => getFamilyMode(f.id) === mode)
 }
 
@@ -1259,6 +1264,36 @@ interface AppState {
   loadLlm: () => Promise<void>
   unloadLlm: () => Promise<void>
 
+  // Text mode (Chat). Threads live server-side; the store holds the list,
+  // the fully-loaded active thread, and the live stream buffer.
+  textSubMode: TextSubMode
+  setTextSubMode: (mode: TextSubMode) => void
+  chatThreads: ChatThreadSummary[]
+  /** Deliberately NOT persisted — `_saveSettings` writes a fixed allowlist
+   *  of per-mode generation keys, so a reload starts with no thread
+   *  selected and the list is re-fetched from the backend. */
+  activeChatId: string | null
+  activeChatThread: ChatThread | null
+  /** Thread id of the reply currently in flight, or null when idle. Scoped
+   *  to a thread rather than a bare boolean so browsing another conversation
+   *  while a long generation runs doesn't render its tokens in the wrong
+   *  place. Generation is globally serialized either way — one LLM. */
+  chatStreamingId: string | null
+  /** Raw stream buffer for the in-flight reply, `<think>` blocks included.
+   *  Empty while streaming means the LLM is still loading. */
+  chatStreamText: string
+  chatError: string | null
+  chatTemperature: number
+  chatMaxTokens: number
+  setChatSampling: (patch: { temperature?: number; maxTokens?: number }) => void
+  loadChatThreads: () => Promise<void>
+  createChatThread: () => Promise<string | null>
+  selectChatThread: (id: string) => Promise<void>
+  deleteChatThread: (id: string) => Promise<void>
+  patchChatThread: (id: string, patch: { title?: string; system_prompt?: string }) => Promise<void>
+  renameChatThread: (id: string, title: string) => Promise<void>
+  sendChatMessage: (content: string) => Promise<void>
+
   // Prompt enhancement
   isEnhancing: boolean
   enhancePrompt: (ttsMode?: string) => Promise<void>
@@ -1875,16 +1910,20 @@ export const useStore = create<AppState>((set, get) => ({
   savedPromptPerMode: {} as Partial<Record<string, string>>,
 
   setGenerationMode: (mode) => {
-    // Tools is a non-generative post-processing area — it owns no model, so
-    // skip the per-mode model/LoRA/params RESTORE machinery entirely. We still
-    // SAVE the leaving mode's state (prompt / model / LoRAs / params snapshot)
-    // so returning to it restores correctly, leave `params` untouched (no model
-    // load, no defaults reset), and persist the *previous* real mode as the
-    // landing mode so a reload doesn't drop into Tools with no model loaded.
-    if (mode === 'tools') {
+    // Tools (post-processing) and Text (LLM chat) are non-generative areas —
+    // they own no model, so skip the per-mode model/LoRA/params RESTORE
+    // machinery entirely. We still SAVE the leaving mode's state (prompt /
+    // model / LoRAs / params snapshot) so returning to it restores correctly,
+    // leave `params` untouched (no model load, no defaults reset), and persist
+    // the *previous* real mode as the landing mode so a reload doesn't drop
+    // into Tools/Text with no model loaded.
+    if (mode === 'tools' || mode === 'text') {
       const s = get()
       const prev = s.generationMode
-      if (prev === 'tools') { set({ generationMode: 'tools' }); return }
+      // Coming FROM another non-generative mode (or re-selecting the same
+      // one): there's no generation state to snapshot, and `prev` isn't a
+      // valid landing mode to persist either. Just flip the flag.
+      if (prev === 'tools' || prev === 'text') { set({ generationMode: mode }); return }
       const { model_type: _mt, prompt: _p, activated_loras: _al, loras_multipliers: _lm, ...paramsSnapshot } = s.params
       const savedModels = { ...s.selectedModelPerMode, [prev]: s.params.model_type }
       const savedParams = {
@@ -1897,7 +1936,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
       const savedPrompts = { ...s.savedPromptPerMode, [prev]: s.params.prompt }
       set({
-        generationMode: 'tools',
+        generationMode: mode,
         selectedModelPerMode: savedModels,
         savedParamsPerMode: savedParams,
         savedLoraPerMode: savedLoras,
@@ -5088,6 +5127,164 @@ export const useStore = create<AppState>((set, get) => ({
       set({ llmStatus: { loaded: false, model_id: null, device: null, provider: '' } })
     } catch (e) {
       console.error('Failed to unload LLM:', e)
+    }
+  },
+
+  // Text mode (Chat)
+  textSubMode: 'chat',
+  setTextSubMode: (mode) => set({ textSubMode: mode }),
+  chatThreads: [],
+  activeChatId: null,
+  activeChatThread: null,
+  chatStreamingId: null,
+  chatStreamText: '',
+  chatError: null,
+  chatTemperature: 0.7,
+  chatMaxTokens: 2048,
+  setChatSampling: (patch) => set(s => ({
+    chatTemperature: patch.temperature ?? s.chatTemperature,
+    chatMaxTokens: patch.maxTokens ?? s.chatMaxTokens,
+  })),
+  loadChatThreads: async () => {
+    try {
+      const { threads } = await api.fetchChatThreads()
+      set({ chatThreads: threads })
+    } catch (e) {
+      set({ chatError: e instanceof Error ? e.message : 'Failed to load chats' })
+    }
+  },
+  createChatThread: async () => {
+    try {
+      const thread = await api.createChatThread()
+      set(s => ({
+        chatThreads: [{
+          id: thread.id,
+          title: thread.title,
+          model_id: thread.model_id,
+          created_at: thread.created_at,
+          updated_at: thread.updated_at,
+          message_count: 0,
+          preview: '',
+        }, ...s.chatThreads],
+        activeChatId: thread.id,
+        activeChatThread: thread,
+        chatError: null,
+      }))
+      return thread.id
+    } catch (e) {
+      set({ chatError: e instanceof Error ? e.message : 'Failed to create chat' })
+      return null
+    }
+  },
+  selectChatThread: async (id) => {
+    // Select immediately so the click feels instant; the fetch fills in
+    // the messages. A 404 (deleted elsewhere) drops it from the list.
+    // `chatStreamText` is deliberately left alone — an in-flight reply on
+    // another thread keeps filling it, and `chatStreamingId` decides where
+    // it renders.
+    set({ activeChatId: id, chatError: null })
+    try {
+      const thread = await api.fetchChatThread(id)
+      if (!thread) {
+        set(s => ({
+          chatThreads: s.chatThreads.filter(t => t.id !== id),
+          activeChatId: s.activeChatId === id ? null : s.activeChatId,
+          activeChatThread: null,
+        }))
+        return
+      }
+      // Ignore a slow response for a thread the user already left.
+      if (get().activeChatId !== id) return
+      set({ activeChatThread: thread })
+    } catch (e) {
+      set({ chatError: e instanceof Error ? e.message : 'Failed to load chat' })
+    }
+  },
+  deleteChatThread: async (id) => {
+    try {
+      await api.deleteChatThread(id)
+    } catch (e) {
+      set({ chatError: e instanceof Error ? e.message : 'Failed to delete chat' })
+      return
+    }
+    set(s => ({
+      chatThreads: s.chatThreads.filter(t => t.id !== id),
+      activeChatId: s.activeChatId === id ? null : s.activeChatId,
+      activeChatThread: s.activeChatId === id ? null : s.activeChatThread,
+    }))
+  },
+  patchChatThread: async (id, patch) => {
+    try {
+      const thread = await api.updateChatThread(id, patch)
+      set(s => ({
+        chatThreads: s.chatThreads.map(t => t.id === id ? { ...t, title: thread.title, model_id: thread.model_id } : t),
+        activeChatThread: s.activeChatId === id ? thread : s.activeChatThread,
+      }))
+    } catch (e) {
+      set({ chatError: e instanceof Error ? e.message : 'Failed to update chat' })
+    }
+  },
+  renameChatThread: async (id, title) => { await get().patchChatThread(id, { title }) },
+  sendChatMessage: async (content) => {
+    const text = content.trim()
+    if (!text || get().chatStreamingId) return
+    // No thread yet (fresh Text mode) — create one implicitly so the user
+    // can just type and send.
+    const tid = get().activeChatId ?? await get().createChatThread()
+    if (!tid) return
+
+    // Optimistic user turn. The backend appends it too (and keeps it even
+    // when generation fails), so a failed send leaves the message standing
+    // rather than swallowing what the user typed.
+    set(s => ({
+      activeChatThread: s.activeChatThread
+        ? { ...s.activeChatThread, messages: [...s.activeChatThread.messages, { role: 'user' as const, content: text, at: Date.now() / 1000 }] }
+        : s.activeChatThread,
+      chatStreamingId: tid,
+      chatStreamText: '',
+      chatError: null,
+    }))
+
+    // The stream id is deterministic, so we can poll from the moment the
+    // POST leaves — no need to wait for a response to learn it. The POST
+    // itself is synchronous and may run for minutes (the backend loads,
+    // and on first use downloads, the LLM), hence no abort timeout.
+    let polling = true
+    const pollStream = async () => {
+      while (polling) {
+        try {
+          const status = await api.getLlmStreamStatus(`chat-${tid}`)
+          if (!polling) break
+          if (status.text) set({ chatStreamText: status.text })
+        } catch { /* transient — retry next tick */ }
+        await new Promise(r => setTimeout(r, 800))
+      }
+    }
+    pollStream()
+
+    try {
+      const res = await api.sendChatMessage(tid, {
+        content: text,
+        temperature: get().chatTemperature,
+        max_new_tokens: get().chatMaxTokens,
+      })
+      polling = false
+      set(s => ({
+        activeChatThread: s.activeChatThread && s.activeChatId === tid
+          ? { ...s.activeChatThread, messages: [...s.activeChatThread.messages, res.message] }
+          : s.activeChatThread,
+        chatStreamingId: null,
+        chatStreamText: '',
+      }))
+      // Picks up the server-side auto-title and the new preview/count.
+      get().loadChatThreads()
+    } catch (e) {
+      polling = false
+      set({
+        chatStreamingId: null,
+        chatStreamText: '',
+        chatError: e instanceof Error ? e.message : 'Generation failed',
+      })
     }
   },
 

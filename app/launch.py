@@ -6494,6 +6494,21 @@ def list_llm_models(provider: str = ""):
     return {"models": llm_service.get_available_models(provider=p, remote_url=remote_url, api_key=api_key)}
 
 
+@api.post("/api/v1/llm/cancel")
+async def llm_cancel(request: Request):
+    """Stop a running generation. Body: {stream_id}.
+
+    The generation returns its partial text, so a cancelled chat reply is
+    still saved rather than lost.
+    """
+    from services import llm_service
+    body = await request.json()
+    stream_id = (body.get("stream_id") or "").strip()
+    if not stream_id:
+        raise HTTPException(status_code=400, detail="stream_id is required")
+    return {"cancelled": llm_service.cancel_stream(stream_id), "stream_id": stream_id}
+
+
 @api.get("/api/v1/llm/stream-status")
 def llm_stream_status(stream_id: str = None):
     """Return LLM streaming state for real-time display.
@@ -6598,7 +6613,8 @@ async def chat_send_message(tid: str, request: Request):
         thread["title"] = chat_store.title_from_first_message(content)
     chat_store.save_thread(out_dir, thread)
 
-    _ensure_llm_loaded()
+    # A thread may pin its own model; falls back to the configured one.
+    _ensure_llm_loaded(thread.get("model_id") or None)
     stream_id = f"chat-{tid}"
     try:
         text = await asyncio.to_thread(
@@ -6622,11 +6638,23 @@ async def chat_send_message(tid: str, request: Request):
     return {"message": msg, "thread_id": tid, "stream_id": stream_id}
 
 
-def _ensure_llm_loaded():
-    """Auto-load LLM if not already loaded. Reloads if configured model changed."""
+def _ensure_llm_loaded(model_id: str = None):
+    """Auto-load LLM if not already loaded. Reloads if the model changed.
+
+    model_id overrides the configured model for this call, which is what
+    lets a chat thread or a Storywriter pass pick its own model (the
+    outline pass wants a strong instruction-follower, the prose pass wants
+    a writer). Only meaningful for the local provider — remote providers
+    take their model from the service config.
+    """
     from services import llm_service
     services = wgp.server_config.get("services", {})
     desired = services.get("llm_model_id", _DEFAULT_LLM_REPO)
+    if model_id and services.get("llm_provider", "local") == "local":
+        if model_id in llm_service.MODEL_REGISTRY:
+            desired = model_id
+        else:
+            print(f"[LLM] Ignoring unknown model override {model_id!r}")
     desired_device = services.get("llm_device", _llm_default_device())
     desired_provider = services.get("llm_provider", "local")
     desired_remote_url = services.get("llm_remote_url", "")

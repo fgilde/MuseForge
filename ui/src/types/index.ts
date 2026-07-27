@@ -166,9 +166,14 @@ export interface OutputFile {
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'
 export type AspectRatio = 'auto' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
 export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '1080p'
-export type GenerationMode = 'image' | 'video' | 'audio' | 'avatar' | 'tools'
+export type GenerationMode = 'image' | 'video' | 'audio' | 'avatar' | 'tools' | 'text'
 export type EditSubMode = 'retake' | 'inpaint' | 'restyle' | 'outpaint' | 'edit_anything' | 'recast'
 export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer'
+/** Text mode sub-modes. `story` is not built yet — the toggle shows it and
+ *  both the sidebar and the main area render a short "coming soon" note
+ *  instead of a panel. Selectable rather than disabled so the state is
+ *  real and the eventual Story panel is a pure addition. */
+export type TextSubMode = 'chat' | 'story'
 
 export interface ChoiceConfig {
   selection?: string[]

@@ -3,6 +3,7 @@ import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Up
 import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
+import { ChatView } from './ChatView'
 import { useStore } from '../../stores/useStore'
 import type { GenerationJob } from '../../types'
 
@@ -555,6 +556,10 @@ export function MainContent() {
     }
     return items
   }, [startIndex, endIndex, outputs, activeIndex, handleItemVisible, handleItemMeasured, itemOffsets])
+
+  // Text mode owns the whole main area — a conversation, not a media feed.
+  // Placed after every hook above so the hook order stays stable.
+  if (generationMode === 'text') return <ChatView />
 
   return (
     <main className="flex-1 flex flex-col h-full overflow-hidden">

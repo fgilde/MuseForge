@@ -1197,6 +1197,104 @@ export async function llmEnhancePrompt(params: {
   return res.json()
 }
 
+// --- Chat threads (Text mode) ---
+//
+// Conversations live server-side (one JSON per thread in the workspace dir),
+// so a reload or a second tab sees the same state. `POST .../messages` runs
+// SYNCHRONOUSLY until the reply is complete — that can take minutes when the
+// LLM has to load (or download) first, so no request here gets an
+// AbortController timeout. Poll `getLlmStreamStatus('chat-<tid>')` alongside
+// it to render tokens as they arrive.
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  at: number
+  stream_id?: string
+}
+
+export interface ChatThreadSummary {
+  id: string
+  title: string
+  model_id: string
+  created_at: number
+  updated_at: number
+  message_count: number
+  preview: string
+}
+
+export interface ChatThread {
+  version: number
+  id: string
+  title: string
+  system_prompt: string
+  model_id: string
+  created_at: number
+  updated_at: number
+  messages: ChatMessage[]
+}
+
+export async function fetchChatThreads(): Promise<{ threads: ChatThreadSummary[] }> {
+  const res = await fetch(`${BASE}/api/v1/chat/threads`)
+  if (!res.ok) throw new Error('Failed to load chats')
+  return res.json()
+}
+
+export async function createChatThread(body: { title?: string; system_prompt?: string; model_id?: string } = {}): Promise<ChatThread> {
+  const res = await fetch(`${BASE}/api/v1/chat/threads`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error('Failed to create chat')
+  return res.json()
+}
+
+/** Full thread with messages. Returns null when the thread is gone (404). */
+export async function fetchChatThread(tid: string): Promise<ChatThread | null> {
+  const res = await fetch(`${BASE}/api/v1/chat/threads/${tid}`)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error('Failed to load chat')
+  return res.json()
+}
+
+export async function updateChatThread(
+  tid: string,
+  patch: { title?: string; system_prompt?: string; model_id?: string },
+): Promise<ChatThread> {
+  const res = await fetch(`${BASE}/api/v1/chat/threads/${tid}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!res.ok) throw new Error('Failed to update chat')
+  return res.json()
+}
+
+export async function deleteChatThread(tid: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/chat/threads/${tid}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 404) throw new Error('Failed to delete chat')
+}
+
+export async function sendChatMessage(tid: string, body: {
+  content: string
+  images?: string[]
+  max_new_tokens?: number
+  temperature?: number
+  top_p?: number
+}): Promise<{ message: ChatMessage; thread_id: string; stream_id: string }> {
+  const res = await fetch(`${BASE}/api/v1/chat/threads/${tid}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Generation failed' }))
+    throw new Error(err.detail || 'Generation failed')
+  }
+  return res.json()
+}
+
 // --- Audio Analysis ---
 
 export async function uploadAudio(file: File): Promise<{ filename: string; path: string; url: string }> {
@@ -1409,8 +1507,12 @@ export async function planShortFilmPrompts(params: {
   return res.json()
 }
 
-export async function getLlmStreamStatus(): Promise<{ text: string; done: boolean }> {
-  const res = await fetch(`${BASE}/api/v1/llm/stream-status`)
+/** LLM streaming buffer. Omit `streamId` for the shared slot (prompt
+ *  enhancer / Director); pass `chat-<threadId>` for a chat thread so
+ *  concurrent generations don't read each other's tokens. */
+export async function getLlmStreamStatus(streamId?: string): Promise<{ text: string; done: boolean; stream_id?: string }> {
+  const q = streamId ? `?stream_id=${encodeURIComponent(streamId)}` : ''
+  const res = await fetch(`${BASE}/api/v1/llm/stream-status${q}`)
   if (!res.ok) return { text: '', done: true }
   return res.json()
 }

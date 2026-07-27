@@ -39,9 +39,28 @@ _provider: str = "local"
 _remote_url: str = ""       # Base URL for remote/OpenAI-compatible servers
 _api_key: str = ""           # API key for OpenAI/Anthropic
 
-# Auto-unload idle timer
+# Auto-unload idle timer.
+#
+# 15 minutes, not 60 seconds: reloading a 17 GB model costs 60-180 s from
+# disk, and an interactive session (reading a generated chapter, editing an
+# outline) pauses far longer than a minute. The idle timer is not what
+# protects VRAM for the generation pipeline anyway — six call sites unload
+# explicitly before generating (launch.py and director_pipeline.py), so
+# this is belt-and-braces rather than the guarantee.
 _idle_timer: Optional[threading.Timer] = None
-_idle_timeout: float = 60.0  # seconds before auto-unload
+_DEFAULT_IDLE_TIMEOUT: float = 900.0
+_idle_timeout: float = _DEFAULT_IDLE_TIMEOUT  # seconds before auto-unload
+
+
+def set_idle_timeout(seconds: Optional[float] = None) -> float:
+    """Override the auto-unload delay; None restores the default.
+
+    Lets a long writing session keep the model warm without changing the
+    behaviour for one-shot callers.
+    """
+    global _idle_timeout
+    _idle_timeout = _DEFAULT_IDLE_TIMEOUT if seconds is None else max(10.0, float(seconds))
+    return _idle_timeout
 
 # Streaming state — accumulates tokens during generation.
 #
@@ -59,6 +78,10 @@ _stream_done: bool = True
 _stream_lock = threading.Lock()
 
 DEFAULT_STREAM_ID = "default"
+# Stream ids asked to stop. The SSE loop checks this between tokens, so a
+# cancel takes effect within one token rather than at the end of the
+# generation. Consumed (and cleared) by the loop that owns the id.
+_cancelled_streams: set = set()
 _STREAM_TTL = 900.0  # seconds a finished slot stays readable before reaping
 _streams: dict = {}
 
@@ -138,16 +161,39 @@ LLM_ARCHITECTURES = {
     "qwen3-2b":   {"layers": 28, "kv_heads": 4,  "head_dim": 128, "sliding_window": None, "global_layer_ratio": 1.0},
     "qwen3-4b":   {"layers": 36, "kv_heads": 8,  "head_dim": 128, "sliding_window": None, "global_layer_ratio": 1.0},
     "qwen3-9b":   {"layers": 36, "kv_heads": 8,  "head_dim": 128, "sliding_window": None, "global_layer_ratio": 1.0},
-    "qwen3-27b":  {"layers": 48, "kv_heads": 8,  "head_dim": 128, "sliding_window": None, "global_layer_ratio": 1.0},
-    # Gemma 3/4: 5:1 local:global attention pattern, local window 4096.
-    # Most layers' KV is bounded by the window regardless of total ctx.
+    # Qwen3.5/3.6 are 3:1 hybrids (linear Gated-DeltaNet : full attention).
+    # Only the full-attention layers hold a KV cache that grows with ctx;
+    # the linear layers keep a fixed-size state. `layers` therefore counts
+    # ONLY the full-attention layers. Verified against
+    # Qwen/Qwen3.6-27B/config.json: 64 layers, layer_types 3:1 -> 16 full
+    # attention, 4 kv heads, head_dim 256. The old values (48 layers, 8 kv,
+    # hd 128, treated as fully dense) overestimated the cache ~3x, which is
+    # why the 256k hint needed the TYPICAL_USAGE_CTX_CAP workaround.
+    "qwen3-27b":  {"layers": 16, "kv_heads": 4,  "head_dim": 256, "sliding_window": None, "global_layer_ratio": 1.0},
+    # Gemma 3/4 alternate local:global attention. Windows below are from the
+    # real config.json files, not estimates — sliding_window is 1024 for the
+    # Gemma 4 line (the earlier 4096 was carried over from Gemma 3).
     "gemma4-2b":  {"layers": 26, "kv_heads": 4,  "head_dim": 256, "sliding_window": 4096, "global_layer_ratio": 1/6},
     "gemma4-4b":  {"layers": 34, "kv_heads": 4,  "head_dim": 256, "sliding_window": 4096, "global_layer_ratio": 1/6},
-    # Gemma 4 12B "unified" — 48 layers per the model card. kv_heads/head_dim
-    # mirror Gemma 3 12B as an approximation; this only feeds the VRAM size hint,
-    # not functional loading, so refine if the real config differs.
-    "gemma4-12b": {"layers": 48, "kv_heads": 8,  "head_dim": 256, "sliding_window": 4096, "global_layer_ratio": 1/6},
+    # google/gemma-4-12B-it/config.json: 48 layers, 8 kv, hd 256, window
+    # 1024, 8 full-attention layers.
+    "gemma4-12b": {"layers": 48, "kv_heads": 8,  "head_dim": 256, "sliding_window": 1024, "global_layer_ratio": 1/6},
+    # google/gemma-4-26B-A4B-it/config.json: 30 layers, 8 kv, hd 256, window
+    # 1024, 6 full-attention layers. MoE, 128 experts, top-8 (~4B active).
+    # This key was MISSING while a registry entry already declared it, so
+    # _estimate_kv_gb silently returned 0.0 and that model's size hint was
+    # several GB too low.
+    "gemma4-26b": {"layers": 30, "kv_heads": 8,  "head_dim": 256, "sliding_window": 1024, "global_layer_ratio": 1/5},
     "gemma4-27b": {"layers": 62, "kv_heads": 16, "head_dim": 128, "sliding_window": 4096, "global_layer_ratio": 1/6},
+    # google/gemma-4-31B-it/config.json: 60 layers, 16 kv, hd 256, window
+    # 1024, full attention every 6th layer.
+    "gemma4-31b": {"layers": 60, "kv_heads": 16, "head_dim": 256, "sliding_window": 1024, "global_layer_ratio": 1/6},
+    # Mistral 3 family (Mistral-Small-3.2-24B, Magistral-Small-2509,
+    # Ministral-3-14B): 40 layers, 8 kv, head_dim 128, no sliding window.
+    # Skyfall-31B is the same but upscaled to 54 layers.
+    "mistral3-14b": {"layers": 40, "kv_heads": 8, "head_dim": 128, "sliding_window": None, "global_layer_ratio": 1.0},
+    "mistral3-24b": {"layers": 40, "kv_heads": 8, "head_dim": 128, "sliding_window": None, "global_layer_ratio": 1.0},
+    "mistral3-31b": {"layers": 54, "kv_heads": 8, "head_dim": 128, "sliding_window": None, "global_layer_ratio": 1.0},
 }
 
 
@@ -517,6 +563,153 @@ MODEL_REGISTRY = {
             "repeat_last_n": 256,
         },
     },
+
+    # ===================================================================
+    # Long-form writing models (Text mode: Chat + Storywriter)
+    #
+    # Sizes and filenames verified against the HuggingFace API. Several
+    # repos name their files differently from the repo itself - Cydonia
+    # v4.3 ships "v4zg" files, DavidAU's Qwen finetune ships
+    # "NEO-CODE-HERE-2T-OT" files. Do not "tidy" these names.
+    #
+    # --no-context-shift is deliberate on every entry here: without it
+    # llama-server silently discards the OLDEST tokens when the context
+    # fills, which for a story means the outline and opening chapters
+    # vanish and the model starts contradicting itself. With the flag we
+    # get a hard error the caller can answer with summarisation instead.
+    #
+    # NOTE on sampling_defaults: _apply_model_defaults lets registry
+    # values WIN over caller values, so `temperature` is deliberately
+    # absent - the Storywriter needs a low temperature for the
+    # schema-constrained outline pass and a high one for prose, and a
+    # registry temperature would override both. Recommended prose
+    # temperatures are noted per entry for the caller to send.
+    # ===================================================================
+
+    "Crownelius/Crow-4B-Opus-4.6-Distill-Heretic_Qwen3.5": {
+        # Qwen3.5-4B heretic + Opus distillation. Text-only, but 256k
+        # context at 2.9 GB of weights - the best context-per-GB ratio in
+        # the catalog. Too thin for chapter-length prose (4B models loop),
+        # so it is offered for chat and outlining only.
+        "label": "Crow 4B Opus Distill Heretic (Fast, 256k)",
+        "gguf_file": "Crow-4B-Opus-4.6-Distill-Heretic_Qwen3.5.Q5_K_M.gguf",
+        "weights_gb": 2.90, "mmproj_gb": 0.0, "arch": "qwen3-4b",
+        "sampling_defaults": {"top_p": 0.95, "top_k": 20, "min_p": 0.02,
+                              "repeat_penalty": 1.05, "repeat_last_n": 512},
+        "use_cases": ["chat", "story_outline"],
+        "extra_flags": ["-c", "262144", "-np", "1", "-fa", "on",
+                        "--no-context-shift",
+                        "--cache-type-k", "q4_0", "--cache-type-v", "q4_0"],
+    },
+    "HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced": {
+        # Gemma-4-12B-it uncensored on top of the official QAT weights
+        # rather than by ablation, so Q4_K_M keeps its coherence where the
+        # abliterated 12B (marked experimental above) loops on structured
+        # output. Fits the full 256k context in 24 GB. Vision included.
+        # Prose temperature ~0.95.
+        "label": "Gemma 4 12B QAT Uncensored (Vision, 256k)",
+        "gguf_file": "Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+        "mmproj_file": "mmproj-Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-BF16.gguf",
+        "weights_gb": 6.87, "mmproj_gb": 0.16, "arch": "gemma4-12b",
+        "thinking_style": "gemma",
+        "sampling_defaults": {"top_p": 0.95, "top_k": 64, "min_p": 0.05,
+                              "repeat_penalty": 1.1, "repeat_last_n": 512},
+        "use_cases": ["chat", "story_outline", "story_prose"],
+        "extra_flags": ["-c", "262144", "-np", "1", "-fa", "on",
+                        "--no-context-shift",
+                        "--cache-type-k", "q4_0", "--cache-type-v", "q4_0"],
+    },
+    "TheDrummer/Cydonia-24B-v4.3-GGUF": {
+        # Mistral-Small-3.2-24B creative-writing finetune - the reference
+        # prose writer of its class, and there is no successor: the
+        # Mistral-Small 24B line ended (Mistral Small 4 is 119B and does
+        # not fit 24 GB). Text-only. Files are named "v4zg", not "v4.3".
+        # Prose temperature ~1.0.
+        "label": "Cydonia 24B v4.3 (Prose, Uncensored, 128k)",
+        "gguf_file": "Cydonia-24B-v4zg-Q4_K_M.gguf",
+        "weights_gb": 13.35, "mmproj_gb": 0.0, "arch": "mistral3-24b",
+        "sampling_defaults": {"top_p": 0.95, "top_k": 0, "min_p": 0.05,
+                              "repeat_penalty": 1.05, "repeat_last_n": 512},
+        "use_cases": ["chat", "story_prose"],
+        "extra_flags": ["-c", "131072", "-np", "1", "-fa", "on",
+                        "--no-context-shift",
+                        "--cache-type-k", "q4_0", "--cache-type-v", "q4_0"],
+    },
+    "DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF": {
+        # Same base as the Youssofal 27B entry but a heretic2 finetune with
+        # NEO imatrix, and it ships its own mmproj instead of borrowing
+        # unsloth's. Holds the full 256k in 24 GB because Qwen3.6 is a 3:1
+        # hybrid - only 16 of 64 layers grow a KV cache. The all-rounder:
+        # thinking, vision, long context, uncensored.
+        # Prose temperature ~0.85.
+        "label": "Qwen3.6 27B Heretic Finetune (Uncensored, Vision, 256k)",
+        "gguf_file": "Qwen3.6-27B-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf",
+        "mmproj_file": "mmproj-BF16.gguf",
+        "weights_gb": 15.70, "mmproj_gb": 0.87, "arch": "qwen3-27b",
+        "cache_dir_override": "Qwen3.6-27B-Heretic-NEO-CODE",
+        "sampling_defaults": {"top_p": 0.95, "top_k": 20, "min_p": 0.0,
+                              "repeat_penalty": 1.05, "repeat_last_n": 512},
+        "use_cases": ["chat", "story_outline", "story_prose"],
+        "extra_flags": ["-c", "262144", "-np", "1", "-fa", "on",
+                        "--no-context-shift",
+                        "--cache-type-k", "q4_0", "--cache-type-v", "q4_0"],
+    },
+    "ReadyArt/Dark-Scarlett-v0.3-26B-A4B-GGUF": {
+        # Gemma-4-26B-A4B finetune, explicitly positioned for adult and
+        # unaligned prose - the least euphemistic option here. MoE with
+        # ~4B active per token, so it runs at small-model speed. Weak at
+        # schema-constrained output (it is an RP tune), so it is offered
+        # for prose only; the grammar would keep JSON syntactically valid
+        # but not sensible. Prose temperature ~1.0.
+        "label": "Dark Scarlett 26B MoE (Explicit, 256k)",
+        "gguf_file": "Dark-Scarlett-v0.3-26B-A4B-i1-Q5_K_M.gguf",
+        "weights_gb": 17.82, "mmproj_gb": 0.0, "arch": "gemma4-26b",
+        "thinking_style": "gemma",
+        "sampling_defaults": {"top_p": 0.95, "top_k": 0, "min_p": 0.05,
+                              "repeat_penalty": 1.1, "repeat_last_n": 512},
+        "use_cases": ["chat", "story_prose"],
+        "extra_flags": ["-c", "262144", "-np", "1", "-fa", "on",
+                        "--no-context-shift",
+                        "--cache-type-k", "q4_0", "--cache-type-v", "q4_0"],
+    },
+    "HauhauCS/Gemma4-31B-QAT-Uncensored-HauhauCS-Balanced-MTP": {
+        # gemma-4-31B-it uncensored on the official QAT weights; same size
+        # as the abliterated 31B but with less structural erosion and its
+        # own mmproj. Context is the trade-off: 17.4 + 1.12 + KV means 64k
+        # fits and 128k does not - pick the Qwen 27B when the story needs a
+        # bigger window. Prose temperature ~0.95.
+        "label": "Gemma 4 31B QAT Uncensored (Vision, Quality)",
+        "gguf_file": "Gemma4-31B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+        "mmproj_file": "mmproj-Gemma4-31B-QAT-Uncensored-HauhauCS-Balanced-BF16.gguf",
+        "weights_gb": 17.40, "mmproj_gb": 1.12, "arch": "gemma4-31b",
+        "thinking_style": "gemma",
+        "sampling_defaults": {"top_p": 0.9, "top_k": 64, "min_p": 0.05,
+                              "repeat_penalty": 1.1, "repeat_last_n": 512},
+        "use_cases": ["chat", "story_outline", "story_prose"],
+        "extra_flags": ["-c", "65536", "-np", "1", "-fa", "on",
+                        "--no-context-shift",
+                        "--cache-type-k", "q4_0", "--cache-type-v", "q4_0"],
+    },
+    "mistralai/Ministral-3-14B-Instruct-2512-GGUF": {
+        # Mistral's official GGUFs - the strongest instruction-follower
+        # here, which matters for the outline pass. It is a plain instruct
+        # model, so it REFUSES explicit content; offered for outlining and
+        # chat, never as the prose model on the mature path.
+        # max_position_embeddings claims 262144 but reaches it by YaRN from
+        # a 16k original, so anything past ~128k is extrapolation rather
+        # than trained context - hence -c 131072. Prose temperature ~0.8,
+        # outline pass 0.15-0.3.
+        "label": "Ministral 3 14B Instruct (Vision, Outline, filtered)",
+        "gguf_file": "Ministral-3-14B-Instruct-2512-Q5_K_M.gguf",
+        "mmproj_file": "Ministral-3-14B-Instruct-2512-BF16-mmproj.gguf",
+        "weights_gb": 8.96, "mmproj_gb": 0.82, "arch": "mistral3-14b",
+        "sampling_defaults": {"top_p": 0.95, "min_p": 0.03,
+                              "repeat_penalty": 1.05, "repeat_last_n": 512},
+        "use_cases": ["chat", "story_outline"],
+        "extra_flags": ["-c", "131072", "-np", "1", "-fa", "on",
+                        "--no-context-shift",
+                        "--cache-type-k", "q4_0", "--cache-type-v", "q4_0"],
+    },
 }
 
 # Build size_hint strings once at module load. Re-runs if you `import importlib;
@@ -532,6 +725,26 @@ for _repo_id, _info in MODEL_REGISTRY.items():
 # enhancer, referenced by gen models via prompt_enhancer_model) and
 # deprecated / experimental variants. A repo id listed here that isn't
 # currently in the registry is simply skipped.
+def _local_model_order(use_case: str = None) -> list:
+    """Which built-in models to offer, in display order.
+
+    No use_case: the historical curated list (prompt enhancer, Director).
+    "chat": that list plus every long-form model, so a chat can use a
+    model the user already has on disk instead of forcing a fresh
+    multi-gigabyte download.
+    Anything else ("story_outline", "story_prose"): strictly the models
+    that declare it.
+    """
+    if not use_case:
+        return list(_PUBLIC_MODEL_ORDER)
+    matching = models_for_use_case(use_case)
+    if use_case == "chat":
+        seen = set()
+        return [r for r in (_PUBLIC_MODEL_ORDER + matching)
+                if r in MODEL_REGISTRY and not (r in seen or seen.add(r))]
+    return matching
+
+
 _PUBLIC_MODEL_ORDER = [
     "Youssofal/Qwen3.6-27B-Abliterated-Heretic-Uncensored-GGUF",
     "Nesuwka/gemma-4-E2B-it-heretic-ara-Q4_K_M-GGUF",
@@ -541,7 +754,20 @@ _PUBLIC_MODEL_ORDER = [
 ]
 
 
-def get_available_models(provider: str = "local", remote_url: str = "", api_key: str = "") -> list:
+def models_for_use_case(use_case: str) -> list:
+    """Registry ids offering the given use case, registry order.
+
+    Entries without a `use_cases` key are the prompt-enhancement models
+    that predate this field; they are excluded from every filtered list so
+    the Storywriter never offers a model that loops on chapter-length
+    prose.
+    """
+    return [rid for rid, info in MODEL_REGISTRY.items()
+            if use_case in (info.get("use_cases") or [])]
+
+
+def get_available_models(provider: str = "local", remote_url: str = "", api_key: str = "",
+                         use_case: str = None) -> list:
     """Return list of available LLM model options for the UI.
 
     For local provider, returns the curated built-in catalog
@@ -555,7 +781,7 @@ def get_available_models(provider: str = "local", remote_url: str = "", api_key:
             "size_hint": MODEL_REGISTRY[repo_id]["size_hint"],
             "provider": "local",
         }
-        for repo_id in _PUBLIC_MODEL_ORDER
+        for repo_id in _local_model_order(use_case)
         if repo_id in MODEL_REGISTRY
     ]
 
@@ -1718,6 +1944,31 @@ def _stream_write(stream_id: str, *, text=None, done=None) -> None:
         _reap_streams_unlocked()
 
 
+def cancel_stream(stream_id: str) -> bool:
+    """Ask a running generation to stop.
+
+    Returns True if that id is currently streaming. The generation stops at
+    the next token and returns the partial text — callers should treat a
+    cancelled result as "the user stopped this", not as an error.
+    """
+    with _stream_lock:
+        slot = _streams.get(stream_id)
+        active = bool(slot) and not slot.get("done")
+        if active:
+            _cancelled_streams.add(stream_id)
+        return active
+
+
+def _is_cancelled(stream_id: str) -> bool:
+    with _stream_lock:
+        return stream_id in _cancelled_streams
+
+
+def _clear_cancel(stream_id: str) -> None:
+    with _stream_lock:
+        _cancelled_streams.discard(stream_id)
+
+
 def get_stream_status(stream_id: Optional[str] = None) -> dict:
     """Return streaming state for polling.
 
@@ -1803,6 +2054,8 @@ def generate_streaming(
 
     total_tokens = max_new_tokens + thinking_budget
 
+    _clear_cancel(stream_id)
+    cancelled = False
     _stream_write(stream_id, text="", done=False)
 
     if messages:
@@ -1971,6 +2224,11 @@ def generate_streaming(
                     # Show reasoning in the stream buffer wrapped in <think> tags
                     _stream_write(stream_id, text=f"<think>{reasoning_content}</think>")
 
+                if _is_cancelled(stream_id):
+                    _clear_cancel(stream_id)
+                    cancelled = True
+                    break
+
                 token = delta.get("content", "")
                 if token:
                     raw_content += token
@@ -1982,6 +2240,9 @@ def generate_streaming(
                     _stream_write(stream_id, text=display)
             except Exception:
                 continue
+
+            if cancelled:
+                break
 
     except requests.exceptions.RequestException as e:
         # Server socket died mid-stream (common: subprocess crash). Surface
