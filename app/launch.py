@@ -6523,6 +6523,216 @@ def llm_stream_status(stream_id: str = None):
 
 
 # ============================================================================
+# Storywriter (Text mode) — long-form prose as a resumable pipeline. The
+# service layer in services/story_pipeline.py owns planning, persistence and
+# cancellation; these endpoints are transport plus the two things only this
+# module knows: the workspace directory and the master NSFW setting.
+# ============================================================================
+
+
+def _story_dir(workspace: str = None) -> str:
+    return _workspace_dir(workspace)
+
+
+def _story_nsfw_allowed() -> bool:
+    """Mature content is gated by the master switch, and is force-disabled
+    for external providers — an explicit story must never be sent to a
+    hosted API. Mirrors the same guard used for /services-config."""
+    services = wgp.server_config.get("services", {})
+    provider = services.get("llm_provider", "local")
+    return bool(services.get("nsfw_mode", False)) and provider not in _PUBLIC_LLM_PROVIDERS
+
+
+@api.get("/api/v1/story/models")
+def story_models():
+    """Curated model lists per Storywriter pass.
+
+    The outline pass wants instruction-following, the prose pass wants a
+    writer — they are deliberately different catalogs.
+    """
+    from services import llm_service
+
+    def _entries(use_case: str):
+        return [
+            {
+                "id": rid,
+                "label": llm_service.MODEL_REGISTRY[rid]["label"],
+                "size_hint": llm_service.MODEL_REGISTRY[rid].get("size_hint", ""),
+            }
+            for rid in llm_service.models_for_use_case(use_case)
+            if rid in llm_service.MODEL_REGISTRY
+        ]
+
+    return {"outline": _entries("story_outline"), "prose": _entries("story_prose")}
+
+
+@api.get("/api/v1/story/estimate")
+def story_estimate(min_pages: int = 100, chapter_count: int = None):
+    """Turn a page target into words and chapters for the length slider."""
+    from services import story_pipeline
+
+    total_words = story_pipeline.total_target_words(min_pages)
+    chapters = int(chapter_count) if chapter_count else story_pipeline.auto_chapter_count(min_pages)
+    return {
+        "min_pages": min_pages,
+        "total_words": total_words,
+        "chapters": chapters,
+        "words_per_chapter": story_pipeline.chapter_target_words(min_pages, chapters),
+        "words_per_page": story_pipeline.WORDS_PER_PAGE,
+    }
+
+
+@api.get("/api/v1/story/stories")
+def story_list(workspace: str = None):
+    """Story summaries in the workspace, newest first."""
+    from services import story_pipeline
+    return {"stories": story_pipeline.list_stories(_story_dir(workspace))}
+
+
+@api.post("/api/v1/story/stories")
+async def story_start(request: Request):
+    """Start writing a story. Returns immediately with a story_id.
+
+    Body: {premise (required), title?, genre?, tone?, pov?, tense?,
+    audience?, min_pages?, chapter_count?, explicitness?, outline_model?,
+    prose_model?, temperature?, workspace?}. Poll
+    /api/v1/story/stories/{sid}, and read live text from
+    /api/v1/llm/stream-status?stream_id=story-<sid>-outline (or -ch<i>).
+    """
+    from services import story_pipeline
+
+    body = await request.json()
+    if not (body.get("premise") or "").strip():
+        raise HTTPException(status_code=400, detail="premise is required")
+
+    params = dict(body)
+    params.pop("workspace", None)
+    # The pipeline only reads params["nsfw"]; deciding it here keeps the
+    # provider guard in one place.
+    params["nsfw"] = _story_nsfw_allowed()
+    if not params["nsfw"]:
+        params["explicitness"] = "none"
+
+    try:
+        pid = story_pipeline.start_story(
+            params, _story_dir(body.get("workspace")), ensure_model=_ensure_llm_loaded
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not start story: {e}")
+    state = story_pipeline.get_story(pid) or {}
+    return {"story_id": pid, "status": state.get("status", "queued")}
+
+
+@api.get("/api/v1/story/stories/{sid}")
+def story_get(sid: str, workspace: str = None):
+    """Full story state: outline, chapters, synopsis, progress, LLM passes."""
+    from services import story_pipeline
+    state = story_pipeline.get_story(sid) or story_pipeline.load_story(_story_dir(workspace), sid)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Story {sid} not found")
+    return state
+
+
+@api.post("/api/v1/story/stories/{sid}/stop")
+def story_stop(sid: str):
+    """Stop a running story. Chapters already written are kept."""
+    from services import story_pipeline
+    return {"stopped": story_pipeline.stop_story(sid), "story_id": sid}
+
+
+@api.delete("/api/v1/story/stories/{sid}")
+def story_delete(sid: str, workspace: str = None):
+    from services import story_pipeline
+    result = story_pipeline.delete_story(_story_dir(workspace), sid)
+    if not result.get("ok"):
+        reason = result.get("error")
+        raise HTTPException(status_code=409 if reason == "running" else 404,
+                            detail=f"Could not delete story: {reason}")
+    return result
+
+
+@api.post("/api/v1/story/stories/{sid}/chapters/{index}/regenerate")
+async def story_regenerate_chapter(sid: str, index: int, request: Request):
+    """Rewrite one chapter, optionally with an instruction ("darker",
+    "more dialogue"). Continuity is replayed over the chapters after it."""
+    from services import story_pipeline
+
+    body = await request.json() if await request.body() else {}
+    ok, reason = story_pipeline.regenerate_chapter(
+        sid, index,
+        instruction=body.get("instruction"),
+        out_dir=_story_dir(body.get("workspace")),
+        ensure_model=_ensure_llm_loaded,
+    )
+    if not ok:
+        raise HTTPException(status_code=409, detail=reason)
+    return {"status": "regenerating", "story_id": sid, "chapter_index": index}
+
+
+@api.put("/api/v1/story/stories/{sid}/chapters/{index}")
+async def story_edit_chapter(sid: str, index: int, request: Request):
+    """Save a manual edit. The running synopsis is marked stale so the next
+    pass rebuilds it from what is actually written."""
+    from services import story_pipeline
+
+    body = await request.json()
+    text = body.get("text")
+    if text is None:
+        raise HTTPException(status_code=400, detail="text is required")
+    try:
+        ok = story_pipeline.update_chapter_text(
+            _story_dir(body.get("workspace")), sid, index, text
+        )
+    except story_pipeline.StoryBusyError:
+        raise HTTPException(status_code=409, detail="Story is running — stop it before editing")
+    except IndexError:
+        raise HTTPException(status_code=404, detail=f"Chapter index {index} out of range")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Story {sid} not found")
+    return {"status": "saved", "story_id": sid, "chapter_index": index}
+
+
+@api.post("/api/v1/story/stories/{sid}/extend")
+async def story_extend(sid: str, request: Request):
+    """Append chapters, continuing from the current synopsis."""
+    from services import story_pipeline
+
+    body = await request.json()
+    try:
+        count = int(body.get("additional_chapters", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="additional_chapters must be a number")
+    if count < 1:
+        raise HTTPException(status_code=400, detail="additional_chapters must be at least 1")
+
+    ok, reason = story_pipeline.extend_story(
+        sid, count,
+        out_dir=_story_dir(body.get("workspace")),
+        ensure_model=_ensure_llm_loaded,
+    )
+    if not ok:
+        raise HTTPException(status_code=409, detail=reason)
+    return {"status": "extending", "story_id": sid, "additional_chapters": count}
+
+
+@api.post("/api/v1/story/stories/{sid}/export")
+async def story_export(sid: str, request: Request):
+    """Write the story into the workspace as .md or .txt. The file shows up
+    as a text output in the gallery."""
+    from services import story_pipeline
+
+    body = await request.json() if await request.body() else {}
+    fmt = (body.get("format") or "md").lower()
+    try:
+        path = story_pipeline.export_story(_story_dir(body.get("workspace")), sid, fmt)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Story {sid} not found")
+    return {"path": path, "name": os.path.basename(path), "format": fmt}
+
+
+# ============================================================================
 # AudioBook Creator — projects live as JSON in the workspace; the service
 # layer in services/audiobook/ owns the data model, import, TTS mapping and
 # ffmpeg planning. These endpoints are the transport plus the job wiring.
