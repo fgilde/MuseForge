@@ -170,6 +170,47 @@ export function LoraBrowser() {
   // Get the active filter object
   const activeFilter = modelFilters.find(f => f.label === selectedFilter)
 
+  /** Can the selected model actually load this file? The directory says which
+   *  models look there; the LoRA's own base_model says whether it belongs in
+   *  that directory at all. Both have to hold. */
+  const loraVerdict = (lora: InstalledLora) => {
+    const owners = dirModels[lora.directory]
+    const expected = dirBases[lora.directory]
+    const wrongBase = Boolean(
+      lora.base_model && expected?.length && !expected.includes(lora.base_model),
+    )
+    if (wrongBase) {
+      return {
+        usable: false,
+        reason: `Built for ${lora.base_model}, but stored in loras/${lora.directory}`
+                + ` (for ${expected.slice(0, 3).join(', ')}). No model here can load it.`,
+      }
+    }
+    if (owners && !owners.includes(currentModel)) {
+      return {
+        usable: false,
+        reason: owners.length
+          ? `For ${lora.directory} models — e.g. ${owners.slice(0, 3).join(', ')}. Switch model to use it.`
+          : `In loras/${lora.directory}, which no installed model loads from.`,
+      }
+    }
+    return { usable: true, reason: 'Activate it for the selected model and close' }
+  }
+
+  /** CivitAI model id -> the local copy, for marking search results. */
+  const ownedByCivitId = new Map<number, InstalledLora>()
+  for (const lora of installedLoras) {
+    if (lora.civitai_model_id) ownedByCivitId.set(lora.civitai_model_id, lora)
+  }
+
+  // Not named useSomething: the rules-of-hooks lint reads that as a hook call.
+  const applyOwnedLora = async (lora: InstalledLora, key: string) => {
+    if (await activateLora(lora.filename, lora.trained_words)) {
+      setUsed(key)
+      setTimeout(() => setOpen(false), 450)
+    }
+  }
+
   // Load model filters from backend
   useEffect(() => {
     if (open && modelFilters.length === 0) {
@@ -182,6 +223,16 @@ export function LoraBrowser() {
   useEffect(() => {
     if (open) pollDownloads()
   }, [open, pollDownloads])
+
+  // Load what is installed as soon as the browser opens, not only when its
+  // own tab is picked: the search results mark the ones already downloaded.
+  useEffect(() => {
+    if (!open) return
+    fetchInstalledLoras().then(r => setInstalledLoras(r.loras)).catch(() => {})
+    fetchLoraDirectoryModels()
+      .then(map => { setDirModels(map.models); setDirBases(map.bases) })
+      .catch(() => {})
+  }, [open])
 
   // Run initial search when opened
   useEffect(() => {
@@ -779,35 +830,19 @@ export function LoraBrowser() {
                         // Usable here = this model loads from that directory.
                         // Anything else is not a failure to report but a fact
                         // to explain: LoRAs are stored per architecture.
-                        const owners = dirModels[lora.directory]
-                        // The directory alone is not proof: an SD 1.5 LoRA can
-                        // sit in loras/wan, and every wan model would then be
-                        // offered for a file none of them can load.
-                        const expected = dirBases[lora.directory]
-                        const wrongBase = Boolean(
-                          lora.base_model && expected?.length
-                          && !expected.includes(lora.base_model),
-                        )
-                        const usable = !wrongBase && (!owners || owners.includes(currentModel))
+                        const verdict = loraVerdict(lora)
+                        const usable = verdict.usable
+                        const wrongBase = !usable && verdict.reason.startsWith('Built for')
                         const on = activatedLoras?.includes(lora.filename)
                         return (
                           <button
                             onClick={async e => {
                               e.stopPropagation()
                               if (!usable) return
-                              if (await activateLora(lora.filename)) {
-                                setUsed(cardKey)
-                                setTimeout(() => setOpen(false), 450)
-                              }
+                              await applyOwnedLora(lora, cardKey)
                             }}
                             disabled={!usable}
-                            title={usable
-                              ? (on ? 'Already active for this model' : 'Activate it for the selected model and close')
-                              : wrongBase
-                                ? `Built for ${lora.base_model}, but it sits in loras/${lora.directory}, which is for ${expected.slice(0, 3).join(', ')}. MuseForge has no ${lora.base_model} model, so this file cannot be used — delete it or move it.`
-                                : owners && owners.length
-                                  ? `In loras/${lora.directory}, which only these models load from — e.g. ${owners.slice(0, 3).join(', ')}. Switch model to use it.`
-                                  : `In loras/${lora.directory}, which no installed model loads from. This file cannot be used here.`}
+                            title={usable && on ? 'Already active for this model' : verdict.reason}
                             className={`mt-1.5 w-full rounded px-1.5 py-1 text-[9px] font-medium transition-colors ${
                               !usable
                                 ? 'bg-white/10 text-white/40 cursor-not-allowed'
@@ -820,7 +855,7 @@ export function LoraBrowser() {
                               ? `${lora.base_model} — wrong folder`
                               : !usable
                                 ? `for ${lora.directory} models`
-                                : used === cardKey ? 'Added' : on ? 'Active' : 'Use this LoRA'}
+                                : used === cardKey ? 'Added' : on ? 'Active' : 'Use now'}
                           </button>
                         )
                       })()}
@@ -891,7 +926,21 @@ export function LoraBrowser() {
             {/* CivitAI Search Grid */}
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-3">
               {results.map(model => (
-                <ModelCard key={model.id} model={model} onClick={() => selectModel(model.id)} />
+                <ModelCard
+                  key={model.id}
+                  model={model}
+                  onClick={() => selectModel(model.id)}
+                  owned={(() => {
+                    const local = ownedByCivitId.get(model.id)
+                    if (!local) return undefined
+                    const v = loraVerdict(local)
+                    return { label: local.filename, usable: v.usable, reason: v.reason }
+                  })()}
+                  onUseNow={() => {
+                    const local = ownedByCivitId.get(model.id)
+                    if (local) applyOwnedLora(local, `civit/${model.id}`)
+                  }}
+                />
               ))}
             </div>
 

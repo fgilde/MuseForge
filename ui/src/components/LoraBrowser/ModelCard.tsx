@@ -1,9 +1,15 @@
-import { Download, ThumbsUp } from 'lucide-react'
+import { Download, ThumbsUp, Check } from 'lucide-react'
 import type { CivitAIModel } from '../../types'
 
 interface Props {
   model: CivitAIModel
   onClick: () => void
+  /** Set when this exact model is already downloaded — matched by CivitAI id.
+   *  Browsing without knowing what you already own is how the same LoRA gets
+   *  downloaded twice. */
+  owned?: { label: string; usable: boolean; reason: string }
+  /** Activate the owned copy and close, instead of opening the detail page. */
+  onUseNow?: () => void
 }
 
 function formatCount(n: number): string {
@@ -12,7 +18,7 @@ function formatCount(n: number): string {
   return String(n)
 }
 
-export function ModelCard({ model, onClick }: Props) {
+export function ModelCard({ model, onClick, owned, onUseNow }: Props) {
   // Get first image/video from first version
   const allMedia = model.modelVersions?.[0]?.images || []
   // Prefer a still image over video for the card thumbnail
@@ -79,6 +85,37 @@ export function ModelCard({ model, onClick }: Props) {
           {model.type}
         </span>
       </div>
+
+      {owned && (
+        <>
+          <span
+            className="absolute top-1.5 right-1.5 flex items-center gap-0.5 rounded bg-indicator-success/85 px-1.5 py-0.5 text-[9px] font-medium text-white"
+            title={`Already downloaded as ${owned.label}`}
+          >
+            <Check size={9} /> Owned
+          </span>
+          {onUseNow && (
+            <span
+              onClick={e => { e.stopPropagation(); if (owned.usable) onUseNow() }}
+              role="button"
+              tabIndex={owned.usable ? 0 : -1}
+              onKeyDown={e => {
+                if (owned.usable && (e.key === 'Enter' || e.key === ' ')) {
+                  e.preventDefault(); e.stopPropagation(); onUseNow()
+                }
+              }}
+              title={owned.reason}
+              className={`absolute left-1.5 right-1.5 bottom-1.5 rounded px-1.5 py-1 text-center text-[9px] font-medium ${
+                owned.usable
+                  ? 'bg-cta text-white hover:opacity-90 cursor-pointer'
+                  : 'bg-white/15 text-white/50 cursor-not-allowed'
+              }`}
+            >
+              {owned.usable ? 'Use now' : owned.reason.split('.')[0]}
+            </span>
+          )}
+        </>
+      )}
     </button>
   )
 }

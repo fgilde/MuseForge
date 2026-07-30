@@ -1177,7 +1177,7 @@ interface AppState {
   refreshLoraIdMap: () => Promise<void>
   loadLoras: (modelType: string) => Promise<void>
   toggleLora: (filename: string) => void
-  activateInstalledLora: (filename: string) => Promise<boolean>
+  activateInstalledLora: (filename: string, trainedWords?: string[]) => Promise<boolean>
   /** Ensure the LTX-2.3 transition LoRA is downloaded and activated for
    *  blend mode. Called when blend mode is opened. Idempotent: no-op if
    *  the LoRA is already installed and activated. */
@@ -4903,7 +4903,7 @@ export const useStore = create<AppState>((set, get) => ({
   /** Turn an installed LoRA on for the current model, from the browser.
    *  Returns false when the file is not one this model can load — LoRAs live
    *  per architecture, so that is a real answer, not a failure to handle. */
-  activateInstalledLora: async (filename) => {
+  activateInstalledLora: async (filename, trainedWords) => {
     const modelType = get().params.model_type
     if (!modelType) return false
     if (!get().availableLoras.includes(filename)) {
@@ -4911,6 +4911,24 @@ export const useStore = create<AppState>((set, get) => ({
     }
     if (!get().availableLoras.includes(filename)) return false
     if (!get().params.activated_loras.includes(filename)) get().toggleLora(filename)
+
+    // Trigger words too, or the LoRA is loaded and does nothing — which is
+    // indistinguishable from broken. Only the ones not already in the prompt,
+    // appended so an existing prompt is never rewritten.
+    const words = (trainedWords || []).map(w => w.trim()).filter(Boolean)
+    if (words.length) {
+      const prompt = String(get().params.prompt || '')
+      const lower = prompt.toLowerCase()
+      const missing = words.filter(w => !lower.includes(w.toLowerCase()))
+      if (missing.length) {
+        set(s => ({
+          params: {
+            ...s.params,
+            prompt: prompt.trim() ? `${prompt.trim()}, ${missing.join(', ')}` : missing.join(', '),
+          },
+        }))
+      }
+    }
     return true
   },
 
