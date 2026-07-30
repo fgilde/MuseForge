@@ -7944,6 +7944,61 @@ def reroll_library_voice(voice_id: str, workspace: str = None):
     return updated
 
 
+@api.post("/api/v1/voices/{voice_id}/freeze")
+async def freeze_library_voice(voice_id: str, request: Request):
+    """Keep the audition you liked: make it the voice's reference clip.
+
+    This is the only way to fix a voice that was built from a written
+    description. Those engines sample a fresh speaker on every run — measured,
+    not assumed: three renders of one line with one pinned seed came back with
+    three different voices. Freezing switches the voice to a cloning engine
+    with that take as its reference, so from then on every passage is spoken
+    by the same person.
+
+    Body: {engine?, workspace?}. `engine` must be one that can clone;
+    IndexTTS2 by default, since it also carries per-line emotion.
+    """
+    from services import voice_library
+
+    body = await request.json() if await request.body() else {}
+    workspace = body.get("workspace") or _get_active_workspace()
+    out_dir = _voice_dir(workspace)
+    voice = voice_library.get_voice(out_dir, voice_id)
+    if voice is None:
+        raise HTTPException(status_code=404, detail=f"Voice {voice_id} not found")
+
+    sample = voice.get("sample_path") or ""
+    resolved = sample if os.path.isabs(sample) else os.path.join(
+        _workspace_dir(workspace), os.path.basename(sample))
+    if not sample or not os.path.isfile(resolved):
+        raise HTTPException(
+            status_code=400,
+            detail="Audition this voice first — the take you keep is what gets frozen.")
+
+    engine = body.get("engine") or "index_tts2"
+    caps = voice_library.ENGINES.get(engine)
+    if caps is None or not caps["clone"]:
+        cloning = [name for name, one in voice_library.ENGINES.items() if one["clone"]]
+        raise HTTPException(
+            status_code=400,
+            detail=f"{engine} cannot clone a recording. Use one of: {', '.join(cloning)}")
+
+    updated = voice_library.update_voice(
+        out_dir, voice_id, {"reference_path": resolved, "model_type": engine})
+    duration = None
+    try:
+        from services.audiobook import render as ab_render
+        duration = ab_render.probe_duration(resolved)
+    except Exception:  # noqa: BLE001 — a missing ffprobe must not fail the freeze
+        pass
+    warnings = []
+    if duration and duration < 8:
+        warnings.append(
+            f"The frozen take is only {duration:.0f}s. Cloning is more faithful "
+            "with 10-30 seconds — audition a longer line and freeze that instead.")
+    return {"voice": updated, "frozen_from": resolved, "warnings": warnings}
+
+
 @api.post("/api/v1/voices/{voice_id}/preview")
 async def preview_library_voice(voice_id: str, request: Request):
     """Audition a library voice. Returns a job_id.
@@ -8245,20 +8300,28 @@ async def ab_preview_passage(pid: str, request: Request):
         source_block is not None
         and (source_block.attached_sfx or source_block.attached_music)
     ) else None
+    # Set before the worker starts, so no poll can see the bare speech as the
+    # finished result: the generation marks the job completed, and the mix only
+    # runs after that.
+    _jobs[job_id]["_mix_pending"] = mix_over is not None
 
     def _worker():
-        _run_generation(job_id)
-        if mix_over is None:
-            return
-        job = _jobs.get(job_id) or {}
-        if job.get("status") != "completed":
-            return
         try:
-            _ab_mix_passage_effects(job, project, chapter, run, mix_over, workspace)
-        except Exception as e:  # noqa: BLE001 — the speech itself is fine, so a
-            # failed bed must degrade to "no bed", not to a failed preview.
-            traceback.print_exc()
-            job["message"] = f"Done (effects could not be mixed: {e})"
+            _run_generation(job_id)
+            job = _jobs.get(job_id) or {}
+            if mix_over is None or job.get("status") != "completed":
+                return
+            try:
+                _ab_mix_passage_effects(job, project, chapter, run, mix_over, workspace)
+            except Exception as e:  # noqa: BLE001 — the speech itself is fine, so
+                # a failed bed must degrade to "no bed", not to a failed preview.
+                traceback.print_exc()
+                job["message"] = f"Done (effects could not be mixed: {e})"
+        finally:
+            # Always: a cancelled or failed generation must not leave the job
+            # reporting "running" for good.
+            if job_id in _jobs:
+                _jobs[job_id]["_mix_pending"] = False
 
     threading.Thread(target=_worker, daemon=False).start()
     return {"job_id": job_id, "profile_id": profile_id,

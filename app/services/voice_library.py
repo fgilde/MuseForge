@@ -49,14 +49,19 @@ _SEED_MAX = 0x7FFFFFFF
 
 
 def new_seed() -> int:
-    """A fresh voice identity.
+    """A fixed seed per voice, assigned once and kept.
 
-    Every voice gets one at creation and keeps it. For the engines that build
-    a speaker from a written description (Qwen3 Voice Design / Custom Voice)
-    the seed decides who that speaker is, so a voice without a fixed seed
-    sounds like a different person in every paragraph — which is exactly what
-    it used to do. Re-rolling is therefore an explicit action, not a
-    side effect of previewing again.
+    What it buys: the render cache keys on the whole generation request, so a
+    voice whose seed stops moving lets an unchanged passage be reused instead
+    of re-voiced, and an audition and the book ask for the same thing.
+
+    What it does NOT buy, measured rather than assumed: reproducibility on the
+    engines that build a speaker from a written description. Three renders of
+    one line through Qwen3 Voice Design with one pinned seed came back as three
+    different voices (identical length, different audio), and KugelAudio
+    without a clip behaves the same. Those models sample a speaker afresh every
+    run. The only way to keep such a voice is to freeze a take you like as its
+    reference clip — see the /voices/{id}/freeze endpoint.
     """
     return random.randint(1, _SEED_MAX)
 

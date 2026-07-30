@@ -1453,6 +1453,7 @@ interface AppState {
   createVoiceEntry: (draft: api.VoiceDraft) => Promise<string | null>
   patchVoiceEntry: (id: string, patch: api.VoiceDraft) => Promise<void>
   rerollVoiceEntry: (id: string) => Promise<void>
+  freezeVoiceEntry: (id: string, engine?: string) => Promise<void>
   deleteVoiceEntry: (id: string) => Promise<void>
   /** Auditions, keyed by library voice id or in-book profile id — one at a
    *  time, since each one occupies the generation slot anyway. */
@@ -5993,6 +5994,20 @@ export const useStore = create<AppState>((set, get) => ({
       }))
     } catch (e) {
       set({ voicesError: e instanceof Error ? e.message : 'Could not re-roll the voice' })
+    }
+  },
+
+  /** Turn the current audition into the voice's reference clip. */
+  freezeVoiceEntry: async (id, engine) => {
+    set({ voicesError: null })
+    try {
+      const { voice, warnings } = await api.freezeVoice(id, engine)
+      set(s => ({
+        voices: s.voices.map(v => (v.id === id ? voice : v)),
+        voicePreviewWarnings: { ...s.voicePreviewWarnings, [id]: warnings || [] },
+      }))
+    } catch (e) {
+      set({ voicesError: e instanceof Error ? e.message : 'Could not keep this take' })
     }
   },
 

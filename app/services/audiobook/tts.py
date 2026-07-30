@@ -68,10 +68,18 @@ qwen3_tts_customvoice  (models/TTS/qwen3_handler.py)
 Not mapped here: ``qwen3_tts_base`` (cloning + reference transcript in
 alt_prompt) — add an entry to ``MODEL_CAPS`` if a voice profile ever needs it.
 
-Determinism: the seed comes from ``run_id|voice_id|emotion`` (SHA-256 truncated
-to 31 bits), so the paragraph preview and the chapter export request the exact
-same generation.  Change any of the three and you get a new performance; change
-nothing and it sounds identical.
+Seeds: a library voice carries a fixed seed and every run of that voice uses
+it, so a preview and the chapter export send the identical request and the
+render cache can recognise an unchanged passage.  Book-local profiles with no
+pinned seed fall back to ``run_id|voice_id|emotion`` (SHA-256 truncated to 31
+bits).
+
+The same request is NOT the same audio, though — measured, not assumed: three
+renders of one line through ``qwen3_tts_voicedesign`` with one pinned seed came
+back as three different voices, and ``kugelaudio_0_open`` without a clip does
+the same.  Those models resample the speaker every run, so a voice built from a
+description alone cannot be kept.  Freezing an audition as ``voice_ref_path``
+on a cloning engine is what makes a voice reproducible (``/voices/{id}/freeze``).
 
 Self-check: ``python -m services.audiobook.tts`` from ``app/``.
 """
@@ -374,11 +382,11 @@ def plan_run(
 
     emotion = resolve_emotion(run, profile)
     warnings: list[str] = []
-    # A pinned seed IS the voice for engines that cannot clone: they build a
-    # speaker from a description, and the seed decides who that speaker turns
-    # out to be. Deriving it per run gave every paragraph a different person
-    # and made an audition unrepeatable. Only voices without a pinned seed
-    # (book-local profiles from a document import) fall back to derivation.
+    # One seed for the whole voice rather than one per run: a run-derived seed
+    # made every paragraph a different generation request, so the render cache
+    # could never recognise an unchanged passage, and the audition asked for
+    # something different from the book. Voices without a pinned seed
+    # (book-local profiles from a document import) still derive one.
     seed = profile.seed or derive_seed(run.id, profile.id, emotion)
     estimated = estimate_speech_seconds(text)
     lang = language or profile.params.get("language") or project.language or "en"

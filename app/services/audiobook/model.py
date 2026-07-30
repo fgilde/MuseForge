@@ -192,10 +192,10 @@ class VoiceProfile:
     # IndexTTS2 second reference audio (emotion transfer), optional.
     emotion_ref_path: Optional[str] = None
     default_emotion: Optional[str] = None
-    # Fixed generation seed. For engines that build a speaker from a written
-    # description instead of cloning a clip, this seed IS the voice: change it
-    # and you get a different person. None means "derive one per run", which
-    # is only right for cloned voices, where the clip carries the identity.
+    # Fixed generation seed, so every run of this voice asks for the same
+    # thing and the render cache can do its job. It does not make a
+    # description-built voice reproducible — those engines resample the speaker
+    # every run (see voice_library.new_seed). None means "derive one per run".
     seed: Optional[int] = None
     params: dict = field(default_factory=dict)
 

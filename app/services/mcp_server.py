@@ -634,8 +634,11 @@ def preview_voice(voice_id: str, text: str = "") -> dict:
     """Audition a library voice. Returns a job_id; poll job_status.
 
     Goes through the same planner a real render uses, so a voice that
-    previews will also render. Repeating it gives the same voice: every voice
-    carries a fixed seed, and only reroll_voice changes it.
+    previews will also render.
+
+    Repeating it does NOT give the same voice unless the voice has a reference
+    clip: the description-driven engines resample a speaker every run. Audition
+    until one is good, then freeze_voice to keep it.
     """
     return _post(f"/api/v1/voices/{voice_id}/preview",
                  json={"text": text} if text else {})
@@ -643,17 +646,30 @@ def preview_voice(voice_id: str, text: str = "") -> dict:
 
 @mcp.tool()
 def reroll_voice(voice_id: str) -> dict:
-    """Give the voice a new identity — another take on the same description.
+    """New seed and a cleared audition — start looking for a voice again.
 
-    Only meaningful for engines that cannot clone (Qwen3 Voice Design /
-    Custom Voice): there the seed decides who the speaker is, so the same
-    description with a new seed is a different person. Cloned voices take
-    their identity from the reference clip and are unaffected.
-
-    Call this to search for a voice you like, then stop — previewing never
-    changes it, and every passage in a book uses the voice's pinned seed.
+    Cosmetic on its own: the seed does not decide who a description-built
+    speaker turns out to be (measured: three renders with one pinned seed gave
+    three voices). Use it to discard a stored audition; use freeze_voice to
+    actually keep one.
     """
     return _post(f"/api/v1/voices/{voice_id}/reroll")
+
+
+@mcp.tool()
+def freeze_voice(voice_id: str, engine: str = "index_tts2") -> dict:
+    """Keep the audition you liked: it becomes the voice's reference clip.
+
+    THE way to make a voice reproducible. Engines that build a speaker from a
+    written description sample a new one on every render, so a voice without a
+    clip is a different person in every paragraph. Freezing switches the voice
+    to a cloning engine with that take as its reference.
+
+    Order: create_voice -> preview_voice (repeat until good) -> freeze_voice.
+    Returns {voice, frozen_from, warnings}; a warning says so when the frozen
+    take is shorter than cloning likes.
+    """
+    return _post(f"/api/v1/voices/{voice_id}/freeze", json={"engine": engine})
 
 
 @mcp.tool()

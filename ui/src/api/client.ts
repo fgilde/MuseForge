@@ -2166,8 +2166,10 @@ export interface VoiceLibraryEntry {
   description: string
   params: Record<string, number | string | boolean>
   sample_path?: string | null
-  /** Fixed generation seed. For engines that cannot clone, this IS the voice:
-   *  a different seed with the same description is a different person. */
+  /** Fixed generation seed, so every render of this voice sends the identical
+   *  request and the cache can reuse an unchanged passage. It does NOT make a
+   *  description-built voice reproducible — those engines resample the speaker
+   *  every run; freeze a take you like instead (`freezeVoice`). */
   seed?: number | null
   created_at: number
   updated_at: number
@@ -2208,11 +2210,23 @@ export async function updateVoice(id: string, patch: VoiceDraft): Promise<VoiceL
   return storyJson(res, 'Saving the voice')
 }
 
-/** Give the voice a new identity — a different take on the same description.
- *  Explicit, because previewing must never change a voice you decided to keep. */
 export async function rerollVoice(id: string): Promise<VoiceLibraryEntry> {
   const res = await fetch(`${BASE}/api/v1/voices/${id}/reroll`, { method: 'POST' })
   return storyJson(res, 'Re-rolling the voice')
+}
+
+/** Keep the audition you liked: it becomes the voice's reference clip and the
+ *  voice switches to a cloning engine. The only way to fix a voice built from a
+ *  description — those engines sample a new speaker on every single run. */
+export async function freezeVoice(
+  id: string, engine?: string,
+): Promise<{ voice: VoiceLibraryEntry; frozen_from: string; warnings: string[] }> {
+  const res = await fetch(`${BASE}/api/v1/voices/${id}/freeze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(engine ? { engine } : {}),
+  })
+  return storyJson(res, 'Keeping this take')
 }
 
 export async function deleteVoice(id: string): Promise<void> {

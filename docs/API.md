@@ -100,18 +100,25 @@ to match. Applying is a separate call with the subset you accept.
 |---|---|
 | `GET/POST /voices` | The workspace voice library, shared by Speech and audiobooks |
 | `PUT/DELETE /voices/{id}` | Patch or remove a voice |
-| `POST /voices/{id}/preview` | Audition a voice; returns `{job_id}`. Repeatable — the voice's pinned seed makes it the same voice every time |
-| `POST /voices/{id}/reroll` | New identity: another take on the same description. Only meaningful for engines that cannot clone |
+| `POST /voices/{id}/preview` | Audition a voice; returns `{job_id}` |
+| `POST /voices/{id}/freeze` | Keep the current audition as the voice's reference clip, switching to a cloning engine |
+| `POST /voices/{id}/reroll` | New seed, audition cleared — start looking for a voice again |
 | `POST /voices/{id}/speak` | Read arbitrary text with a library voice (real output) |
 | `GET /activity` | Everything running — jobs, Director pipelines, story runs and analyses, audiobook renders — each with the exact path that stops it |
 | `POST /activity/stop-all` | Stop everything, reported per item |
 
-Every voice carries a fixed `seed`. For engines that build a speaker from a
-written description instead of cloning a clip (Qwen3 Voice Design / Custom
-Voice) that seed IS the voice: the same description with another seed is a
-different person. It is assigned once, survives edits and previews, is copied
-into an audiobook with the voice, and changes only via `/reroll` — otherwise
-every paragraph would be read by someone else.
+**Keeping a voice.** The engines that build a speaker from a written
+description (Qwen3 Voice Design / Custom Voice, and KugelAudio without a clip)
+resample the speaker on every render — measured, not assumed: three renders of
+one line with one pinned seed came back as three different voices. So a
+description alone cannot give you a voice you keep. The workflow is
+`preview` until a take is good, then `freeze` it: that take becomes the voice's
+`reference_path` and the engine switches to a cloning one, after which every
+passage is spoken by the same person.
+
+Every voice also carries a fixed `seed`, copied into an audiobook with the
+voice. Its job is cache correctness — an unchanged passage sends the identical
+request and is reused rather than re-voiced. It does not pin the voice.
 
 A voice references its recording rather than copying it, so the same audio can
 back several voices — and a deleted file surfaces as `reference_missing` with

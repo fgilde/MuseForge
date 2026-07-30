@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Mic2, Upload, Loader2, Play, Square, Circle, AlertTriangle, Check,
-  RefreshCw, Trash2, BookAudio, Dices,
+  RefreshCw, Trash2, BookAudio, Dices, Snowflake,
 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { uploadAudio, type VoiceEngine, type VoiceLibraryEntry } from '../../api/client'
@@ -81,6 +81,7 @@ function VoiceCard({ voice, engine, engines }: {
   const patch = useStore(s => s.patchVoiceEntry)
   const remove = useStore(s => s.deleteVoiceEntry)
   const reroll = useStore(s => s.rerollVoiceEntry)
+  const freeze = useStore(s => s.freezeVoiceEntry)
   const preview = useStore(s => s.previewLibraryVoice)
   const previewBusy = useStore(s => s.voicePreviewBusy)
   const previewUrls = useStore(s => s.voicePreviewUrls)
@@ -407,27 +408,39 @@ function VoiceCard({ voice, engine, engines }: {
           require one (KugelAudio) and has none is in exactly the same boat. */}
       {(!voice.reference_path || voice.reference_missing) && (
         <div className="mt-3 rounded-xl border border-border bg-bg-tertiary/40 p-2.5">
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="text-[10px] uppercase tracking-wider text-text-muted">
-                Voice identity
-              </div>
-              <p className="mt-0.5 text-[11px] text-text-secondary">
-                Seed <span className="font-mono">{voice.seed ?? '—'}</span> — kept
-                for every passage, so this voice stays the same person.
-              </p>
-            </div>
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">
+            Voice identity
+          </div>
+          <p className="mt-1 text-[11px] text-text-secondary">
+            Without a reference clip this engine invents a speaker on every
+            single render — the same description does not give you the same
+            person twice. Audition until you hear one you like, then keep that
+            take: it becomes this voice's reference clip and every passage is
+            spoken by it.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <button
+              onClick={() => freeze(voice.id)}
+              disabled={!previewUrl || previewing}
+              title={previewUrl
+                ? 'Make the audition below this voice’s reference clip'
+                : 'Audition the voice first — the take you keep is what gets frozen'}
+              className="flex items-center gap-1 rounded-lg bg-cta px-2.5 py-1 text-[11px] font-medium text-white disabled:opacity-40"
+            >
+              <Snowflake size={11} /> Keep this take
+            </button>
             <button
               onClick={() => reroll(voice.id)}
-              className="shrink-0 flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
-              title="Another take on the same description — a different person"
+              className="flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+              title="Drop the stored audition and start looking again"
             >
-              <Dices size={11} /> New take
+              <Dices size={11} /> Start over
             </button>
           </div>
-          <p className="mt-1 text-[10px] text-text-muted">
-            Auditioning never changes it. Re-roll until you like the voice, then
-            leave it alone.
+          <p className="mt-1.5 text-[10px] text-text-muted">
+            Seed <span className="font-mono">{voice.seed ?? '—'}</span> — fixed so
+            an unchanged passage is not re-rendered. It does not pin the voice;
+            only keeping a take does.
           </p>
         </div>
       )}
