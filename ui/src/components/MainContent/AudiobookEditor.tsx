@@ -470,8 +470,17 @@ export function AudiobookEditor() {
       {popover && (
         <div
           className="glass-panel fixed z-50 w-56 rounded-xl p-2 shadow-2xl"
-          style={{ left: Math.min(popover.x, window.innerWidth - 240), top: popover.y + 8 }}
+          style={{
+            left: Math.min(popover.x, window.innerWidth - 240),
+            // Clamp the bottom too: selecting near the bottom of a long
+            // chapter otherwise put the buttons below the viewport.
+            top: Math.min(popover.y + 8, Math.max(8, window.innerHeight - 180)),
+          }}
+          // Both handlers, not just mousedown: a mouseup inside the popover
+          // would otherwise reach the container and re-resolve the still-live
+          // selection while the click was still being dispatched.
           onMouseDown={e => e.stopPropagation()}
+          onMouseUp={e => e.stopPropagation()}
         >
           <div className="mb-1.5 flex items-start gap-1.5">
             <p className="min-w-0 flex-1 truncate text-[10px] italic text-text-secondary"

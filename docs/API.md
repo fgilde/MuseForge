@@ -37,6 +37,7 @@ The core generation workflow:
 | `GET/POST /story/stories` | List stories, start a new one |
 | `GET/DELETE /story/stories/{id}` | Full state (outline, chapters, progress), delete |
 | `POST /story/stories/{id}/stop` | Stop writing, keep what exists |
+| `POST /story/stories/{id}/stop-operation` | Stop a running analysis, translation or rewrite. The story keeps its status |
 | `POST /story/stories/{id}/extend` | Append N chapters |
 | `POST /story/stories/{id}/chapters/{i}/regenerate` | Rewrite a chapter, optional `instruction` |
 | `PUT /story/stories/{id}/chapters/{i}` | Save a manual edit |
@@ -101,7 +102,7 @@ to match. Applying is a separate call with the subset you accept.
 | `PUT/DELETE /voices/{id}` | Patch or remove a voice |
 | `POST /voices/{id}/preview` | Audition a voice; returns `{job_id}` |
 | `POST /voices/{id}/speak` | Read arbitrary text with a library voice (real output) |
-| `GET /activity` | Everything running, each with the exact path that stops it |
+| `GET /activity` | Everything running — jobs, Director pipelines, story runs and analyses, audiobook renders — each with the exact path that stops it |
 | `POST /activity/stop-all` | Stop everything, reported per item |
 
 A voice references its recording rather than copying it, so the same audio can
