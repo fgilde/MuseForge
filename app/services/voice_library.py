@@ -146,80 +146,103 @@ def sanitize_entry(entry: dict) -> dict:
     return out
 
 
-def load_library(out_dir: str) -> list[dict]:
+def _read_unlocked(out_dir: str) -> tuple[list[dict], bool]:
+    """(voices, healed). Caller must hold _lock."""
     path = library_path(out_dir)
     if not os.path.isfile(path):
-        return []
+        return [], False
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
-        return []
+        return [], False
     entries = [e for e in (data.get("voices") if isinstance(data, dict) else data) or []
                if isinstance(e, dict)]
     voices = [sanitize_entry(e) for e in entries]
-    # Write the healed seeds straight back. sanitize_entry mints one for a
-    # voice saved before seeds existed, and a mint that is never persisted is
-    # worse than none: the voice gets a NEW identity on every request, which
-    # is exactly the drift this is meant to stop.
-    if any(before.get("seed") != after["seed"]
-           for before, after in zip(entries, voices)):
-        try:
-            save_library(out_dir, voices)
-        except OSError as e:
-            print(f"[voices] Could not persist healed seeds: {e}")
-    return voices
+    healed = any(before.get("seed") != after["seed"]
+                 for before, after in zip(entries, voices))
+    return voices, healed
+
+
+def _write_unlocked(out_dir: str, voices: list[dict]) -> None:
+    """Caller must hold _lock. Strips the derived fields — they are recomputed
+    on load, and persisting them would let a stale "ready: true" outlive the
+    file it described."""
+    os.makedirs(out_dir, exist_ok=True)
+    persisted = [
+        {k: v for k, v in voice.items()
+         if k not in ("ready", "reference_missing", "emotion_support",
+                      "supports_cloning")}
+        for voice in voices
+    ]
+    _write_atomic(library_path(out_dir),
+                  {"version": LIBRARY_VERSION, "voices": persisted})
+
+
+# Every mutation below holds the lock across read-modify-write. Reading the
+# file, editing the list and writing it back as three separate steps is a
+# lost-update race: two concurrent requests both read the same snapshot and
+# the second write drops whatever the first added. A voice disappeared from a
+# live library exactly that way. _lock is NOT reentrant, so nothing in here
+# may call a public function.
+
+
+def load_library(out_dir: str) -> list[dict]:
+    with _lock:
+        voices, healed = _read_unlocked(out_dir)
+        # A minted seed that is never persisted is worse than none: the voice
+        # gets a new identity on every request, which is the drift the seed
+        # exists to stop.
+        if healed:
+            try:
+                _write_unlocked(out_dir, voices)
+            except OSError as e:
+                print(f"[voices] Could not persist healed seeds: {e}")
+        return voices
 
 
 def save_library(out_dir: str, voices: list[dict]) -> None:
-    os.makedirs(out_dir, exist_ok=True)
-    # Strip the derived fields — they are recomputed on load, and persisting
-    # them would let a stale "ready: true" outlive the file it described.
-    persisted = []
-    for voice in voices:
-        clean = {k: v for k, v in voice.items()
-                 if k not in ("ready", "reference_missing", "emotion_support",
-                              "supports_cloning")}
-        persisted.append(clean)
     with _lock:
-        _write_atomic(library_path(out_dir),
-                      {"version": LIBRARY_VERSION, "voices": persisted})
+        _write_unlocked(out_dir, voices)
 
 
 def add_voice(out_dir: str, **kwargs) -> dict:
-    voices = load_library(out_dir)
-    entry = new_entry(index=len(voices), **kwargs)
-    voices.append(entry)
-    save_library(out_dir, voices)
+    with _lock:
+        voices, _ = _read_unlocked(out_dir)
+        entry = new_entry(index=len(voices), **kwargs)
+        voices.append(entry)
+        _write_unlocked(out_dir, voices)
     return sanitize_entry(entry)
 
 
 def update_voice(out_dir: str, voice_id: str, patch: dict) -> dict | None:
-    voices = load_library(out_dir)
-    found = None
-    for voice in voices:
-        if voice.get("id") != voice_id:
-            continue
-        for key, value in (patch or {}).items():
-            # id and created_at are identity, not content.
-            if key in ("id", "created_at"):
+    with _lock:
+        voices, _ = _read_unlocked(out_dir)
+        found = None
+        for voice in voices:
+            if voice.get("id") != voice_id:
                 continue
-            voice[key] = value
-        voice["updated_at"] = time.time()
-        found = voice
-        break
-    if found is None:
-        return None
-    save_library(out_dir, voices)
+            for key, value in (patch or {}).items():
+                # id and created_at are identity, not content.
+                if key in ("id", "created_at"):
+                    continue
+                voice[key] = value
+            voice["updated_at"] = time.time()
+            found = voice
+            break
+        if found is None:
+            return None
+        _write_unlocked(out_dir, voices)
     return sanitize_entry(found)
 
 
 def delete_voice(out_dir: str, voice_id: str) -> bool:
-    voices = load_library(out_dir)
-    remaining = [v for v in voices if v.get("id") != voice_id]
-    if len(remaining) == len(voices):
-        return False
-    save_library(out_dir, remaining)
+    with _lock:
+        voices, _ = _read_unlocked(out_dir)
+        remaining = [v for v in voices if v.get("id") != voice_id]
+        if len(remaining) == len(voices):
+            return False
+        _write_unlocked(out_dir, remaining)
     return True
 
 
@@ -339,6 +362,26 @@ if __name__ == "__main__":
             f.write("{ not json")
         assert load_library(d) == []
 
-        print("voice_library self-check: OK")
+        # -- concurrent adds must not lose each other. The old
+        #    read-modify-write without a lock dropped whichever add landed
+        #    first, which is how a voice vanished from a live library.
+        import threading as _th
+        race_dir = os.path.join(d, "race")
+        os.makedirs(race_dir, exist_ok=True)
+        save_library(race_dir, [])
+        threads = [
+            _th.Thread(target=add_voice, args=(race_dir,),
+                       kwargs={"name": f"v{i}", "model_type": "kugelaudio_0_open"})
+            for i in range(12)
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        survived = load_library(race_dir)
+        assert len(survived) == 12,             f"lost {12 - len(survived)} of 12 concurrent adds"
+        assert len({v["id"] for v in survived}) == 12, "duplicate ids"
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+    print("voice_library self-check: OK")
