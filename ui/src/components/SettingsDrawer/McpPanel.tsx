@@ -67,6 +67,8 @@ const TOOLS: Array<[string, string]> = [
   ['list_voices', 'The shared workspace voice library'],
   ['create_voice', 'Add a named voice, optionally from a recording'],
   ['preview_voice', 'Audition a library voice'],
+  ['speak_with_voice', 'Read text aloud with a library voice'],
+  ['audiobook_preview_passage', 'Hear one passage before rendering'],
   ['list_activity', 'Everything running, with how to stop it'],
   ['stop_all_activity', 'Stop every running task'],
   ['story_translate', 'Add a translation of a story'],

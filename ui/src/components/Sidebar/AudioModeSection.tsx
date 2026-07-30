@@ -121,6 +121,7 @@ export function AudioModeSection() {
 
   return (
     <div className="space-y-3">
+
       {/* Audio mode selector — shown for any model that exposes audio_prompt_type_sources
           UNLESS the model opted into voice-count-driven mode (KugelAudio). For those,
           the voice-slot buttons below are the only mode UI to eliminate dual-source-

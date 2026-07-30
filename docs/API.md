@@ -77,6 +77,7 @@ run without overwriting each other's output.
 | `GET /audiobook/voice-presets` | Voice starting points and audition sample lines |
 | `POST /audiobook/projects/{id}/voices/{vid}/preview` | Audition a voice in the project |
 | `POST /audiobook/projects/{id}/voices/import` | Copy a library voice into the project |
+| `POST /audiobook/projects/{id}/preview-passage` | Speak one passage to check a voice |
 
 A project is `chapters[] -> blocks[] -> runs[]`, where each run carries its
 voice binding and optional emotion. Runs, not character offsets, so voice
@@ -98,6 +99,7 @@ to match. Applying is a separate call with the subset you accept.
 | `GET/POST /voices` | The workspace voice library, shared by Speech and audiobooks |
 | `PUT/DELETE /voices/{id}` | Patch or remove a voice |
 | `POST /voices/{id}/preview` | Audition a voice; returns `{job_id}` |
+| `POST /voices/{id}/speak` | Read arbitrary text with a library voice (real output) |
 | `GET /activity` | Everything running, each with the exact path that stops it |
 | `POST /activity/stop-all` | Stop everything, reported per item |
 
@@ -210,6 +212,8 @@ Or in an `mcp.json`-style config:
 | Tool | Purpose |
 |---|---|
 | `list_voices()` / `create_voice(...)` / `preview_voice(id)` | The shared voice library |
+| `speak_with_voice(id, text, ...)` | Read text aloud with a library voice |
+| `audiobook_preview_passage(id, text, ...)` | Hear one passage before rendering |
 | `list_activity()` / `stop_all_activity()` | See and stop everything running |
 | `story_translate(id, language)` | Add a translation |
 | `story_rewrite_passage(...)` / `story_apply_rewrite(...)` | Propose and apply a passage rewrite |

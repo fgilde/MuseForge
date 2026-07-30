@@ -609,6 +609,15 @@ export function getModelMode(modelType: string, familyId: string): GenerationMod
   return getFamilyMode(familyId)
 }
 
+/** Slot in `voicePreviewUrls` / `voicePreviewWarnings` used by the
+ *  audiobook passage preview. A fixed key, because only one passage is ever
+ *  auditioned at a time. */
+export const PASSAGE_PREVIEW_KEY = 'passage-preview'
+
+/** Slot for an Audio → Speech library-voice read. Kept apart from the voice's
+ *  own id so a long read never replaces its short audition in the library UI. */
+export const speechSlot = (voiceId: string) => `speech:${voiceId}`
+
 export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamily[], editSubMode?: string, audioSubMode?: string): ModelFamily[] {
   if (mode === 'avatar') {
     // Recast runs on SCAIL-2, which lives under the Wan 2.1 family —
@@ -1441,7 +1450,18 @@ interface AppState {
   voicePreviewWarnings: Record<string, string[]>
   previewLibraryVoice: (voiceId: string, text?: string, language?: string) => Promise<void>
   previewAbVoice: (profileId: string, text?: string) => Promise<void>
+  /** Audition a marked passage in the open book. Keyed `PASSAGE_PREVIEW_KEY`
+   *  in the shared audition slots below. */
+  previewAbPassage: (text: string, opts?: { profileId?: string | null; emotion?: string | null }) => Promise<void>
   _pollVoicePreview: (key: string, jobId: string, library: boolean) => void
+
+  /** Audio → Speech: read the prompt with a library voice instead of the
+   *  selected generation model. null = use the model directly (default). */
+  speechVoiceId: string | null
+  speechVoiceEmotion: string
+  speechVoiceLanguage: string
+  setSpeechVoice: (patch: { id?: string | null; emotion?: string; language?: string }) => void
+  speakWithLibraryVoice: (text: string) => Promise<void>
 
   // Prompt enhancement
   isEnhancing: boolean
@@ -5991,6 +6011,70 @@ export const useStore = create<AppState>((set, get) => ({
       set({
         voicePreviewBusy: null,
         abError: e instanceof Error ? e.message : 'Could not preview this voice',
+      })
+    }
+  },
+
+  previewAbPassage: async (text, opts) => {
+    const pid = get().activeAudiobookId
+    const body = (text || '').trim()
+    if (!pid || !body || get().voicePreviewBusy) return
+    set({ voicePreviewBusy: PASSAGE_PREVIEW_KEY, abError: null })
+    try {
+      const started = await api.previewAudiobookPassage(pid, {
+        text: body,
+        profile_id: opts?.profileId ?? undefined,
+        emotion: opts?.emotion ?? undefined,
+        chapter_id: get().activeAbChapterId ?? undefined,
+      })
+      set(s => ({
+        voicePreviewWarnings: { ...s.voicePreviewWarnings, [PASSAGE_PREVIEW_KEY]: started.warnings || [] },
+      }))
+      get()._pollVoicePreview(PASSAGE_PREVIEW_KEY, started.job_id, false)
+    } catch (e) {
+      set({
+        voicePreviewBusy: null,
+        // The 400 detail is the useful part here — "no voice assigned",
+        // "this engine cannot speak that" — so it is shown verbatim.
+        abError: e instanceof Error ? e.message : 'Could not preview this passage',
+      })
+    }
+  },
+
+  // ── Audio → Speech with a library voice ─────────────────────────────
+  speechVoiceId: null,
+  speechVoiceEmotion: '',
+  speechVoiceLanguage: '',
+
+  setSpeechVoice: (patch) => set(s => ({
+    speechVoiceId: patch.id !== undefined ? patch.id : s.speechVoiceId,
+    speechVoiceEmotion: patch.emotion !== undefined ? patch.emotion : s.speechVoiceEmotion,
+    speechVoiceLanguage: patch.language !== undefined ? patch.language : s.speechVoiceLanguage,
+  })),
+
+  /** The Forge button would run the selected generation model and ignore the
+   *  picked voice, so Speech gets its own path: /voices/{id}/speak reads the
+   *  prompt with the library voice and writes a normal workspace output. */
+  speakWithLibraryVoice: async (text) => {
+    const { speechVoiceId, speechVoiceEmotion, speechVoiceLanguage } = get()
+    const body = (text || '').trim()
+    if (!speechVoiceId || !body || get().voicePreviewBusy) return
+    const key = speechSlot(speechVoiceId)
+    set({ voicePreviewBusy: key, voicesError: null })
+    try {
+      const started = await api.speakWithVoice(speechVoiceId, {
+        text: body,
+        language: speechVoiceLanguage.trim() || undefined,
+        emotion: speechVoiceEmotion.trim() || undefined,
+      })
+      set(s => ({
+        voicePreviewWarnings: { ...s.voicePreviewWarnings, [key]: started.warnings || [] },
+      }))
+      get()._pollVoicePreview(key, started.job_id, true)
+    } catch (e) {
+      set({
+        voicePreviewBusy: null,
+        voicesError: e instanceof Error ? e.message : 'Could not speak with this voice',
       })
     }
   },

@@ -2087,6 +2087,31 @@ export async function previewAudiobookVoice(
   return abPost(pid, `voices/${profileId}/preview`, body)
 }
 
+/** Speak a marked passage with the voice its runs already carry, using the
+ *  same planner a real render uses. Poll `fetchJobStatus(job_id)` for audio.
+ *  400 with a `detail` when no voice is assigned or it cannot speak this. */
+export async function previewAudiobookPassage(pid: string, body: {
+  text: string
+  profile_id?: string | null
+  emotion?: string | null
+  chapter_id?: string | null
+}): Promise<{ job_id: string; profile_id: string; characters: number; warnings: string[] }> {
+  return abPost(pid, 'preview-passage', body)
+}
+
+/** Read arbitrary text with a library voice. Unlike `previewVoice` this is
+ *  real output: it lands in the workspace gallery. */
+export async function speakWithVoice(id: string, body: {
+  text: string; language?: string | null; emotion?: string | null
+}): Promise<{ job_id: string; voice_id: string; warnings: string[] }> {
+  const res = await fetch(`${BASE}/api/v1/voices/${id}/speak`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return storyJson(res, 'Speech')
+}
+
 /** Copy a library voice into a project. A copy on purpose: editing it in
  *  the book must not rewrite the shared library entry. */
 export async function importVoiceIntoAudiobook(

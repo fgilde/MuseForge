@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { BookAudio, Play, Loader2, AlertTriangle, X, Headphones, RefreshCw, Wand2, Scissors } from 'lucide-react'
-import { useStore } from '../../stores/useStore'
+import { BookAudio, Play, Loader2, AlertTriangle, X, Headphones, RefreshCw, Wand2, Scissors, Volume2 } from 'lucide-react'
+import { useStore, PASSAGE_PREVIEW_KEY } from '../../stores/useStore'
 import type { AudiobookBlock, AudiobookRun } from '../../api/client'
 
 const EMOTIONS = ['neutral', 'happy', 'sad', 'angry', 'fearful', 'whispering', 'excited', 'tender', 'cheerful']
@@ -66,6 +66,12 @@ export function AudiobookEditor() {
   const suggestCast = useStore(s => s.suggestAbCast)
   const applyCast = useStore(s => s.applyAbCast)
   const clearProposals = useStore(s => s.clearAbProposals)
+  const previewPassage = useStore(s => s.previewAbPassage)
+  const previewBusy = useStore(s => s.voicePreviewBusy)
+  const passageUrl = useStore(s => s.voicePreviewUrls[PASSAGE_PREVIEW_KEY])
+  const passageWarnings = useStore(s => s.voicePreviewWarnings[PASSAGE_PREVIEW_KEY])
+
+  const passageBusy = previewBusy === PASSAGE_PREVIEW_KEY
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
@@ -120,6 +126,24 @@ export function AudiobookEditor() {
         ? { ...b, runs: assignToSelection(b.runs, popover.runId, popover.from, popover.to, patch) }
         : b,
     ))
+    setPopover(null)
+  }
+
+  /** Speak just the marked text with the voice that run already carries, so a
+   *  voice or emotion can be judged without rendering the chapter. Falls back
+   *  to the project default when the run has no voice of its own — the same
+   *  rule the renderer applies. */
+  const previewSelection = () => {
+    if (!popover || !chapter) return
+    const run = chapter.blocks
+      .find(b => b.id === popover.blockId)?.runs
+      ?.find(r => r.id === popover.runId)
+    const text = (run?.text ?? '').slice(popover.from, popover.to)
+    if (!text.trim()) return
+    previewPassage(text, {
+      profileId: run?.profile_id ?? project?.default_profile_id ?? null,
+      emotion: run?.overrides?.emotion ?? null,
+    })
     setPopover(null)
   }
 
@@ -230,6 +254,27 @@ export function AudiobookEditor() {
 
         {audioUrl && (
           <audio ref={audioRef} src={audioUrl} controls className="mt-2 h-8 w-full" />
+        )}
+
+        {/* Passage preview — separate from the chapter render above so it
+            never disturbs the karaoke player. `key` remounts the element so
+            autoplay fires again for each new take. */}
+        {passageBusy && (
+          <p className="mt-2 flex items-center gap-1.5 text-[11px] text-text-secondary">
+            <Loader2 size={12} className="animate-spin" />
+            Speaking the selected passage — the first use of a model downloads it.
+          </p>
+        )}
+        {passageUrl && !passageBusy && (
+          <div className="mt-2">
+            <div className="mb-0.5 flex items-center gap-1 text-[10px] text-text-muted">
+              <Volume2 size={10} /> Passage preview
+            </div>
+            <audio key={passageUrl} src={passageUrl} controls autoPlay className="h-8 w-full" />
+          </div>
+        )}
+        {!passageBusy && passageWarnings && passageWarnings.length > 0 && (
+          <p className="mt-1 text-[10px] text-indicator-warning">{passageWarnings.join(' · ')}</p>
         )}
       </div>
 
@@ -377,6 +422,18 @@ export function AudiobookEditor() {
           style={{ left: Math.min(popover.x, window.innerWidth - 240), top: popover.y + 8 }}
           onMouseDown={e => e.stopPropagation()}
         >
+          <button
+            onClick={previewSelection}
+            disabled={previewBusy !== null}
+            className="mb-2 flex w-full items-center gap-1.5 rounded-lg border border-border px-1.5 py-1 text-[11px] text-text-primary transition-colors hover:border-border-light hover:bg-bg-hover disabled:opacity-40"
+            title="Speak just this selection with the voice it carries"
+          >
+            {passageBusy
+              ? <Loader2 size={11} className="animate-spin" />
+              : <Volume2 size={11} />}
+            Preview selection
+          </button>
+
           <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">Voice</div>
           {voices.length === 0 ? (
             <p className="text-[10px] text-text-muted">Add a voice in the sidebar first.</p>

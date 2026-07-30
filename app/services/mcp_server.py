@@ -615,6 +615,40 @@ def audiobook_import_voice(project_id: str, voice_id: str) -> dict:
 
 
 @mcp.tool()
+def speak_with_voice(voice_id: str, text: str, language: str = "",
+                     emotion: str = "") -> dict:
+    """Read text aloud with a library voice. Returns a job_id.
+
+    Unlike preview_voice this is real output: it lands in the workspace as a
+    normal audio file. Poll job_status, then get_output_url.
+    """
+    body: dict = {"text": text}
+    if language:
+        body["language"] = language
+    if emotion:
+        body["emotion"] = emotion
+    return _post(f"/api/v1/voices/{voice_id}/speak", json=body)
+
+
+@mcp.tool()
+def audiobook_preview_passage(project_id: str, text: str,
+                              profile_id: str = "", emotion: str = "") -> dict:
+    """Speak one passage of a book to check a voice before a full render.
+
+    Without profile_id the project's default voice is used. Returns a
+    job_id; the same planner as a real render decides whether it can be
+    spoken at all.
+    """
+    body: dict = {"text": text}
+    if profile_id:
+        body["profile_id"] = profile_id
+    if emotion:
+        body["emotion"] = emotion
+    return _post(f"/api/v1/audiobook/projects/{project_id}/preview-passage",
+                 json=body)
+
+
+@mcp.tool()
 def audiobook_sfx_library() -> dict:
     """Sound effects already in the workspace, ready to reuse instead of
     regenerating them."""

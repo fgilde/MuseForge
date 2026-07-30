@@ -7,6 +7,7 @@ import { InputsPanel } from './InputsPanel'
 import { PromptInput } from './PromptInput'
 import { ImageRefSection } from './ImageRefSection'
 import { AudioModeSection } from './AudioModeSection'
+import { SpeechVoicePicker } from './SpeechVoicePicker'
 import { MusicControls } from './MusicControls'
 import { AudioSubModeToggle } from './AudioSubModeToggle'
 import { AudiobookPanel } from './AudiobookPanel'
@@ -207,6 +208,11 @@ export function Sidebar() {
         {/* Audio mode: sub-mode toggle + mode-specific controls */}
         {isAudio && <AudioSubModeToggle />}
         {isAudio && audioSubMode === 'speech' && modelOptions?.audio_prompt_type_sources && <AudioModeSection />}
+        {/* Mounted independently of AudioModeSection: that section only
+            renders for models exposing audio_prompt_type_sources, and the
+            library-voice picker has to be reachable in Speech regardless of
+            which TTS model happens to be selected. */}
+        {isAudio && audioSubMode === 'speech' && <SpeechVoicePicker />}
         {isAudio && audioSubMode === 'sfx' && <SfxControls />}
         {isAudio && audioSubMode === 'mixer' && <MixerControls />}
         {isAudio && audioSubMode === 'music' && <MusicControls />}
