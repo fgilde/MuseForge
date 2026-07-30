@@ -397,9 +397,6 @@ function ModelVisibilitySection() {
                       )
                     })}
 
-      {/* Text models live in their own section: they have no per-mode
-          visibility, only a download state. */}
-      <TextModelsSection />
                   </div>
                   )
                 })}
@@ -408,6 +405,10 @@ function ModelVisibilitySection() {
           </div>
         )
       })}
+
+      {/* Text models get their own section rather than a MODE_LABELS entry:
+          they have no per-mode visibility to toggle, only a download state. */}
+      <TextModelsSection />
     </div>
       )}
     </div>

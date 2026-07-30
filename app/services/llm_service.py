@@ -1355,7 +1355,16 @@ def _ensure_llama_server(bin_dir: str) -> None:
                             shutil.copyfileobj(src, dst)
             else:  # tar.gz
                 with tarfile.open(archive_path, "r:gz") as t:
+                    # Symlinks first would point at files that do not exist
+                    # yet, so collect them and link after the regular files.
+                    pending_links = []
                     for member in t.getmembers():
+                        if member.issym() or member.islnk():
+                            link_name = os.path.basename(member.name)
+                            link_target = os.path.basename(member.linkname)
+                            if link_name and link_target:
+                                pending_links.append((link_name, link_target))
+                            continue
                         if not member.isfile():
                             continue
                         flat_name = os.path.basename(member.name)
@@ -1372,6 +1381,19 @@ def _ensure_llama_server(bin_dir: str) -> None:
                             os.chmod(target, member.mode)
                         except Exception:
                             pass
+                    for link_name, link_target in pending_links:
+                        link_path = os.path.join(bin_dir, link_name)
+                        if os.path.lexists(link_path):
+                            continue
+                        try:
+                            os.symlink(link_target, link_path)
+                        except (OSError, NotImplementedError):
+                            source = os.path.join(bin_dir, link_target)
+                            if os.path.isfile(source):
+                                try:
+                                    shutil.copy2(source, link_path)
+                                except OSError:
+                                    pass
         finally:
             try:
                 os.remove(archive_path)
@@ -1383,7 +1405,72 @@ def _ensure_llama_server(bin_dir: str) -> None:
             f"Downloaded llama.cpp release but {exe_name} not found in {bin_dir} "
             f"after extraction. Tried: {asset_urls}"
         )
+    _ensure_library_symlinks(bin_dir)
     print(f"[LLM] llama-server installed to {exe_path}")
+
+
+def _ensure_library_symlinks(bin_dir: str) -> int:
+    """Recreate the shared-library soname links next to llama-server.
+
+    llama.cpp's release archives ship the sonames as SYMLINKS
+    (libllama.so.0 -> libllama.so.0.0.10152), and the flattening extraction
+    below skips every non-file member — so the links were silently dropped
+    and the binary died with:
+
+        error while loading shared libraries: libllama-common.so.0:
+        cannot open shared object file
+
+    The binary's RUNPATH is $ORIGIN, so it does look in its own directory;
+    only the names were missing. This rebuilds every intermediate soname
+    from the fully versioned file: libfoo.so.1.2.3 also becomes
+    libfoo.so.1.2, libfoo.so.1 and libfoo.so.
+
+    Idempotent and cheap, so it runs on every load rather than only after a
+    download — that way an install broken by an earlier version repairs
+    itself instead of needing a manual delete. Returns the number of links
+    created.
+    """
+    import re
+
+    if not os.path.isdir(bin_dir):
+        return 0
+    created = 0
+    pattern = re.compile(r"^(?P<stem>.+\.so)\.(?P<version>[0-9]+(?:\.[0-9]+)*)$")
+    try:
+        entries = os.listdir(bin_dir)
+    except OSError:
+        return 0
+
+    for name in entries:
+        match = pattern.match(name)
+        if not match:
+            continue
+        source = os.path.join(bin_dir, name)
+        if not os.path.isfile(source) or os.path.islink(source):
+            continue
+        stem = match.group("stem")
+        parts = match.group("version").split(".")
+        # libfoo.so.1.2.3 -> libfoo.so.1.2, libfoo.so.1, libfoo.so
+        candidates = [f"{stem}.{'.'.join(parts[:i])}" for i in range(len(parts) - 1, 0, -1)]
+        candidates.append(stem)
+        for alias in candidates:
+            target = os.path.join(bin_dir, alias)
+            if os.path.lexists(target):
+                continue
+            try:
+                os.symlink(name, target)
+                created += 1
+            except (OSError, NotImplementedError):
+                # Windows without developer mode refuses symlinks; a copy
+                # costs disk but keeps the loader happy.
+                try:
+                    shutil.copy2(source, target)
+                    created += 1
+                except OSError as e:
+                    print(f"[LLM] Could not provide {alias}: {e}")
+    if created:
+        print(f"[LLM] Restored {created} shared-library link(s) in {bin_dir}")
+    return created
 
 
 def _get_server_exe() -> str:
@@ -1396,6 +1483,9 @@ def _get_server_exe() -> str:
     """
     bin_dir = os.environ.get("MUSEFORGE_LLAMA_BIN", DEFAULT_BIN_DIR)
     _ensure_llama_server(bin_dir)
+    # Repair the soname links an older extraction dropped. Cheap, and it
+    # means a broken install fixes itself on the next load.
+    _ensure_library_symlinks(bin_dir)
     if os.name == "nt":
         return os.path.join(bin_dir, "llama-server.exe")
     return os.path.join(bin_dir, "llama-server")

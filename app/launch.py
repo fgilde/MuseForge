@@ -7597,8 +7597,15 @@ async def chat_send_message(tid: str, request: Request):
     chat_store.save_thread(out_dir, thread)
 
     # A thread may pin its own model; falls back to the configured one.
-    _ensure_llm_loaded(thread.get("model_id") or None)
+    # Loading is inside the try on purpose: a model that fails to start
+    # (missing weights, a broken llama-server install) used to escape as a
+    # bare 500 with no body, so the UI could only say "Generation failed"
+    # while the real reason sat in the server log.
     stream_id = f"chat-{tid}"
+    try:
+        _ensure_llm_loaded(thread.get("model_id") or None)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not load the model: {e}")
     try:
         text = await asyncio.to_thread(
             llm_service.generate_streaming,

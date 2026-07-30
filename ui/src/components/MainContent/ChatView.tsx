@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Send, Loader2, Copy, Check, ChevronDown, ChevronRight, MessageSquareText, AlertTriangle, Plus, Trash2 } from 'lucide-react'
+import { Send, Loader2, Copy, Check, ChevronDown, ChevronRight, MessageSquareText, AlertTriangle } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { StoryView } from './StoryView'
 import type { ChatMessage } from '../../api/client'
@@ -202,13 +202,10 @@ export function ChatView() {
   }
 
   return (
-    <div className="flex h-full min-h-0">
-      {/* Session rail — visible alongside the conversation so switching or
-          starting a chat never needs a trip to the sidebar. */}
-      <ChatSessionRail />
-
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-      {/* Top bar — thread title, mirrors the media feed's header height */}
+    <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      {/* Top bar — thread title, mirrors the media feed's header height.
+          Conversation switching lives in the sidebar's Conversations list;
+          a second rail here was redundant. */}
       <div className="px-4 md:px-6 py-2 md:py-3 border-b border-border flex items-center gap-2">
         <MessageSquareText size={14} className="text-accent-blue shrink-0" />
         <span className="text-sm text-text-primary truncate">{thread?.title || 'Chat'}</span>
@@ -279,79 +276,6 @@ export function ChatView() {
           </button>
         </div>
       </div>
-      </div>
     </div>
-  )
-}
-
-
-/**
- * Chat sessions as a persistent column: new conversation, switch, delete.
- *
- * Duplicating the sidebar's thread list is deliberate — the sidebar holds
- * settings you touch once, while switching conversations is something you do
- * constantly, and it should not require looking away from the transcript.
- */
-function ChatSessionRail() {
-  const threads = useStore(s => s.chatThreads)
-  const activeId = useStore(s => s.activeChatId)
-  const streamingId = useStore(s => s.chatStreamingId)
-  const createChatThread = useStore(s => s.createChatThread)
-  const selectChatThread = useStore(s => s.selectChatThread)
-  const deleteChatThread = useStore(s => s.deleteChatThread)
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-
-  return (
-    <nav className="flex w-48 shrink-0 flex-col border-r border-border">
-      <div className="flex items-center justify-between border-b border-border px-2 py-2">
-        <span className="text-[10px] uppercase tracking-wider text-text-muted">Sessions</span>
-        <button
-          onClick={() => createChatThread()}
-          title="New conversation"
-          aria-label="New conversation"
-          className="rounded p-1 text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
-        >
-          <Plus size={12} />
-        </button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-1">
-        {threads.length === 0 ? (
-          <p className="px-1.5 py-2 text-[10px] text-text-muted">
-            No conversations yet. Send a message to start one.
-          </p>
-        ) : threads.map(th => (
-          <div
-            key={th.id}
-            onClick={() => selectChatThread(th.id)}
-            className={`group mb-0.5 flex cursor-pointer items-start gap-1 rounded-md px-1.5 py-1 ${
-              th.id === activeId ? 'bg-bg-active' : 'hover:bg-bg-hover'
-            }`}
-          >
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[11px] text-text-primary">
-                {th.title || 'New chat'}
-              </div>
-              <div className="text-[9px] text-text-muted">
-                {th.message_count} msg{th.id === streamingId ? ' · replying…' : ''}
-              </div>
-            </div>
-            <button
-              onClick={e => {
-                e.stopPropagation()
-                if (confirmDelete === th.id) { deleteChatThread(th.id); setConfirmDelete(null) }
-                else { setConfirmDelete(th.id); setTimeout(() => setConfirmDelete(null), 3000) }
-              }}
-              className={`rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 ${
-                confirmDelete === th.id ? 'text-red-400 opacity-100' : 'text-text-muted hover:text-text-primary'
-              }`}
-              title={confirmDelete === th.id ? 'Click again to delete' : 'Delete conversation'}
-              aria-label="Delete conversation"
-            >
-              <Trash2 size={10} />
-            </button>
-          </div>
-        ))}
-      </div>
-    </nav>
   )
 }
