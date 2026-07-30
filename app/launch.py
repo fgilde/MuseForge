@@ -848,9 +848,18 @@ def list_lora_directory_models():
             base = base.strip()
             if base:
                 bases.setdefault(target, set()).add(base)
+    # base_model -> the directory it belongs in, so a misplaced LoRA can be
+    # offered the move that makes it usable instead of a flat refusal. A base
+    # absent from this map has no home here at all (SDXL, SD 1.5, Pony and
+    # Illustrious files were all found in this install's loras/wan).
+    home = {}
+    for dirname, values in bases.items():
+        for one in values:
+            home.setdefault(one, dirname)
     return {
         "directory_models": {k: sorted(v) for k, v in sorted(by_dir.items())},
         "directory_bases": {k: sorted(v) for k, v in sorted(bases.items())},
+        "base_home": dict(sorted(home.items())),
     }
 
 
@@ -1700,6 +1709,94 @@ def list_loras_details(model_type: str):
         "guidance_max_phases": md.get("guidance_max_phases", 1),
         "manifest_last_check_at": _manifest.get("last_full_check_at") if isinstance(_manifest, dict) else None,
     }
+
+
+@api.post("/api/v1/loras/relocate")
+async def relocate_lora(request: Request):
+    """Move a LoRA into the directory its own base_model belongs in.
+
+    Body: {filename, directory, target?}. Without `target` the destination is
+    derived from the file's declared base_model.
+
+    A download lands in the folder of whatever model was selected at the time,
+    so a perfectly good LoRA can sit where nothing will ever look for it. This
+    is the repair: the file moves, and the models of the new folder can load it.
+
+    Refused when the base_model has no folder here at all — an SDXL or SD 1.5
+    LoRA has no home in a video studio, and moving it somewhere would only
+    turn a clear "cannot be used" into a confusing load failure.
+    """
+    import shutil
+
+    body = await request.json()
+    filename = os.path.basename(str(body.get("filename") or ""))
+    source_dir = str(body.get("directory") or "")
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename is required")
+    if not _is_safe_path_component(filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    known = {
+        f"{one.get('directory')}/{one.get('filename')}": one
+        for one in (list_all_installed_loras()["loras"] or [])
+    }
+    entry = known.get(f"{source_dir}/{filename}") or next(
+        (one for one in known.values() if one.get("filename") == filename), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"LoRA not found: {filename}")
+    if entry.get("linked"):
+        raise HTTPException(
+            status_code=400,
+            detail="This LoRA lives in a linked install, which stays read-only. "
+                   "Copy it into MuseForge's own loras folder first.")
+
+    mapping = list_lora_directory_models()
+    base = entry.get("base_model")
+    target = str(body.get("target") or "") or mapping["base_home"].get(base or "", "")
+    if not target:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"No folder here takes '{base or 'unknown'}' LoRAs, so there "
+                    "is nowhere useful to move this one. MuseForge has no model "
+                    "for that base — the file cannot be used and is safe to delete."))
+    if not _is_safe_path_component(target):
+        raise HTTPException(status_code=400, detail="Invalid target directory")
+    if target == entry.get("directory"):
+        return {"moved": False, "directory": target,
+                "models": mapping["directory_models"].get(target, []),
+                "detail": "It is already in that folder."}
+
+    lora_root = wgp.server_config.get("loras_root", "loras")
+    if not os.path.isabs(lora_root):
+        lora_root = os.path.join(os.path.dirname(__file__), lora_root)
+    src = os.path.join(lora_root, entry["directory"], filename)
+    if not os.path.isfile(src):
+        raise HTTPException(status_code=404, detail=f"File is gone: {src}")
+    dest_dir = os.path.join(lora_root, target)
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, filename)
+    if os.path.isfile(dest):
+        raise HTTPException(
+            status_code=409,
+            detail=f"loras/{target}/{filename} already exists — nothing moved.")
+    try:
+        shutil.move(src, dest)
+        # Carry the sidecar and preview along, or the moved file loses its
+        # metadata and shows up as "Local only" with no trained words.
+        for suffix in (".json", ".civitai.info", ".preview.png", ".preview.jpg",
+                       ".png", ".jpg", ".jpeg", ".mp4", ".txt"):
+            stem = os.path.splitext(filename)[0]
+            for name in (filename + suffix, stem + suffix):
+                extra = os.path.join(lora_root, entry["directory"], name)
+                if os.path.isfile(extra) and not os.path.isfile(os.path.join(dest_dir, name)):
+                    shutil.move(extra, os.path.join(dest_dir, name))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not move it: {e}")
+
+    models = mapping["directory_models"].get(target, [])
+    print(f"[LoRA] Moved {filename}: {entry['directory']} -> {target}")
+    return {"moved": True, "directory": target, "models": models,
+            "detail": f"Moved to loras/{target}. {len(models)} model(s) load from there."}
 
 
 @api.post("/api/v1/loras/nsfw-override")

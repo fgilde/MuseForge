@@ -2729,11 +2729,18 @@ export async function fetchLoraDirectoryModels(): Promise<{
   /** CivitAI baseModel values that belong in each directory. A LoRA whose own
    *  base_model is absent from its directory's list is in the wrong place. */
   bases: Record<string, string[]>
+  /** base_model -> the directory it belongs in. Absent means no model here can
+   *  use that base at all, which is a different answer from "wrong folder". */
+  baseHome: Record<string, string>
 }> {
   const res = await fetch(`${BASE}/api/v1/loras/directory-models`)
   if (!res.ok) throw new Error('Failed to load LoRA directory map')
   const json = await res.json()
-  return { models: json.directory_models ?? {}, bases: json.directory_bases ?? {} }
+  return {
+    models: json.directory_models ?? {},
+    bases: json.directory_bases ?? {},
+    baseHome: json.base_home ?? {},
+  }
 }
 
 /** Every prompt behind an output, oldest first. An extended or multi-clip
@@ -2744,6 +2751,19 @@ export async function fetchOutputPrompts(name: string): Promise<{
   const res = await fetch(`${BASE}/api/v1/outputs/${encodeURIComponent(name)}/prompts`)
   if (!res.ok) return { prompts: [] }
   return res.json()
+}
+
+/** Move a LoRA into the folder its own base_model belongs in, so the models
+ *  that can load it will find it. Refused when no folder here takes that base. */
+export async function relocateLora(body: {
+  filename: string; directory: string; target?: string
+}): Promise<{ moved: boolean; directory: string; models: string[]; detail: string }> {
+  const res = await fetch(`${BASE}/api/v1/loras/relocate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return storyJson(res, 'Moving the LoRA')
 }
 
 export interface InstalledLora {

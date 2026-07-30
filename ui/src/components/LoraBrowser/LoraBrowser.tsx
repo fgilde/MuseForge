@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { X, Search, Loader2, BookOpen, HardDrive, Tag, Link2, ArrowUpCircle, RefreshCw, KeyRound, ExternalLink, Boxes, Trash2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import { fetchCivitAIModelFilters, startLoraScan, fetchLoraScanStatus, fetchInstalledLoras, importHuggingFaceLora, checkLoraUpdates, deleteLoraFile, fetchLoraDirectoryModels } from '../../api/client'
+import { fetchCivitAIModelFilters, startLoraScan, fetchLoraScanStatus, fetchInstalledLoras, importHuggingFaceLora, checkLoraUpdates, deleteLoraFile, fetchLoraDirectoryModels, relocateLora } from '../../api/client'
 import { formatBytes } from '../../lib/format'
 import type { CivitAIModelFilter, InstalledLora } from '../../api/client'
 import { ModelCard } from './ModelCard'
@@ -98,6 +98,8 @@ export function LoraBrowser() {
   // this?", which is the actual question when a download landed elsewhere.
   const [dirModels, setDirModels] = useState<Record<string, string[]>>({})
   const [dirBases, setDirBases] = useState<Record<string, string[]>>({})
+  const [baseHome, setBaseHome] = useState<Record<string, string>>({})
+  const [moving, setMoving] = useState<string | null>(null)
   const [used, setUsed] = useState<string | null>(null)
   const [installedLoading, setInstalledLoading] = useState(false)
   const [showUrlImport, setShowUrlImport] = useState(false)
@@ -122,7 +124,9 @@ export function LoraBrowser() {
       const r = await fetchInstalledLoras()
       setInstalledLoras(r.loras)
       fetchLoraDirectoryModels()
-        .then(map => { setDirModels(map.models); setDirBases(map.bases) })
+        .then(map => {
+          setDirModels(map.models); setDirBases(map.bases); setBaseHome(map.baseHome)
+        })
         .catch(() => { setDirModels({}); setDirBases({}) })
     } catch (e) {
       console.error('LoRA update check failed:', e)
@@ -192,10 +196,23 @@ export function LoraBrowser() {
       lora.base_model && expected?.length && !expected.includes(lora.base_model),
     )
     if (wrongBase) {
+      const home = baseHome[lora.base_model as string]
+      if (home) {
+        // Movable: the base HAS a folder here, the file is just in the wrong
+        // one — which is what a download does when another model was selected.
+        return {
+          usable: false,
+          moveTo: home,
+          offer: dirModels[home] || [],
+          reason: `Built for ${lora.base_model} — belongs in loras/${home}, not `
+                  + `loras/${lora.directory}. Moving it there makes it usable.`,
+        }
+      }
       return {
         usable: false,
-        reason: `Built for ${lora.base_model}, but stored in loras/${lora.directory}`
-                + ` (for ${expected.slice(0, 3).join(', ')}). No model here can load it.`,
+        noHome: true,
+        reason: `Built for ${lora.base_model}, and no model here uses that base. `
+                + 'This file cannot be used in MuseForge — it is safe to delete.',
       }
     }
     if (owners && !owners.includes(currentModel)) {
@@ -867,6 +884,27 @@ export function LoraBrowser() {
                             e.stopPropagation()
                             if (verdict.usable) {
                               await applyOwnedLora(lora, cardKey)
+                            } else if (verdict.moveTo) {
+                              // Move it where it belongs, then pick a model
+                              // from the folder it landed in.
+                              setMoving(cardKey)
+                              try {
+                                const moved = await relocateLora({
+                                  filename: lora.filename,
+                                  directory: lora.directory,
+                                  target: verdict.moveTo,
+                                })
+                                const fresh = await fetchInstalledLoras()
+                                setInstalledLoras(fresh.loras)
+                                const now = fresh.loras.find(
+                                  x => x.filename === lora.filename
+                                    && x.directory === moved.directory)
+                                if (now) setPickModelFor(now)
+                              } catch (e) {
+                                setDeleteError(e instanceof Error ? e.message : 'Move failed')
+                              } finally {
+                                setMoving(null)
+                              }
                             } else if (verdict.offer?.length) {
                               setPickModelFor(lora)
                             }
@@ -883,11 +921,19 @@ export function LoraBrowser() {
                                 : 'bg-cta text-white hover:opacity-90'
                           }`}
                         >
-                          {verdict.usable
-                            ? (done ? 'Added' : on ? 'Active' : 'Use now')
-                            : verdict.offer?.length
-                              ? 'Use now — pick a model'
-                              : lora.directory === '.' ? 'Wrong folder' : 'Cannot be used here'}
+                          {moving === cardKey
+                            ? 'Moving…'
+                            : verdict.usable
+                              ? (done ? 'Added' : on ? 'Active' : 'Use now')
+                              : verdict.offer?.length
+                                ? (verdict.moveTo
+                                    ? `Move to ${verdict.moveTo} & use`
+                                    : 'Use now — pick a model')
+                                : verdict.noHome
+                                  ? `No model for ${lora.base_model}`
+                                  : lora.directory === '.'
+                                    ? 'Wrong folder — no model looks here'
+                                    : 'No model loads from this folder'}
                         </button>
                       )
                     })()}
