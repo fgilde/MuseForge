@@ -1177,6 +1177,7 @@ interface AppState {
   refreshLoraIdMap: () => Promise<void>
   loadLoras: (modelType: string) => Promise<void>
   toggleLora: (filename: string) => void
+  activateInstalledLora: (filename: string) => Promise<boolean>
   /** Ensure the LTX-2.3 transition LoRA is downloaded and activated for
    *  blend mode. Called when blend mode is opened. Idempotent: no-op if
    *  the LoRA is already installed and activated. */
@@ -4897,6 +4898,20 @@ export const useStore = create<AppState>((set, get) => ({
     } catch {
       set({ availableLoras: [], lorasLoading: false })
     }
+  },
+
+  /** Turn an installed LoRA on for the current model, from the browser.
+   *  Returns false when the file is not one this model can load — LoRAs live
+   *  per architecture, so that is a real answer, not a failure to handle. */
+  activateInstalledLora: async (filename) => {
+    const modelType = get().params.model_type
+    if (!modelType) return false
+    if (!get().availableLoras.includes(filename)) {
+      await get().loadLoras(modelType)
+    }
+    if (!get().availableLoras.includes(filename)) return false
+    if (!get().params.activated_loras.includes(filename)) get().toggleLora(filename)
+    return true
   },
 
   toggleLora: (filename) => {

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { X, Search, Loader2, BookOpen, HardDrive, Tag, Link2, ArrowUpCircle, RefreshCw, KeyRound, ExternalLink, Boxes, Trash2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import { fetchCivitAIModelFilters, startLoraScan, fetchLoraScanStatus, fetchInstalledLoras, importHuggingFaceLora, checkLoraUpdates, deleteLoraFile } from '../../api/client'
+import { fetchCivitAIModelFilters, startLoraScan, fetchLoraScanStatus, fetchInstalledLoras, importHuggingFaceLora, checkLoraUpdates, deleteLoraFile, fetchLoraDirectoryModels } from '../../api/client'
 import { formatBytes } from '../../lib/format'
 import type { CivitAIModelFilter, InstalledLora } from '../../api/client'
 import { ModelCard } from './ModelCard'
@@ -27,6 +27,10 @@ const PERIOD_OPTIONS = [
 export function LoraBrowser() {
   const open = useStore(s => s.loraBrowserOpen)
   const setOpen = useStore(s => s.setLoraBrowserOpen)
+  const currentModel = useStore(s => s.params.model_type)
+  const activatedLoras = useStore(s => s.params.activated_loras)
+  // Not named useSomething: the lint rule reads that as a hook call.
+  const activateLora = useStore(s => s.activateInstalledLora)
   const results = useStore(s => s.civitSearchResults)
   const cursor = useStore(s => s.civitSearchCursor)
   const loading = useStore(s => s.civitSearchLoading)
@@ -85,6 +89,10 @@ export function LoraBrowser() {
   // Checkpoint-mode equivalent of "My LoRAs" — shows imported checkpoints.
   const [showCkptInstalled, setShowCkptInstalled] = useState(false)
   const [installedLoras, setInstalledLoras] = useState<InstalledLora[]>([])
+  // directory -> model types that load from it. Answers "then what CAN use
+  // this?", which is the actual question when a download landed elsewhere.
+  const [dirModels, setDirModels] = useState<Record<string, string[]>>({})
+  const [used, setUsed] = useState<string | null>(null)
   const [installedLoading, setInstalledLoading] = useState(false)
   const [showUrlImport, setShowUrlImport] = useState(false)
   const [importUrl, setImportUrl] = useState('')
@@ -107,6 +115,7 @@ export function LoraBrowser() {
       await checkLoraUpdates(true) // force=true: bypass 24h staleness window
       const r = await fetchInstalledLoras()
       setInstalledLoras(r.loras)
+      fetchLoraDirectoryModels().then(setDirModels).catch(() => setDirModels({}))
     } catch (e) {
       console.error('LoRA update check failed:', e)
     } finally {
@@ -763,6 +772,43 @@ export function LoraBrowser() {
                               : `released ${new Date(lora.released_at as string).toLocaleDateString()}`}
                         </div>
                       )}
+                      {(() => {
+                        // Usable here = this model loads from that directory.
+                        // Anything else is not a failure to report but a fact
+                        // to explain: LoRAs are stored per architecture.
+                        const owners = dirModels[lora.directory]
+                        const usable = !owners || owners.includes(currentModel)
+                        const on = activatedLoras?.includes(lora.filename)
+                        return (
+                          <button
+                            onClick={async e => {
+                              e.stopPropagation()
+                              if (!usable) return
+                              if (await activateLora(lora.filename)) {
+                                setUsed(cardKey)
+                                setTimeout(() => setOpen(false), 450)
+                              }
+                            }}
+                            disabled={!usable}
+                            title={usable
+                              ? (on ? 'Already active for this model' : 'Activate it for the selected model and close')
+                              : owners && owners.length
+                                ? `In loras/${lora.directory}, which only these models load from — e.g. ${owners.slice(0, 3).join(', ')}. Switch model to use it.`
+                                : `In loras/${lora.directory}, which no installed model loads from. This file cannot be used here.`}
+                            className={`mt-1.5 w-full rounded px-1.5 py-1 text-[9px] font-medium transition-colors ${
+                              !usable
+                                ? 'bg-white/10 text-white/40 cursor-not-allowed'
+                                : used === cardKey || on
+                                  ? 'bg-indicator-success/80 text-white'
+                                  : 'bg-cta text-white hover:opacity-90'
+                            }`}
+                          >
+                            {!usable
+                              ? `for ${lora.directory} models`
+                              : used === cardKey ? 'Added' : on ? 'Active' : 'Use this LoRA'}
+                          </button>
+                        )
+                      })()}
                       {lora.trained_words.length > 0 && (
                         <div className="flex items-center gap-0.5 mt-1 overflow-hidden">
                           <Tag size={8} className="text-white/50 shrink-0" />

@@ -785,6 +785,32 @@ def list_lora_directories():
     return {"directories": dirs}
 
 
+@api.get("/api/v1/loras/directory-models")
+def list_lora_directory_models():
+    """Which models can use each LoRA directory: {directory: [model_type, ...]}.
+
+    LoRAs are stored per architecture, so a file only ever appears for models
+    whose lora dir it sits in. Without this the UI can say "not available for
+    the selected model" but not "these models can use it" — which is the whole
+    question when a download landed in the wrong place.
+
+    Directories with no model are reported too, with an empty list: that is
+    exactly the dead-end case (an SDXL LoRA in an install that has no SDXL).
+    """
+    by_dir: dict[str, list[str]] = {}
+    for model_type in wgp.displayed_model_types:
+        try:
+            lora_dir = wgp.get_lora_dir(model_type)
+        except Exception:  # noqa: BLE001 — one odd model must not kill the map
+            continue
+        if not lora_dir:
+            continue
+        by_dir.setdefault(os.path.basename(os.path.normpath(lora_dir)), []).append(model_type)
+    for name in list_lora_directories()["directories"]:
+        by_dir.setdefault(name, [])
+    return {"directory_models": {k: sorted(v) for k, v in sorted(by_dir.items())}}
+
+
 @api.get("/api/v1/loras/preview/{filename}")
 def serve_lora_preview(filename: str):
     """Serve a locally downloaded LoRA preview file (video or image)."""

@@ -1,5 +1,5 @@
 import { useRef, useCallback, useState, useEffect, useMemo, type JSX } from 'react'
-import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2 } from 'lucide-react'
+import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, Layers } from 'lucide-react'
 import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
@@ -603,6 +603,17 @@ export function MainContent() {
           >
             <BookMarked size={13} />
             <span className="hidden md:inline">Blueprints</span>
+          </button>
+          {/* Same reasoning as Blueprints: the only way in was an unlabelled
+              globe icon in the sidebar's bottom bar, which is also hidden in
+              every mode that owns no generation model. */}
+          <button
+            onClick={() => useStore.getState().setLoraBrowserOpen(true, useStore.getState().params.model_type)}
+            className="flex items-center gap-1.5 rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary shrink-0"
+            title="LoRAs — browse CivitAI and the ones you already have"
+          >
+            <Layers size={13} />
+            <span className="hidden md:inline">LoRAs</span>
           </button>
           <WorkspaceSelector />
         </div>

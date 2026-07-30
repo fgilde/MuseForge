@@ -163,6 +163,17 @@ section for why.
 
 ### Everything else
 
+| Endpoint | Purpose |
+|---|---|
+| `GET /loras/{model_type}` | LoRAs this model can load — per architecture, so it is not the full set |
+| `GET /loras/installed` | Every installed LoRA with its directory and CivitAI metadata |
+| `GET /loras/directory-models` | `{directory: [model_type, …]}` — which models load from each LoRA directory. A directory mapping to `[]` is a dead end |
+
+LoRAs are stored per architecture under `loras/<dir>`. A file downloaded
+while another model was selected therefore never appears for the current
+one — `POST /generate` rejects an `activated_loras` entry that is not
+installed for the requested model and names what is.
+
 The API also covers Director pipelines (`/director/*`), LoRA management and
 the CivitAI browser (`/loras/*`, `/civitai/*`), blueprints (`/recipes/*`),
 workspaces, upscaling/retake/inpaint tools, and system configuration — browse
