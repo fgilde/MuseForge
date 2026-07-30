@@ -59,6 +59,20 @@ def _pick(data: Any, *names: str) -> Any:
     return None
 
 
+def _coerce_seed(value: Any) -> Optional[int]:
+    """A stored seed, or None when there is no usable one.
+
+    Tolerates the string a JSON round-trip through a form can produce, and
+    rejects 0 and negatives: the generator treats 0 as "pick one for me", so
+    storing it would look pinned while behaving random.
+    """
+    try:
+        seed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return seed if seed > 0 else None
+
+
 def _as_float(value: Any, default: float) -> float:
     try:
         return float(value)
@@ -178,6 +192,11 @@ class VoiceProfile:
     # IndexTTS2 second reference audio (emotion transfer), optional.
     emotion_ref_path: Optional[str] = None
     default_emotion: Optional[str] = None
+    # Fixed generation seed. For engines that build a speaker from a written
+    # description instead of cloning a clip, this seed IS the voice: change it
+    # and you get a different person. None means "derive one per run", which
+    # is only right for cloned voices, where the clip carries the identity.
+    seed: Optional[int] = None
     params: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -189,6 +208,7 @@ class VoiceProfile:
             "voice_ref_path": self.voice_ref_path,
             "emotion_ref_path": self.emotion_ref_path,
             "default_emotion": self.default_emotion,
+            "seed": self.seed,
             "params": dict(self.params),
         }
 
@@ -202,6 +222,7 @@ class VoiceProfile:
             voice_ref_path=_pick(data, "voice_ref_path", "voiceRefPath"),
             emotion_ref_path=_pick(data, "emotion_ref_path", "emotionRefPath"),
             default_emotion=_pick(data, "default_emotion", "defaultEmotion"),
+            seed=_coerce_seed(_pick(data, "seed")),
             params=_pick(data, "params") or {},
         )
 
@@ -773,5 +794,14 @@ if __name__ == "__main__":
     assert chapter_is_cached(project, chapter)
     chapter.blocks[0].runs[0].text += "!"
     assert not chapter_is_cached(project, chapter)
+
+    # A stored seed survives the JSON round-trip; unusable values read as
+    # "not pinned" rather than as a seed of 0, which the generator would treat
+    # as "pick one for me" while the voice looked pinned.
+    pinned = VoiceProfile.from_dict({"id": "v", "seed": "1234"})
+    assert pinned.seed == 1234
+    assert VoiceProfile.from_dict(pinned.to_dict()).seed == 1234
+    for bad in (0, -1, None, "", "abc", {}):
+        assert VoiceProfile.from_dict({"id": "v", "seed": bad}).seed is None, bad
 
     print("audiobook.model self-check OK")

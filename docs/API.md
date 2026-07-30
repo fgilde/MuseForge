@@ -79,7 +79,7 @@ run without overwriting each other's output.
 | `GET /audiobook/voice-presets` | Voice starting points and audition sample lines |
 | `POST /audiobook/projects/{id}/voices/{vid}/preview` | Audition a voice in the project |
 | `POST /audiobook/projects/{id}/voices/import` | Copy a library voice into the project |
-| `POST /audiobook/projects/{id}/preview-passage` | Speak one passage to check a voice |
+| `POST /audiobook/projects/{id}/preview-passage` | Speak one passage to check a voice. Pass `block_id` to hear it under that block's ambience/music |
 
 A project is `chapters[] -> blocks[] -> runs[]`, where each run carries its
 voice binding and optional emotion. Runs, not character offsets, so voice
@@ -100,10 +100,18 @@ to match. Applying is a separate call with the subset you accept.
 |---|---|
 | `GET/POST /voices` | The workspace voice library, shared by Speech and audiobooks |
 | `PUT/DELETE /voices/{id}` | Patch or remove a voice |
-| `POST /voices/{id}/preview` | Audition a voice; returns `{job_id}` |
+| `POST /voices/{id}/preview` | Audition a voice; returns `{job_id}`. Repeatable — the voice's pinned seed makes it the same voice every time |
+| `POST /voices/{id}/reroll` | New identity: another take on the same description. Only meaningful for engines that cannot clone |
 | `POST /voices/{id}/speak` | Read arbitrary text with a library voice (real output) |
 | `GET /activity` | Everything running — jobs, Director pipelines, story runs and analyses, audiobook renders — each with the exact path that stops it |
 | `POST /activity/stop-all` | Stop everything, reported per item |
+
+Every voice carries a fixed `seed`. For engines that build a speaker from a
+written description instead of cloning a clip (Qwen3 Voice Design / Custom
+Voice) that seed IS the voice: the same description with another seed is a
+different person. It is assigned once, survives edits and previews, is copied
+into an audiobook with the voice, and changes only via `/reroll` — otherwise
+every paragraph would be read by someone else.
 
 A voice references its recording rather than copying it, so the same audio can
 back several voices — and a deleted file surfaces as `reference_missing` with

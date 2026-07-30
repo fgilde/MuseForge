@@ -374,7 +374,12 @@ def plan_run(
 
     emotion = resolve_emotion(run, profile)
     warnings: list[str] = []
-    seed = derive_seed(run.id, profile.id, emotion)
+    # A pinned seed IS the voice for engines that cannot clone: they build a
+    # speaker from a description, and the seed decides who that speaker turns
+    # out to be. Deriving it per run gave every paragraph a different person
+    # and made an audition unrepeatable. Only voices without a pinned seed
+    # (book-local profiles from a document import) fall back to derivation.
+    seed = profile.seed or derive_seed(run.id, profile.id, emotion)
     estimated = estimate_speech_seconds(text)
     lang = language or profile.params.get("language") or project.language or "en"
 
@@ -558,6 +563,18 @@ if __name__ == "__main__":
     assert plan.params["prompt"] == "[afraid] Er kam näher.\n[afraid] Dann blieb er stehen.", \
         plan.params["prompt"]
     assert plan.params["seed"] == derive_seed("r1", "v-index", "afraid")
+
+    # 2b. A pinned seed is the voice: same value for every run and every
+    #     emotion, because one speaker must not change person mid-chapter.
+    index_voice.seed = 424242
+    for run_id, emotion in (("r1", "afraid"), ("r2", "afraid"), ("r3", "happy")):
+        pinned = plan_run(project, Run(id=run_id, text="Hallo.",
+                                       profile_id="v-index",
+                                       overrides={"emotion": emotion}))
+        assert pinned.params["seed"] == 424242, (run_id, emotion, pinned.params["seed"])
+    index_voice.seed = None
+    assert plan_run(project, run).params["seed"] == derive_seed("r1", "v-index", "afraid"), \
+        "without a pinned seed the per-run derivation still applies"
     assert plan.params["multi_prompts_gen_type"] == 2
     assert plan.params["workspace"] == "ws"
     assert plan.params["temperature"] == 0.8 and plan.params["top_k"] == 30

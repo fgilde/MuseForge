@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Mic2, Upload, Loader2, Play, Square, Circle, AlertTriangle, Check,
-  RefreshCw, Trash2, BookAudio,
+  RefreshCw, Trash2, BookAudio, Dices,
 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { uploadAudio, type VoiceEngine, type VoiceLibraryEntry } from '../../api/client'
@@ -80,6 +80,7 @@ function VoiceCard({ voice, engine, engines }: {
 }) {
   const patch = useStore(s => s.patchVoiceEntry)
   const remove = useStore(s => s.deleteVoiceEntry)
+  const reroll = useStore(s => s.rerollVoiceEntry)
   const preview = useStore(s => s.previewLibraryVoice)
   const previewBusy = useStore(s => s.voicePreviewBusy)
   const previewUrls = useStore(s => s.voicePreviewUrls)
@@ -369,10 +370,64 @@ function VoiceCard({ voice, engine, engines }: {
           {recError && <p className="mt-1.5 text-[10px] text-red-400">{recError}</p>}
         </div>
       ) : (
-        <p className="mt-3 text-[11px] text-text-muted">
-          {engine?.label ?? 'This engine'} cannot clone a recording — it builds
-          the voice from the fields above.
-        </p>
+        /* Not just a note: hiding upload/record behind an engine choice made it
+           look as if your own voice could not be used at all. Say why, and
+           offer the switch that makes it possible. */
+        <div className="mt-3 rounded-xl border border-border bg-bg-tertiary/40 p-2.5">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">
+            Your own recording
+          </div>
+          <p className="mt-1 text-[11px] text-text-secondary">
+            {engine?.label ?? 'This engine'} builds a voice from the description
+            above and cannot copy a recording. To use your own voice — recorded
+            here or uploaded — switch to a cloning engine.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {Object.entries(engines)
+              .filter(([, eng]) => eng.clone)
+              .map(([type, eng]) => (
+                <button
+                  key={type}
+                  onClick={() => patch(voice.id, { model_type: type })}
+                  className="rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+                  title={eng.needs_reference
+                    ? 'Needs a reference clip — you can record one right after switching'
+                    : 'A clip is optional for this engine'}
+                >
+                  Switch to {eng.label}
+                </button>
+              ))}
+          </div>
+        </div>
+      )}
+
+      {/* Identity. Only meaningful without a clip: there the seed decides who
+          the speaker turns out to be, so it has to be visible and stickable. */}
+      {!engine?.clone && (
+        <div className="mt-3 rounded-xl border border-border bg-bg-tertiary/40 p-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-[10px] uppercase tracking-wider text-text-muted">
+                Voice identity
+              </div>
+              <p className="mt-0.5 text-[11px] text-text-secondary">
+                Seed <span className="font-mono">{voice.seed ?? '—'}</span> — kept
+                for every passage, so this voice stays the same person.
+              </p>
+            </div>
+            <button
+              onClick={() => reroll(voice.id)}
+              className="shrink-0 flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+              title="Another take on the same description — a different person"
+            >
+              <Dices size={11} /> New take
+            </button>
+          </div>
+          <p className="mt-1 text-[10px] text-text-muted">
+            Auditioning never changes it. Re-roll until you like the voice, then
+            leave it alone.
+          </p>
+        </div>
       )}
 
       {/* Audition */}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  BookAudio, Plus, Trash2, Upload, Loader2, Mic, ChevronDown, ChevronRight, Check,
+  BookAudio, Plus, Trash2, Upload, Loader2, Mic, ChevronDown, ChevronRight,
   Play, Library, AlertTriangle,
 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
@@ -485,14 +485,22 @@ function VoiceRow({
         >
           {previewing ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
         </button>
-        <button
-          onClick={onDefault}
-          title={isDefault ? 'Default voice' : 'Make this the default voice'}
-          aria-label="Make default voice"
-          className={`rounded p-1 ${isDefault ? 'text-indicator-success' : 'text-text-muted hover:text-text-primary'}`}
-        >
-          <Check size={11} />
-        </button>
+        {isDefault ? (
+          <span
+            title="Narrator: reads every paragraph without its own voice"
+            className="shrink-0 rounded bg-indicator-success/15 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-indicator-success"
+          >
+            Narrator
+          </span>
+        ) : (
+          <button
+            onClick={onDefault}
+            title="Make this the narrator — reads every paragraph without its own voice"
+            className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-text-muted transition-colors hover:border-border-light hover:text-text-primary"
+          >
+            Narrator
+          </button>
+        )}
         <button
           onClick={onDelete}
           title="Remove voice"

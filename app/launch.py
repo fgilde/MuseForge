@@ -7236,6 +7236,54 @@ def _ab_load(pid: str, workspace: str = None):
     return out_dir, project
 
 
+def _ab_mix_passage_effects(job: dict, project, chapter, run, source_block,
+                            workspace: str = None) -> None:
+    """Lay the source block's ambience/music under a finished passage preview.
+
+    Reuses the render's own mixer on a one-block chapter rather than a second
+    ffmpeg recipe, so ducking, levels and loudness match what the chapter
+    render will produce. Replaces the job's output with the mixed file; the
+    bare speech stays on disk and is what the caller hears if this fails.
+    """
+    from services.audiobook import mix as ab_mix, model as ab_model, render as ab_render
+
+    out_dir = _ab_dir(workspace)
+    produced = job.get("output_files") or []
+    if not produced:
+        return
+    speech = produced[0]
+    speech_path = speech if os.path.isabs(speech) else os.path.join(out_dir, speech)
+    if not os.path.isfile(speech_path):
+        return
+    duration = ab_render.probe_duration(speech_path) or 0.0
+    if duration <= 0:
+        return
+
+    # The block the passage came from, carrying only this one run: the effects
+    # must line up with what was actually spoken, not with the whole paragraph.
+    block = ab_model.Block(
+        id=source_block.id, type=ab_model.BLOCK_PARAGRAPH, runs=[run],
+        attached_sfx=source_block.attached_sfx,
+        attached_music=source_block.attached_music,
+    )
+    probe_chapter = ab_model.Chapter(
+        id="passage-preview", title="Preview", blocks=[block],
+        language=getattr(chapter, "language", None) or project.language,
+    )
+    stem = os.path.splitext(os.path.basename(speech_path))[0]
+    output_path = os.path.join(out_dir, f"{stem}_mixed.wav")
+    plan = ab_mix.plan_chapter_mix(
+        project, probe_chapter,
+        {run.id: {"path": speech_path, "duration": duration}},
+        output_path,
+    )
+    code, stderr = ab_render._run_ffmpeg(plan.args, job=job)
+    if code != 0 or not os.path.isfile(output_path):
+        raise RuntimeError(ab_render.ffmpeg_error_summary(stderr) or f"ffmpeg {code}")
+    job["output_files"] = [os.path.basename(output_path)]
+    job["message"] = "Done (with effects)"
+
+
 @api.get("/api/v1/audiobook/projects")
 def ab_list_projects(workspace: str = None):
     """Project summaries in the workspace."""
@@ -7874,6 +7922,28 @@ def delete_voice_entry(voice_id: str, workspace: str = None):
     return {"status": "deleted", "id": voice_id}
 
 
+@api.post("/api/v1/voices/{voice_id}/reroll")
+def reroll_library_voice(voice_id: str, workspace: str = None):
+    """Give the voice a new identity — a different take on the same settings.
+
+    Engines that build a speaker from a written description turn the seed into
+    the actual person, so the same description with a new seed is a different
+    voice. Rerolling is explicit for exactly that reason: previewing must not
+    change a voice you already decided to keep.
+
+    The stored audition is dropped with it, since it no longer represents the
+    voice. Pointless for cloned voices, where the clip carries the identity.
+    """
+    from services import voice_library
+    out_dir = _voice_dir(workspace)
+    updated = voice_library.update_voice(
+        out_dir, voice_id,
+        {"seed": voice_library.new_seed(), "sample_path": None})
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Voice {voice_id} not found")
+    return updated
+
+
 @api.post("/api/v1/voices/{voice_id}/preview")
 async def preview_library_voice(voice_id: str, request: Request):
     """Audition a library voice. Returns a job_id.
@@ -8161,9 +8231,39 @@ async def ab_preview_passage(pid: str, request: Request):
         "params": params, "output_files": [], "error": None,
         "workspace": workspace, "out_dir": _ab_dir(workspace),
     }
-    threading.Thread(target=_run_generation, args=(job_id,), daemon=False).start()
+    # Mix the block's ambience/music over the speech when the caller says which
+    # block the passage came from. Without this a preview judged a voice in
+    # silence while the render would place it under a bed — the point of a
+    # preview is that it sounds like the render.
+    source_block = None
+    if body.get("block_id") and body.get("chapter_id"):
+        source = project.chapter(body["chapter_id"])
+        source_block = next(
+            (b for b in (getattr(source, "blocks", None) or [])
+             if b.id == body["block_id"]), None)
+    mix_over = source_block if (
+        source_block is not None
+        and (source_block.attached_sfx or source_block.attached_music)
+    ) else None
+
+    def _worker():
+        _run_generation(job_id)
+        if mix_over is None:
+            return
+        job = _jobs.get(job_id) or {}
+        if job.get("status") != "completed":
+            return
+        try:
+            _ab_mix_passage_effects(job, project, chapter, run, mix_over, workspace)
+        except Exception as e:  # noqa: BLE001 — the speech itself is fine, so a
+            # failed bed must degrade to "no bed", not to a failed preview.
+            traceback.print_exc()
+            job["message"] = f"Done (effects could not be mixed: {e})"
+
+    threading.Thread(target=_worker, daemon=False).start()
     return {"job_id": job_id, "profile_id": profile_id,
-            "characters": len(text), "warnings": plans[0].warnings}
+            "characters": len(text), "warnings": plans[0].warnings,
+            "mixes_effects": mix_over is not None}
 
 
 @api.get("/api/v1/audiobook/sfx-library")

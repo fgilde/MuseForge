@@ -2112,7 +2112,11 @@ export async function previewAudiobookPassage(pid: string, body: {
   profile_id?: string | null
   emotion?: string | null
   chapter_id?: string | null
-}): Promise<{ job_id: string; profile_id: string; characters: number; warnings: string[] }> {
+  /** Lets the server mix this block's ambience/music under the passage, so a
+   *  preview sounds like the render instead of judging a voice in silence. */
+  block_id?: string | null
+}): Promise<{ job_id: string; profile_id: string; characters: number
+              warnings: string[]; mixes_effects?: boolean }> {
   return abPost(pid, 'preview-passage', body)
 }
 
@@ -2162,6 +2166,9 @@ export interface VoiceLibraryEntry {
   description: string
   params: Record<string, number | string | boolean>
   sample_path?: string | null
+  /** Fixed generation seed. For engines that cannot clone, this IS the voice:
+   *  a different seed with the same description is a different person. */
+  seed?: number | null
   created_at: number
   updated_at: number
   ready: boolean
@@ -2199,6 +2206,13 @@ export async function updateVoice(id: string, patch: VoiceDraft): Promise<VoiceL
     body: JSON.stringify(patch),
   })
   return storyJson(res, 'Saving the voice')
+}
+
+/** Give the voice a new identity — a different take on the same description.
+ *  Explicit, because previewing must never change a voice you decided to keep. */
+export async function rerollVoice(id: string): Promise<VoiceLibraryEntry> {
+  const res = await fetch(`${BASE}/api/v1/voices/${id}/reroll`, { method: 'POST' })
+  return storyJson(res, 'Re-rolling the voice')
 }
 
 export async function deleteVoice(id: string): Promise<void> {

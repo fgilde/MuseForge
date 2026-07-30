@@ -634,10 +634,26 @@ def preview_voice(voice_id: str, text: str = "") -> dict:
     """Audition a library voice. Returns a job_id; poll job_status.
 
     Goes through the same planner a real render uses, so a voice that
-    previews will also render.
+    previews will also render. Repeating it gives the same voice: every voice
+    carries a fixed seed, and only reroll_voice changes it.
     """
     return _post(f"/api/v1/voices/{voice_id}/preview",
                  json={"text": text} if text else {})
+
+
+@mcp.tool()
+def reroll_voice(voice_id: str) -> dict:
+    """Give the voice a new identity — another take on the same description.
+
+    Only meaningful for engines that cannot clone (Qwen3 Voice Design /
+    Custom Voice): there the seed decides who the speaker is, so the same
+    description with a new seed is a different person. Cloned voices take
+    their identity from the reference clip and are unaffected.
+
+    Call this to search for a voice you like, then stop — previewing never
+    changes it, and every passage in a book uses the voice's pinned seed.
+    """
+    return _post(f"/api/v1/voices/{voice_id}/reroll")
 
 
 @mcp.tool()

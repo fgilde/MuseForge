@@ -14,6 +14,7 @@ assumed, which `sanitize_entry` does.
 
 import json
 import os
+import random
 import threading
 import time
 import uuid
@@ -42,6 +43,22 @@ ENGINES = {
 
 SWATCHES = ["#22d3ee", "#a78bfa", "#f472b6", "#4ade80", "#fb923c",
             "#facc15", "#60a5fa", "#f87171"]
+
+# 31 bits, matching the seed range the generation params accept.
+_SEED_MAX = 0x7FFFFFFF
+
+
+def new_seed() -> int:
+    """A fresh voice identity.
+
+    Every voice gets one at creation and keeps it. For the engines that build
+    a speaker from a written description (Qwen3 Voice Design / Custom Voice)
+    the seed decides who that speaker is, so a voice without a fixed seed
+    sounds like a different person in every paragraph — which is exactly what
+    it used to do. Re-rolling is therefore an explicit action, not a
+    side effect of previewing again.
+    """
+    return random.randint(1, _SEED_MAX)
 
 
 def library_path(out_dir: str) -> str:
@@ -78,6 +95,7 @@ def new_entry(name: str = "", model_type: str = "index_tts2", *,
         "language": language,
         "description": (description or "").strip()[:400],
         "params": dict(params or {}),
+        "seed": new_seed(),
         "created_at": time.time(),
         "updated_at": time.time(),
         # Filled by a preview render so the UI can replay an audition
@@ -104,6 +122,13 @@ def sanitize_entry(entry: dict) -> dict:
         out.setdefault(key, None)
     out.setdefault("description", "")
     out.setdefault("color", SWATCHES[0])
+    try:
+        seed = int(out.get("seed"))
+    except (TypeError, ValueError):
+        seed = 0
+    # Heals voices saved before seeds existed: without this they would keep
+    # drifting for as long as the library lives.
+    out["seed"] = seed if 0 < seed <= _SEED_MAX else new_seed()
 
     caps = ENGINES[out["model_type"]]
     ref = out.get("reference_path")
@@ -200,6 +225,9 @@ def to_audiobook_profile(voice: dict, *, index: int = 0) -> dict:
         "voice_ref_path": voice.get("reference_path"),
         "emotion_ref_path": voice.get("emotion_reference_path"),
         "default_emotion": voice.get("default_emotion"),
+        # Without this the imported copy would get a per-run seed again and
+        # sound like someone other than the voice that was auditioned.
+        "seed": voice.get("seed"),
         "params": dict(voice.get("params") or {}),
     }
 
@@ -222,6 +250,19 @@ if __name__ == "__main__":
                        params={"voice_description": "older man, gravelly"})
         assert v2["ready"] is True, v2
         assert v2["supports_cloning"] is False
+
+        # -- the seed is the voice identity: every voice has one, it survives
+        #    edits, and a library written before seeds existed gets one on load
+        assert 0 < v1["seed"] <= _SEED_MAX, v1["seed"]
+        assert 0 < v2["seed"] <= _SEED_MAX, v2["seed"]
+        kept = update_voice(d, v2["id"], {"description": "renamed"})
+        assert kept["seed"] == v2["seed"], "editing a voice must not reroll it"
+        legacy = sanitize_entry({"id": "old", "name": "Legacy",
+                                 "model_type": "qwen3_tts_voicedesign"})
+        assert isinstance(legacy["seed"], int) and legacy["seed"] > 0
+        for bad in (0, -5, None, "", "abc"):
+            assert sanitize_entry({"seed": bad})["seed"] > 0, bad
+        assert to_audiobook_profile(v2)["seed"] == v2["seed"],             "the book copy must speak with the voice that was auditioned"
         assert v2["color"] != v1["color"], "colours should differ by default"
 
         # -- unknown engine falls back rather than persisting nonsense

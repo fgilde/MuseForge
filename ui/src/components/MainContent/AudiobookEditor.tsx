@@ -193,6 +193,8 @@ export function AudiobookEditor() {
     previewPassage(text, {
       profileId: run?.profile_id ?? project?.default_profile_id ?? null,
       emotion: run?.overrides?.emotion ?? null,
+      // Lets the server lay this block's ambience/music under the passage.
+      blockId: popover.blockId,
     })
     setPopover(null)
   }

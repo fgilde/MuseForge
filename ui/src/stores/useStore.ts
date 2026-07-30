@@ -1452,6 +1452,7 @@ interface AppState {
   loadVoices: () => Promise<void>
   createVoiceEntry: (draft: api.VoiceDraft) => Promise<string | null>
   patchVoiceEntry: (id: string, patch: api.VoiceDraft) => Promise<void>
+  rerollVoiceEntry: (id: string) => Promise<void>
   deleteVoiceEntry: (id: string) => Promise<void>
   /** Auditions, keyed by library voice id or in-book profile id — one at a
    *  time, since each one occupies the generation slot anyway. */
@@ -1462,7 +1463,7 @@ interface AppState {
   previewAbVoice: (profileId: string, text?: string) => Promise<void>
   /** Audition a marked passage in the open book. Keyed `PASSAGE_PREVIEW_KEY`
    *  in the shared audition slots below. */
-  previewAbPassage: (text: string, opts?: { profileId?: string | null; emotion?: string | null }) => Promise<void>
+  previewAbPassage: (text: string, opts?: { profileId?: string | null; emotion?: string | null; blockId?: string | null }) => Promise<void>
   _pollVoicePreview: (key: string, jobId: string, library: boolean) => void
 
   /** Audio → Speech: read the prompt with a library voice instead of the
@@ -5980,6 +5981,21 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  /** New take on the same settings. Drops the stored audition with it, since
+   *  that sample was the old voice. */
+  rerollVoiceEntry: async (id) => {
+    set({ voicesError: null })
+    try {
+      const voice = await api.rerollVoice(id)
+      set(s => ({
+        voices: s.voices.map(v => (v.id === id ? voice : v)),
+        voicePreviewUrls: { ...s.voicePreviewUrls, [id]: undefined as unknown as string },
+      }))
+    } catch (e) {
+      set({ voicesError: e instanceof Error ? e.message : 'Could not re-roll the voice' })
+    }
+  },
+
   deleteVoiceEntry: async (id) => {
     try {
       await api.deleteVoice(id)
@@ -6039,6 +6055,7 @@ export const useStore = create<AppState>((set, get) => ({
         profile_id: opts?.profileId ?? undefined,
         emotion: opts?.emotion ?? undefined,
         chapter_id: get().activeAbChapterId ?? undefined,
+        block_id: opts?.blockId ?? undefined,
       })
       set(s => ({
         voicePreviewWarnings: { ...s.voicePreviewWarnings, [PASSAGE_PREVIEW_KEY]: started.warnings || [] },
