@@ -172,7 +172,7 @@ sys.argv = _original_argv
 # --- FastAPI setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import logging
@@ -6789,6 +6789,76 @@ async def story_extend(sid: str, request: Request):
     if not ok:
         raise HTTPException(status_code=409, detail=reason)
     return {"status": "extending", "story_id": sid, "additional_chapters": count}
+
+
+@api.get("/api/v1/story/export-formats")
+def story_export_formats():
+    """Which export formats this install can produce.
+
+    md/txt always work; docx and pdf depend on optional packages, so the UI
+    greys a format out instead of offering one that fails on click.
+    """
+    from services import story_export
+    return {"formats": story_export.available_formats()}
+
+
+def _story_state_or_404(sid: str, workspace: str = None) -> dict:
+    from services import story_pipeline
+    state = story_pipeline.get_story(sid) or story_pipeline.load_story(
+        _story_dir(workspace), sid)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Story {sid} not found")
+    return state
+
+
+def _story_download(data: bytes, filename: str, fmt: str) -> Response:
+    """A real file download rather than JSON with a path.
+
+    The UI can then just follow the link, and an MCP client gets the bytes
+    without a second round trip through the workspace.
+    """
+    from services import story_export
+    return Response(
+        content=data,
+        media_type=story_export.mime_for(fmt),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api.get("/api/v1/story/stories/{sid}/download")
+def story_download(sid: str, fmt: str = "md", lang: str = None,
+                   per_chapter: bool = False, workspace: str = None):
+    """Download a whole story.
+
+    fmt: md, txt, docx or pdf. lang picks a translation (falls back to the
+    original per chapter where none exists). per_chapter=true returns a ZIP
+    with one file per chapter instead of a single document.
+    """
+    from services import story_export
+
+    state = _story_state_or_404(sid, workspace)
+    try:
+        if per_chapter:
+            data, name = story_export.render_chapters_zip(state, fmt, lang)
+            return _story_download(data, name, "zip")
+        data, name = story_export.render_story(state, fmt, lang)
+    except story_export.ExportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _story_download(data, name, fmt)
+
+
+@api.get("/api/v1/story/stories/{sid}/chapters/{index}/download")
+def story_download_chapter(sid: str, index: int, fmt: str = "md",
+                           lang: str = None, workspace: str = None):
+    """Download a single chapter in the same formats as the whole story."""
+    from services import story_export
+
+    state = _story_state_or_404(sid, workspace)
+    try:
+        data, name = story_export.render_chapter(state, index, fmt, lang)
+    except story_export.ExportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _story_download(data, name, fmt)
 
 
 @api.post("/api/v1/story/stories/{sid}/export")

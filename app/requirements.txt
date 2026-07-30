@@ -116,9 +116,13 @@ mcp>=1.9,<2
 # services/audiobook/importer.py, so a missing one only disables that one
 # file format instead of breaking startup. EPUB HTML is stripped with the
 # stdlib html.parser — no BeautifulSoup/lxml needed.
-python-docx==1.1.2   # .docx
-pypdf==5.1.0         # .pdf
-EbookLib==0.18       # .epub
+python-docx==1.1.2   # .docx import AND Storywriter .docx export
+pypdf==5.1.0         # .pdf import
+EbookLib==0.18       # .epub import
+
+# Storywriter PDF export (services/story_export.py). Lazy-imported like the
+# importers above, so a missing reportlab disables only the PDF format.
+reportlab==4.2.5
 
 # Optional / commented out
 # transformers==4.46.3  # for llamallava pre-patch
