@@ -37,12 +37,14 @@ export function AudiobookPanel() {
   const stories = useStore(s => s.stories)
   const loadStories = useStore(s => s.loadStories)
   const importStory = useStore(s => s.importStoryAsAudiobook)
+  const createAsset = useStore(s => s.createAbAsset)
+  const deleteAsset = useStore(s => s.deleteAbAsset)
 
   const fileRef = useRef<HTMLInputElement>(null)
   const importFile = useStore(s => s.importAudiobookFile)
   const [autoSplit, setAutoSplit] = useState(true)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-  const [openSection, setOpenSection] = useState<'voices' | 'chapters' | null>('voices')
+  const [openSection, setOpenSection] = useState<'voices' | 'sfx' | 'music' | 'chapters' | null>('voices')
 
   useEffect(() => { loadAudiobooks(); loadStories() }, [loadAudiobooks, loadStories])
 
@@ -244,6 +246,40 @@ export function AudiobookPanel() {
             )}
           </Section>
 
+          {/* Sound effects */}
+          <Section
+            label={`Effects (${project.sfx.length})`}
+            open={openSection === 'sfx'}
+            onToggle={() => setOpenSection(s => (s === 'sfx' ? null : 'sfx'))}
+          >
+            <AssetList
+              kind="sfx"
+              items={project.sfx.map(a => ({
+                id: a.id, label: a.label, audio_path: a.audio_path,
+                detail: `${a.duration}s · ${a.playback_mode}${a.loop ? ' · loop' : ''}`,
+              }))}
+              onCreate={body => createAsset('sfx', body)}
+              onDelete={id => deleteAsset('sfx', id)}
+            />
+          </Section>
+
+          {/* Background music */}
+          <Section
+            label={`Music (${project.music.length})`}
+            open={openSection === 'music'}
+            onToggle={() => setOpenSection(s => (s === 'music' ? null : 'music'))}
+          >
+            <AssetList
+              kind="music"
+              items={project.music.map(a => ({
+                id: a.id, label: a.title, audio_path: a.audio_path,
+                detail: `${Math.round(a.duration)}s${a.loop ? ' · loop' : ''}`,
+              }))}
+              onCreate={body => createAsset('music', body)}
+              onDelete={id => deleteAsset('music', id)}
+            />
+          </Section>
+
           {/* Chapters */}
           <Section
             label={`Chapters (${project.chapters.length})`}
@@ -426,6 +462,160 @@ function VoiceRow({ voice, isDefault, onPatch, onDefault, onDelete }: {
         disabled={caps?.emotion === 'none'}
         className="mt-1.5 w-full rounded border border-border bg-bg-tertiary px-1.5 py-1 text-[10px] text-text-primary placeholder:text-text-muted disabled:opacity-50"
       />
+    </div>
+  )
+}
+
+
+/**
+ * Shared list + create form for sound effects and music beds.
+ *
+ * Generation is fire-and-forget: the asset appears at once with no audio and
+ * fills in when the job finishes, so a slow model does not block the panel.
+ * An asset without audio is marked pending rather than looking ready and
+ * then failing the render.
+ */
+function AssetList({ kind, items, onCreate, onDelete }: {
+  kind: 'sfx' | 'music'
+  items: { id: string; label: string; audio_path?: string | null; detail: string }[]
+  onCreate: (body: {
+    label?: string; prompt?: string; duration?: number
+    playback_mode?: 'parallel' | 'sequential'; loop?: boolean; volume?: number
+  }) => Promise<void>
+  onDelete: (id: string) => Promise<void>
+}) {
+  const [adding, setAdding] = useState(false)
+  const [label, setLabel] = useState('')
+  const [prompt, setPrompt] = useState('')
+  const [duration, setDuration] = useState(kind === 'sfx' ? 5 : 60)
+  const [mode, setMode] = useState<'parallel' | 'sequential'>('parallel')
+  const [loop, setLoop] = useState(kind === 'music')
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
+    if (!prompt.trim()) return
+    setBusy(true)
+    try {
+      await onCreate({
+        label: label.trim() || undefined,
+        prompt: prompt.trim(),
+        duration,
+        ...(kind === 'sfx' ? { playback_mode: mode } : {}),
+        loop,
+      })
+      setLabel(''); setPrompt(''); setAdding(false)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {items.length === 0 && !adding && (
+        <p className="text-[11px] text-text-muted">
+          {kind === 'sfx'
+            ? 'Effects are generated from a text prompt and can play under a paragraph or between them.'
+            : 'A music bed plays under a whole chapter and ducks automatically while anyone speaks.'}
+        </p>
+      )}
+
+      {items.map(a => (
+        <div key={a.id} className="flex items-center gap-1.5 rounded-md border border-border bg-bg-tertiary/40 px-2 py-1">
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[11px] text-text-primary">{a.label}</div>
+            <div className="text-[9px] text-text-muted">
+              {a.audio_path ? a.detail : 'generating…'}
+            </div>
+          </div>
+          {a.audio_path && (
+            <audio
+              src={`/api/v1/file/${encodeURIComponent(a.audio_path.split(/[\\/]/).pop() || '')}`}
+              controls
+              className="h-6 w-24"
+            />
+          )}
+          <button
+            onClick={() => onDelete(a.id)}
+            title="Delete and unlink everywhere"
+            aria-label="Delete asset"
+            className="rounded p-1 text-text-muted hover:text-text-primary"
+          >
+            <Trash2 size={11} />
+          </button>
+        </div>
+      ))}
+
+      {adding ? (
+        <div className="space-y-1.5 rounded-lg border border-border bg-bg-tertiary/40 p-2">
+          <input
+            value={label}
+            onChange={e => setLabel(e.target.value)}
+            placeholder="Name (optional)"
+            className="w-full rounded border border-border bg-bg-tertiary px-1.5 py-1 text-[10px] text-text-primary placeholder:text-text-muted"
+          />
+          <textarea
+            value={prompt}
+            onChange={e => setPrompt(e.target.value)}
+            rows={2}
+            placeholder={kind === 'sfx'
+              ? 'Describe the sound — English works best: "heavy rain on a tin roof"'
+              : 'Describe the music: "sparse melancholic piano, slow"'}
+            className="w-full resize-y rounded border border-border bg-bg-tertiary px-1.5 py-1 text-[10px] text-text-primary placeholder:text-text-muted"
+          />
+          <div className="flex items-center gap-2">
+            <label className="text-[10px] text-text-muted">Seconds</label>
+            <input
+              type="number"
+              min={1}
+              max={kind === 'sfx' ? 30 : 300}
+              value={duration}
+              onChange={e => setDuration(Math.max(1, Number(e.target.value) || 1))}
+              className="w-16 rounded border border-border bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-primary"
+            />
+            <label className="flex cursor-pointer items-center gap-1 text-[10px] text-text-muted">
+              <input
+                type="checkbox"
+                checked={loop}
+                onChange={e => setLoop(e.target.checked)}
+                className="h-3 w-3 rounded border-border bg-bg-tertiary accent-accent-blue"
+              />
+              loop
+            </label>
+          </div>
+          {kind === 'sfx' && (
+            <select
+              value={mode}
+              onChange={e => setMode(e.target.value as 'parallel' | 'sequential')}
+              className="w-full rounded border border-border bg-bg-tertiary px-1.5 py-1 text-[10px] text-text-primary"
+            >
+              <option value="parallel">Parallel — plays under the speech</option>
+              <option value="sequential">Sequential — speech pauses for it</option>
+            </select>
+          )}
+          <div className="flex gap-1.5">
+            <button
+              onClick={submit}
+              disabled={busy || !prompt.trim()}
+              className="flex-1 rounded bg-cta py-1 text-[10px] font-medium text-white disabled:opacity-40"
+            >
+              {busy ? 'Starting…' : 'Generate'}
+            </button>
+            <button
+              onClick={() => setAdding(false)}
+              className="rounded border border-border px-2 py-1 text-[10px] text-text-secondary hover:text-text-primary"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={() => setAdding(true)}
+          className="flex w-full items-center justify-center gap-1 rounded-lg border border-border py-1.5 text-[10px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+        >
+          <Plus size={10} /> {kind === 'sfx' ? 'New effect' : 'New music bed'}
+        </button>
+      )}
     </div>
   )
 }

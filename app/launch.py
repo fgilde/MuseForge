@@ -7018,6 +7018,180 @@ async def ab_render(pid: str, request: Request):
     return {"job_id": job_id, "status": "queued", "book": is_book}
 
 
+def _ab_asset_generation_params(kind: str, prompt: str, duration: float,
+                                workspace: str) -> dict:
+    """Build the generation body for a sound effect or a music bed.
+
+    The recipe lives here rather than in the UI because it is not obvious:
+    MMAudio is post-processing on a video carrier, so an SFX job generates a
+    throwaway 1-second video and takes only its audio. Duplicating that in
+    the audiobook panel would mean two places to keep in step.
+    """
+    if kind == "sfx":
+        return {
+            "model_type": "ltx2_22B_distilled_1_1",   # carrier for MMAudio
+            "_sfx_virtual_model": "mmaudio_v2",
+            "prompt": prompt,
+            "MMAudio_prompt": prompt,
+            "MMAudio_setting": 1,
+            "_mmaudio_variant": "v2",
+            "sfx_mode": True,
+            "duration_seconds": duration,
+            "video_length": 17,          # minimum viable carrier (~1s)
+            "num_inference_steps": 4,
+            "_audio_sub_mode": "sfx",
+            "workspace": workspace,
+        }
+    return {
+        "model_type": "ace_step_v1_5_xl_sft_lm_4b",
+        "prompt": prompt,
+        "alt_prompt": prompt,
+        "duration_seconds": duration,
+        "_audio_sub_mode": "music",
+        "_music_instrumental": True,
+        "workspace": workspace,
+    }
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/assets/{kind}")
+async def ab_create_asset(pid: str, kind: str, request: Request):
+    """Add a sound effect or music bed to a project, generating its audio.
+
+    kind is "sfx" or "music". Body: {label|title, prompt, duration?,
+    playback_mode?, loop?, volume?, audio_path?, generate?}.
+
+    With generate=true (the default when no audio_path is given) a job is
+    started and its id returned; the asset appears immediately with a null
+    audio_path and is filled in when the job completes, so the UI can show
+    it as pending instead of blocking.
+    """
+    from services.audiobook import model as ab_model, store as ab_store
+
+    if kind not in ("sfx", "music"):
+        raise HTTPException(status_code=400, detail='kind must be "sfx" or "music"')
+
+    body = await request.json()
+    workspace = body.get("workspace") or _get_active_workspace()
+    out_dir = _ab_dir(workspace)
+    prompt = (body.get("prompt") or "").strip()
+    audio_path = body.get("audio_path")
+    want_generate = bool(body.get("generate", not audio_path))
+    if want_generate and not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required to generate audio")
+
+    duration = float(body.get("duration") or (5.0 if kind == "sfx" else 60.0))
+    asset_id = uuid.uuid4().hex[:12]
+    if kind == "sfx":
+        asset = ab_model.SfxAsset(
+            id=asset_id,
+            label=body.get("label") or prompt[:40] or "Effect",
+            prompt=prompt,
+            duration=duration,
+            audio_path=audio_path,
+            playback_mode=body.get("playback_mode") or "parallel",
+            loop=bool(body.get("loop", False)),
+            volume=float(body.get("volume", 0.5)),
+        )
+    else:
+        asset = ab_model.MusicAsset(
+            id=asset_id,
+            title=body.get("title") or body.get("label") or prompt[:40] or "Music",
+            source="generated" if want_generate else "upload",
+            prompt=prompt,
+            audio_path=audio_path,
+            duration=duration,
+            volume=float(body.get("volume", 0.25)),
+            loop=bool(body.get("loop", True)),
+        )
+
+    def _add(project):
+        if kind == "sfx":
+            project.sfx = list(project.sfx) + [asset]
+        else:
+            project.music = list(project.music) + [asset]
+
+    project = ab_store.update_project(out_dir, pid, _add)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+
+    job_id = None
+    if want_generate:
+        job_id = uuid.uuid4().hex[:8]
+        params = _ab_asset_generation_params(kind, prompt, duration, workspace)
+        _jobs[job_id] = {
+            "id": job_id, "status": "queued", "progress": 0, "step": 0,
+            "total_steps": 0, "phase": "",
+            "message": f"Queued ({kind})", "created_at": time.time(),
+            "params": params, "output_files": [], "error": None,
+            "workspace": workspace, "out_dir": out_dir,
+        }
+
+        def _worker():
+            try:
+                _run_generation(job_id)
+            finally:
+                # Attach whatever the job produced. A failed generation
+                # leaves audio_path null, which the UI shows as pending
+                # rather than silently pretending the asset is usable.
+                produced = (_jobs.get(job_id) or {}).get("output_files") or []
+                if produced:
+                    path = os.path.join(out_dir, produced[0])
+
+                    def _attach(project):
+                        target = project.sfx if kind == "sfx" else project.music
+                        for item in target:
+                            if item.id == asset_id:
+                                item.audio_path = path
+                    try:
+                        ab_store.update_project(out_dir, pid, _attach)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[AudioBook] Could not attach {kind} audio: {e}")
+
+        threading.Thread(target=_worker, daemon=False).start()
+
+    return {"project": project.to_dict(), "asset_id": asset_id, "job_id": job_id}
+
+
+@api.delete("/api/v1/audiobook/projects/{pid}/assets/{kind}/{asset_id}")
+def ab_delete_asset(pid: str, kind: str, asset_id: str, workspace: str = None):
+    """Remove an asset and every reference to it.
+
+    Dropping the asset without unlinking it would leave blocks pointing at
+    something that no longer exists, which the render would then reject.
+    """
+    from services.audiobook import store as ab_store
+
+    if kind not in ("sfx", "music"):
+        raise HTTPException(status_code=400, detail='kind must be "sfx" or "music"')
+
+    def _remove(project):
+        if kind == "sfx":
+            project.sfx = [a for a in project.sfx if a.id != asset_id]
+        else:
+            project.music = [a for a in project.music if a.id != asset_id]
+        for chapter in project.chapters:
+            if kind == "music" and chapter.music_id == asset_id:
+                chapter.music_id = None
+            kept = []
+            for block in chapter.blocks:
+                if kind == "sfx" and getattr(block, "type", None) == "sfx" \
+                        and getattr(block, "sfx_id", None) == asset_id:
+                    continue  # drop standalone blocks for this effect
+                if kind == "sfx" and getattr(block, "attached_sfx", None) \
+                        and block.attached_sfx.get("sfx_id") == asset_id:
+                    block.attached_sfx = None
+                if kind == "music" and getattr(block, "attached_music", None) \
+                        and block.attached_music.get("music_id") == asset_id:
+                    block.attached_music = None
+                kept.append(block)
+            chapter.blocks = kept
+
+    project = ab_store.update_project(_ab_dir(workspace), pid, _remove)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    return {"project": project.to_dict(), "deleted": asset_id}
+
+
 def _ab_pick_chapter(project, body: dict):
     """Resolve chapter_id or chapter_index from a request body."""
     cid = body.get("chapter_id")

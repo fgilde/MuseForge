@@ -60,7 +60,7 @@ export function AudiobookEditor() {
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
-  const [popover, setPopover] = useState<{ runId: string; from: number; to: number; x: number; y: number } | null>(null)
+  const [popover, setPopover] = useState<{ runId: string; blockId: string; from: number; to: number; x: number; y: number } | null>(null)
   const [showPlan, setShowPlan] = useState(false)
 
   const chapter = useMemo(
@@ -88,6 +88,20 @@ export function AudiobookEditor() {
     patchAudiobook({
       chapters: project.chapters.map(c => (c.id === chapter.id ? { ...c, blocks } : c)),
     })
+  }
+
+  /** Couple an effect or a music bed to the paragraph the selection is in.
+   *  Ambience runs alongside the speech; the render ducks it automatically. */
+  const attachToBlock = (kind: 'sfx' | 'music', assetId: string | null) => {
+    if (!popover || !chapter) return
+    saveBlocks(chapter.blocks.map(b => {
+      if (b.id !== popover.blockId) return b
+      if (kind === 'sfx') {
+        return { ...b, attached_sfx: assetId ? { sfx_id: assetId, loop: true, volume: 0.35 } : null }
+      }
+      return { ...b, attached_music: assetId ? { music_id: assetId, loop: true, volume: 0.25 } : null }
+    }))
+    setPopover(null)
   }
 
   const applyToSelection = (patch: Partial<AudiobookRun>) => {
@@ -161,6 +175,28 @@ export function AudiobookEditor() {
         )}
         {error && <p className="mt-2 text-[11px] text-red-400">{error}</p>}
 
+        {chapter && project.music.length > 0 && (
+          <div className="mt-2 flex items-center gap-2">
+            <label className="text-[10px] text-text-muted">Chapter music</label>
+            <select
+              value={chapter.music_id ?? ''}
+              onChange={e => patchAudiobook({
+                chapters: project.chapters.map(c =>
+                  c.id === chapter.id ? { ...c, music_id: e.target.value || null } : c),
+              })}
+              className="rounded border border-border bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-primary"
+            >
+              <option value="">None</option>
+              {project.music.map(m => (
+                <option key={m.id} value={m.id} disabled={!m.audio_path}>
+                  {m.title}{m.audio_path ? '' : ' (generating…)'}
+                </option>
+              ))}
+            </select>
+            <span className="text-[9px] text-text-muted">ducks automatically under speech</span>
+          </div>
+        )}
+
         {audioUrl && (
           <audio ref={audioRef} src={audioUrl} controls className="mt-2 h-8 w-full" />
         )}
@@ -189,8 +225,29 @@ export function AudiobookEditor() {
                   </div>
                 )
               }
+              const ambience = block.attached_sfx
+                ? project.sfx.find(s => s.id === block.attached_sfx?.sfx_id)
+                : null
+              const blockMusic = block.attached_music
+                ? project.music.find(m => m.id === block.attached_music?.music_id)
+                : null
               return (
-                <p key={block.id} className="text-[15px] leading-[1.8] text-text-primary">
+                <div key={block.id}>
+                  {(ambience || blockMusic) && (
+                    <div className="mb-1 flex flex-wrap gap-1">
+                      {ambience && (
+                        <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[9px] text-text-secondary">
+                          ambience: {ambience.label}
+                        </span>
+                      )}
+                      {blockMusic && (
+                        <span className="rounded-full border border-accent-warm/40 bg-accent-warm/10 px-1.5 py-0.5 text-[9px] text-text-secondary">
+                          music: {blockMusic.title}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                <p className="text-[15px] leading-[1.8] text-text-primary">
                   {(block.runs ?? []).map(run => {
                     const voice = voiceOf(run.profile_id)
                     const isActive = activeRunId === run.id
@@ -206,6 +263,7 @@ export function AudiobookEditor() {
                           e.stopPropagation()
                           setPopover({
                             runId: run.id,
+                            blockId: block.id,
                             from: offset,
                             to: offset + text.length,
                             x: e.clientX,
@@ -240,6 +298,7 @@ export function AudiobookEditor() {
                     )
                   })}
                 </p>
+                </div>
               )
             })}
           </div>
@@ -269,6 +328,55 @@ export function AudiobookEditor() {
                 </button>
               ))}
             </div>
+          )}
+
+          {project.sfx.length > 0 && (
+            <>
+              <div className="mt-2 mb-1 text-[10px] uppercase tracking-wider text-text-muted">Ambience</div>
+              <div className="space-y-0.5">
+                {project.sfx.map(a => (
+                  <button
+                    key={a.id}
+                    onClick={() => attachToBlock('sfx', a.id)}
+                    disabled={!a.audio_path}
+                    className="block w-full truncate rounded px-1.5 py-1 text-left text-[10px] text-text-primary hover:bg-bg-hover disabled:opacity-40"
+                    title={a.audio_path ? a.prompt : 'Still generating'}
+                  >
+                    {a.label}
+                  </button>
+                ))}
+                <button
+                  onClick={() => attachToBlock('sfx', null)}
+                  className="block w-full rounded px-1.5 py-1 text-left text-[10px] text-text-muted hover:bg-bg-hover"
+                >
+                  Remove ambience
+                </button>
+              </div>
+            </>
+          )}
+
+          {project.music.length > 0 && (
+            <>
+              <div className="mt-2 mb-1 text-[10px] uppercase tracking-wider text-text-muted">Music here</div>
+              <div className="space-y-0.5">
+                {project.music.map(a => (
+                  <button
+                    key={a.id}
+                    onClick={() => attachToBlock('music', a.id)}
+                    disabled={!a.audio_path}
+                    className="block w-full truncate rounded px-1.5 py-1 text-left text-[10px] text-text-primary hover:bg-bg-hover disabled:opacity-40"
+                  >
+                    {a.title}
+                  </button>
+                ))}
+                <button
+                  onClick={() => attachToBlock('music', null)}
+                  className="block w-full rounded px-1.5 py-1 text-left text-[10px] text-text-muted hover:bg-bg-hover"
+                >
+                  Back to chapter music
+                </button>
+              </div>
+            </>
           )}
 
           <div className="mt-2 mb-1 text-[10px] uppercase tracking-wider text-text-muted">Emotion</div>

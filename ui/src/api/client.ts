@@ -1722,6 +1722,42 @@ export async function renderAudiobook(pid: string, body: {
 
 /** Karaoke map for a finished render. Accepts the MixPlan payload
  *  (`{timeline: [...]}`) or a bare entry array; anything else → []. */
+/** Add an sfx or music asset. Without audio_path the server generates the
+ *  audio and returns a job_id; the asset exists immediately with a null
+ *  audio_path so the UI can show it as pending. */
+export async function createAudiobookAsset(
+  pid: string,
+  kind: 'sfx' | 'music',
+  body: {
+    label?: string; title?: string; prompt?: string; duration?: number
+    playback_mode?: 'parallel' | 'sequential'; loop?: boolean; volume?: number
+    audio_path?: string; generate?: boolean; workspace?: string
+  },
+): Promise<{ project: AudiobookProject; asset_id: string; job_id: string | null }> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/projects/${pid}/assets/${kind}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Could not add the asset' }))
+    throw new Error(err.detail || 'Could not add the asset')
+  }
+  const data = await res.json()
+  return { ...data, project: normalizeProject(data.project) }
+}
+
+export async function deleteAudiobookAsset(
+  pid: string, kind: 'sfx' | 'music', assetId: string,
+): Promise<AudiobookProject> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/projects/${pid}/assets/${kind}/${assetId}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error('Could not delete the asset')
+  const data = await res.json()
+  return normalizeProject(data.project)
+}
+
 export async function fetchAudiobookTimeline(url: string): Promise<AudiobookTimelineEntry[]> {
   const res = await fetch(url)
   if (!res.ok) return []

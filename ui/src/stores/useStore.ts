@@ -1355,6 +1355,14 @@ interface AppState {
   /** Turn a finished story into an audiobook project, one chapter per
    *  story chapter. Switches to Audio -> Book on success. */
   importStoryAsAudiobook: (sid: string) => Promise<string | null>
+  /** Add an sfx or music asset; generation runs in the background and the
+   *  project refreshes when the audio lands. */
+  createAbAsset: (kind: 'sfx' | 'music', body: {
+    label?: string; prompt?: string; duration?: number
+    playback_mode?: 'parallel' | 'sequential'; loop?: boolean; volume?: number
+    audio_path?: string
+  }) => Promise<void>
+  deleteAbAsset: (kind: 'sfx' | 'music', assetId: string) => Promise<void>
 
   // Prompt enhancement
   isEnhancing: boolean
@@ -5532,6 +5540,49 @@ export const useStore = create<AppState>((set, get) => ({
       setTimeout(tick, 1500)
     }
     tick()
+  },
+
+  createAbAsset: async (kind, body) => {
+    const pid = get().activeAudiobookId
+    if (!pid) return
+    set({ abError: null })
+    try {
+      const { project, job_id } = await api.createAudiobookAsset(pid, kind, body)
+      set({ activeAudiobook: project })
+      if (!job_id) return
+      // Poll until the generation finishes, then re-read the project: the
+      // server attaches audio_path there, so refetching is the only way to
+      // learn the asset became playable.
+      const tick = async () => {
+        if (get().activeAudiobookId !== pid) return
+        try {
+          const job = await api.fetchJobStatus(job_id)
+          set({ abRenderMessage: job.status === 'completed' ? '' : `${kind}: ${job.message || job.status}` })
+          if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+            if (job.status !== 'completed') {
+              set({ abError: job.error || `${kind} generation ${job.status}` })
+            }
+            const fresh = await api.fetchAudiobookProject(pid)
+            if (fresh) set({ activeAudiobook: fresh })
+            return
+          }
+        } catch { /* transient */ }
+        setTimeout(tick, 2000)
+      }
+      tick()
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not add the asset' })
+    }
+  },
+
+  deleteAbAsset: async (kind, assetId) => {
+    const pid = get().activeAudiobookId
+    if (!pid) return
+    try {
+      set({ activeAudiobook: await api.deleteAudiobookAsset(pid, kind, assetId) })
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not delete the asset' })
+    }
   },
 
   importStoryAsAudiobook: async (sid) => {
