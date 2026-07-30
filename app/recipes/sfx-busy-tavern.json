@@ -1,0 +1,14 @@
+{
+  "recipe_version": 1,
+  "name": "Busy Tavern",
+  "description": "Mugs, laughter and a fire, mixed far enough back to speak over.",
+  "kind": "sfx",
+  "mode": "audio",
+  "model_type": "mmaudio_v2",
+  "params": {
+    "MMAudio_prompt": "crowded tavern ambience, mugs and cutlery, indistinct laughter, crackling fire, no intelligible speech",
+    "duration_seconds": 12,
+    "MMAudio_neg_prompt": "music, singing, speech"
+  },
+  "prompt_example": "crowded tavern ambience, mugs and cutlery, indistinct laughter, crackling fire, no intelligible speech"
+}

@@ -35,6 +35,24 @@ USER_DIR = os.path.join(_APP_DIR, "recipes_user")
 
 RECIPE_SCHEMA_VERSION = 1
 
+# What a blueprint sets up. "generation" is the original kind (a model plus
+# tuned params for the media feed); the others drive features that own no
+# generation model, so they carry their own payload instead of `params`:
+#
+#   generation  model_type + params + prompt_example  -> the media feed
+#   story       story{premise, genre, pov, min_pages, ...} -> Storywriter
+#   voice       voice{model_type, params, ...}            -> voice library
+#   sfx         model_type + params + prompt_example      -> Audio/SFX
+#
+# sfx is deliberately its own kind rather than mode: "audio": it lands in the
+# SFX sub-mode, and the browser can label and filter it as an effect.
+KINDS = ("generation", "story", "voice", "sfx")
+DEFAULT_KIND = "generation"
+
+# Human labels for the badge on each card. Media blueprints label by mode
+# (Image / Video) since that is what the user is choosing between.
+KIND_LABELS = {"story": "Story", "voice": "Voice", "sfx": "Effect"}
+
 # Generation-driving settings a recipe captures. Deliberately an allowlist:
 # a recipe reproduces a LOOK (model + tuning), not a specific frame — so
 # seed, repeat count, and the per-generation inputs (start/end frames,
@@ -88,11 +106,21 @@ def _load_recipe_file(path: str) -> Optional[dict]:
         return None
 
 
+def _kind_of(recipe: dict) -> str:
+    kind = str(recipe.get("kind") or DEFAULT_KIND)
+    return kind if kind in KINDS else DEFAULT_KIND
+
+
 def _card(recipe: dict, rid: str, source: str, has_thumb: bool) -> dict:
+    kind = _kind_of(recipe)
     return {
         "id": rid,
         "name": recipe.get("name", rid),
         "description": recipe.get("description", ""),
+        "kind": kind,
+        # What the browser puts on the badge. Media blueprints show the mode
+        # they land in, the others show what they are.
+        "kind_label": KIND_LABELS.get(kind) or str(recipe.get("mode") or "video").title(),
         "mode": recipe.get("mode", "video"),
         "model_type": recipe.get("model_type", ""),
         "lora_count": len(recipe.get("loras", []) or []),
@@ -203,6 +231,7 @@ def save_recipe_from_params(
         "recipe_version": RECIPE_SCHEMA_VERSION,
         "name": name.strip(),
         "description": (description or "").strip(),
+        "kind": DEFAULT_KIND,
         "mode": mode,
         "model_type": params.get("model_type", ""),
         "loras": loras or [],
@@ -267,3 +296,51 @@ def delete_recipe(rid: str) -> bool:
         except OSError:
             pass
     return True
+
+
+# ── Self-check ─────────────────────────────────────────────────────────────
+# `python -m services.recipes` from app/. Pure logic plus the bundled files:
+# no network, no models.
+
+def _self_check() -> None:
+    # 1. Kind resolution: default, pass-through, and unknown values falling
+    #    back rather than reaching the UI as a kind it cannot render.
+    assert _kind_of({}) == DEFAULT_KIND
+    assert _kind_of({"kind": "story"}) == "story"
+    for bad in ("", None, "nonsense", 7, {}):
+        assert _kind_of({"kind": bad}) == DEFAULT_KIND, bad
+
+    # 2. The badge text. Media blueprints label by mode (that is the choice
+    #    the user is making), the rest by what they are.
+    assert _card({"mode": "image"}, "r", "bundled", False)["kind_label"] == "Image"
+    assert _card({"mode": "video"}, "r", "bundled", False)["kind_label"] == "Video"
+    assert _card({"kind": "story"}, "r", "bundled", False)["kind_label"] == "Story"
+    assert _card({"kind": "voice"}, "r", "bundled", False)["kind_label"] == "Voice"
+    assert _card({"kind": "sfx"}, "r", "bundled", False)["kind_label"] == "Effect"
+    # A card must always carry a usable badge, even for a recipe with neither.
+    assert _card({}, "r", "bundled", False)["kind_label"]
+
+    # 3. Every bundled blueprint parses, and carries the payload its kind
+    #    needs — a story blueprint with no story fields would apply as a no-op.
+    required = {"story": "story", "voice": "voice", "sfx": "params",
+                "generation": "params"}
+    seen = set()
+    for fname in sorted(os.listdir(BUNDLED_DIR)):
+        if not fname.endswith(".json"):
+            continue
+        rid = os.path.splitext(fname)[0]
+        recipe = _load_recipe_file(os.path.join(BUNDLED_DIR, fname))
+        assert recipe is not None, fname
+        assert recipe.get("name"), fname
+        kind = _kind_of(recipe)
+        seen.add(kind)
+        assert recipe.get(required[kind]), f"{rid}: {kind} needs {required[kind]}"
+        if kind == "generation":
+            assert recipe.get("model_type"), rid
+    assert seen == set(KINDS), f"bundled pack is missing kinds: {set(KINDS) - seen}"
+
+    print("recipes self-check: OK")
+
+
+if __name__ == "__main__":
+    _self_check()

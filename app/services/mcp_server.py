@@ -488,6 +488,36 @@ def audiobook_plan(project_id: str, chapter_index: int = 0) -> dict:
 
 
 @mcp.tool()
+def list_blueprints(kind: str = "") -> dict:
+    """Preset cards ("blueprints"): image/video looks, stories, voices, effects.
+
+    Each card carries `kind`, which says what it sets up and therefore how to
+    use it — fetch the full blueprint with get_blueprint:
+
+      generation  model_type + params + prompt_example  -> generate()
+      sfx         same shape, params carry MMAudio_prompt -> generate()
+      story       a `story` object of Storywriter fields -> story_start()
+      voice       a `voice` object of library fields     -> create_voice()
+
+    kind filters the list; empty returns everything.
+    """
+    cards = _get("/api/v1/recipes").get("recipes") or []
+    if kind:
+        cards = [c for c in cards if c.get("kind") == kind]
+    return {"blueprints": cards, "count": len(cards)}
+
+
+@mcp.tool()
+def get_blueprint(blueprint_id: str) -> dict:
+    """One blueprint in full, including the payload for its kind.
+
+    See list_blueprints for which field to read per kind and which call to
+    pass it to. Nothing is applied by fetching it.
+    """
+    return _get(f"/api/v1/recipes/{blueprint_id}")
+
+
+@mcp.tool()
 def list_activity() -> dict:
     """Everything currently running, with how to stop each one.
 

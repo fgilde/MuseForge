@@ -1,0 +1,14 @@
+{
+  "recipe_version": 1,
+  "name": "Old House at Night",
+  "description": "Settling timber, a distant clock, nothing else. Room tone for quiet scenes.",
+  "kind": "sfx",
+  "mode": "audio",
+  "model_type": "mmaudio_v2",
+  "params": {
+    "MMAudio_prompt": "old wooden house settling at night, distant ticking clock, faint room tone, no music, no voices",
+    "duration_seconds": 12,
+    "MMAudio_neg_prompt": "music, singing, speech"
+  },
+  "prompt_example": "old wooden house settling at night, distant ticking clock, faint room tone, no music, no voices"
+}

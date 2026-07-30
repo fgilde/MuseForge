@@ -1,0 +1,16 @@
+{
+  "recipe_version": 1,
+  "name": "Weary Detective",
+  "description": "Gravel, cigarettes and long nights. Pairs with the Noir Novella story. Audition it, then Keep this take — the engine invents a new speaker on every render until you do.",
+  "kind": "voice",
+  "voice": {
+    "name": "Weary Detective",
+    "model_type": "qwen3_tts_voicedesign",
+    "language": "en",
+    "description": "Gravel, cigarettes and long nights. Pairs with the Noir Novella story.",
+    "params": {
+      "voice_description": "older man, gravelly and tired, dry delivery, world-weary",
+      "temperature": 0.8
+    }
+  }
+}

@@ -1,8 +1,31 @@
 import { useState } from 'react'
 import { X, BookMarked, Trash2, Upload, Play, Loader2, AlertTriangle, Download, ExternalLink, Layers } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import type { RecipeCard, RecipeLora } from '../../api/client'
+import type { RecipeCard, RecipeKind, RecipeLora } from '../../api/client'
 import * as api from '../../api/client'
+
+/** Badge colours per kind, so a mixed grid is scannable without reading. */
+const KIND_BADGE: Record<string, string> = {
+  generation: 'bg-black/60 text-white',
+  story: 'bg-accent-blue/80 text-white',
+  voice: 'bg-chip-purple/80 text-white',
+  sfx: 'bg-accent-warm/80 text-white',
+}
+
+/** Chip label in the filter row. */
+const KIND_TITLE: Record<string, string> = {
+  generation: 'Image & video',
+  story: 'Stories',
+  voice: 'Voices',
+  sfx: 'Effects',
+}
+
+/** What applying it actually does — the footer line under each card. */
+const KIND_ACTION: Record<string, string> = {
+  story: 'Fills the Storywriter',
+  voice: 'Adds a library voice',
+  sfx: 'Opens Audio / SFX',
+}
 
 /**
  * RecipesOverlay — the one-click blueprint library, presented as a
@@ -24,9 +47,16 @@ export function RecipesOverlay() {
   const setSettingsOpen = useStore(s => s.setSettingsOpen)
   const setSettingsTab = useStore(s => s.setSettingsTab)
 
+  const [kind, setKind] = useState<RecipeKind | 'all'>('all')
   const [applying, setApplying] = useState<string | null>(null)
   const [missing, setMissing] = useState<{ modelType: string; loras: RecipeLora[] } | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // Only kinds that exist get a chip; the order is fixed so the row does not
+  // reshuffle as blueprints are added.
+  const kinds = (['generation', 'story', 'voice', 'sfx'] as RecipeKind[])
+    .filter(k => recipes.some(r => r.kind === k))
+  const shown = kind === 'all' ? recipes : recipes.filter(r => r.kind === kind)
 
   const handleApply = async (card: RecipeCard) => {
     setApplying(card.id); setError(null); setMissing(null)
@@ -136,13 +166,27 @@ export function RecipesOverlay() {
         <div className="px-4 py-2 bg-red-500/10 border-b border-red-500/30 text-[11px] text-chip-red">{error}</div>
       )}
 
+      {/* Kind filter — built from what is actually there. */}
+      {kinds.length > 1 && (
+        <div className="px-4 pt-3 flex flex-wrap gap-1.5">
+          <FilterChip active={kind === 'all'} onClick={() => setKind('all')}>
+            All ({recipes.length})
+          </FilterChip>
+          {kinds.map(k => (
+            <FilterChip key={k} active={kind === k} onClick={() => setKind(k)}>
+              {KIND_TITLE[k] ?? k} ({recipes.filter(r => r.kind === k).length})
+            </FilterChip>
+          ))}
+        </div>
+      )}
+
       {/* Grid */}
       <div className="flex-1 overflow-y-auto min-h-0 p-4">
         {loading ? (
           <div className="flex items-center justify-center min-h-[300px] text-text-muted">
             <Loader2 size={22} className="animate-spin" />
           </div>
-        ) : recipes.length === 0 ? (
+        ) : shown.length === 0 ? (
           <div className="flex flex-col items-center justify-center min-h-[300px] gap-3 text-text-muted text-center">
             <BookMarked size={28} />
             <p className="text-sm max-w-xs">No blueprints yet. Forge something you like, then use
@@ -150,7 +194,7 @@ export function RecipesOverlay() {
           </div>
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
-            {recipes.map(card => (
+            {shown.map(card => (
               <RecipeGridCard
                 key={card.id}
                 card={card}
@@ -164,6 +208,23 @@ export function RecipesOverlay() {
       </div>
       </div>
     </div>
+  )
+}
+
+function FilterChip({ active, onClick, children }: {
+  active: boolean; onClick: () => void; children: React.ReactNode
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-lg px-2 py-1 text-[10px] transition-colors ${
+        active
+          ? 'bg-accent-blue/15 border border-accent-blue/40 text-accent-blue'
+          : 'border border-border text-text-secondary hover:border-border-light hover:text-text-primary'
+      }`}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -186,6 +247,11 @@ function RecipeGridCard({ card, applying, onApply, onDelete }: {
             ? <Loader2 size={22} className="text-white animate-spin" />
             : <Play size={22} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />}
         </div>
+        {/* What kind it is, on the thumbnail: a grid of blueprints for four
+            different features is unreadable without it. */}
+        <span className={`absolute top-1.5 right-1.5 text-[8px] font-medium uppercase tracking-wide rounded px-1 py-0.5 ${KIND_BADGE[card.kind] ?? KIND_BADGE.generation}`}>
+          {card.kind_label || card.mode}
+        </span>
         {card.nsfw && (
           <span className="absolute top-1.5 left-1.5 text-[8px] uppercase tracking-wide bg-red-500/80 text-white rounded px-1 py-0.5">Mature</span>
         )}
@@ -206,7 +272,7 @@ function RecipeGridCard({ card, applying, onApply, onDelete }: {
           <div className="text-[10px] text-text-muted leading-snug line-clamp-2">{card.description}</div>
         )}
         <div className="mt-auto pt-1 flex items-center gap-2 text-[9px] text-text-muted">
-          <span className="capitalize">{card.mode}</span>
+          <span>{KIND_ACTION[card.kind] ?? card.mode}</span>
           {card.lora_count > 0 && (
             <span className="flex items-center gap-0.5"><Layers size={9} /> {card.lora_count}</span>
           )}

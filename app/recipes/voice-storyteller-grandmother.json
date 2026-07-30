@@ -1,0 +1,16 @@
+{
+  "recipe_version": 1,
+  "name": "Storyteller Grandmother",
+  "description": "Soft, rhythmic, close to the microphone. Made for bedtime chapters. Audition it, then Keep this take — the engine invents a new speaker on every render until you do.",
+  "kind": "voice",
+  "voice": {
+    "name": "Storyteller Grandmother",
+    "model_type": "qwen3_tts_voicedesign",
+    "language": "en",
+    "description": "Soft, rhythmic, close to the microphone. Made for bedtime chapters.",
+    "params": {
+      "voice_description": "elderly woman, soft and rhythmic, close and intimate, kind",
+      "temperature": 0.75
+    }
+  }
+}

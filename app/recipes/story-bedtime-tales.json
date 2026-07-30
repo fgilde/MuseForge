@@ -1,0 +1,17 @@
+{
+  "recipe_version": 1,
+  "name": "Bedtime Tales",
+  "description": "Short, kind chapters that each end somewhere safe. Third person, past tense, about 20 pages.",
+  "kind": "story",
+  "story": {
+    "genre": "children's fable",
+    "tone": "gentle, rhythmic, quietly funny",
+    "pov": "third_omniscient",
+    "tense": "past",
+    "audience": "children",
+    "min_pages": 20,
+    "explicitness": "none",
+    "temperature": 0.8,
+    "premise": "A lighthouse keeper's cat decides which of the harbour's stray stories are true."
+  }
+}

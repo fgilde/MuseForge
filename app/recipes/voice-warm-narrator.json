@@ -1,0 +1,16 @@
+{
+  "recipe_version": 1,
+  "name": "Warm Narrator",
+  "description": "Unhurried, low, trustworthy. A default reading voice for long books. Audition it, then Keep this take — the engine invents a new speaker on every render until you do.",
+  "kind": "voice",
+  "voice": {
+    "name": "Warm Narrator",
+    "model_type": "qwen3_tts_voicedesign",
+    "language": "en",
+    "description": "Unhurried, low, trustworthy. A default reading voice for long books.",
+    "params": {
+      "voice_description": "warm low male voice, unhurried, trustworthy, gentle warmth",
+      "temperature": 0.75
+    }
+  }
+}

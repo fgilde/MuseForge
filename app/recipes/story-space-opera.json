@@ -1,0 +1,17 @@
+{
+  "recipe_version": 1,
+  "name": "Space Opera",
+  "description": "Big ships, older grudges. Third limited, present tense, about 120 pages across many chapters.",
+  "kind": "story",
+  "story": {
+    "genre": "space opera",
+    "tone": "sweeping, political, hopeful under the grime",
+    "pov": "third_limited",
+    "tense": "present",
+    "audience": "adult",
+    "min_pages": 120,
+    "explicitness": "none",
+    "temperature": 0.95,
+    "premise": "A salvage crew finds a warship that has been waiting three hundred years for orders that never came."
+  }
+}

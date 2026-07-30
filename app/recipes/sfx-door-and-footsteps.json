@@ -1,0 +1,14 @@
+{
+  "recipe_version": 1,
+  "name": "Door and Footsteps",
+  "description": "A heavy door, then boots on boards. A one-shot to drop between paragraphs.",
+  "kind": "sfx",
+  "mode": "audio",
+  "model_type": "mmaudio_v2",
+  "params": {
+    "MMAudio_prompt": "a heavy wooden door opens and closes, then slow footsteps on floorboards, dry and close, no music",
+    "duration_seconds": 6,
+    "MMAudio_neg_prompt": "music, singing, speech"
+  },
+  "prompt_example": "a heavy wooden door opens and closes, then slow footsteps on floorboards, dry and close, no music"
+}

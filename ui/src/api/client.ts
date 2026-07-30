@@ -474,10 +474,17 @@ export interface RecipeLora {
   size_mb?: number
 }
 
+export type RecipeKind = 'generation' | 'story' | 'voice' | 'sfx'
+
 export interface RecipeCard {
   id: string
   name: string
   description: string
+  /** What the blueprint sets up. 'generation' lands in the media feed; the
+   *  others drive features that own no generation model. */
+  kind: RecipeKind
+  /** Badge text: the mode for media blueprints, the kind for the rest. */
+  kind_label: string
   mode: string
   model_type: string
   lora_count: number
@@ -490,6 +497,10 @@ export interface RecipeCard {
 export interface Recipe extends RecipeCard {
   loras: RecipeLora[]
   params: Record<string, unknown>
+  /** kind 'story': the Storywriter draft fields to fill in. */
+  story?: Partial<StoryParams>
+  /** kind 'voice': the library voice to create. */
+  voice?: VoiceDraft & { name?: string }
 }
 
 export async function fetchRecipes(): Promise<{ recipes: RecipeCard[] }> {

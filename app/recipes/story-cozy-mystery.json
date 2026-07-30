@@ -1,0 +1,17 @@
+{
+  "recipe_version": 1,
+  "name": "Cozy Mystery",
+  "description": "A small town, a suspicious death and a nosy amateur. Third limited, gentle pace, about 80 pages.",
+  "kind": "story",
+  "story": {
+    "genre": "cozy mystery",
+    "tone": "warm, gently funny, never gruesome",
+    "pov": "third_limited",
+    "tense": "past",
+    "audience": "general",
+    "min_pages": 80,
+    "explicitness": "none",
+    "temperature": 0.85,
+    "premise": "The village bakery's prize sourdough starter is stolen the same night the parish treasurer drowns in the mill pond."
+  }
+}

@@ -2683,6 +2683,29 @@ export const useStore = create<AppState>((set, get) => ({
     // placeholder text) so the user just tweaks the subject. Seed and repeat
     // reset so a recipe reproduces a look, not a specific frame.
     const recipe = await api.fetchRecipe(id)
+
+    // Blueprints that drive a feature owning no generation model carry their
+    // own payload instead of model params, and land the user in that feature.
+    // They can never have missing LoRAs, hence the early returns.
+    if (recipe.kind === 'story') {
+      get().setStoryDraft({ ...(recipe.story || {}) })
+      get().setGenerationMode('text')
+      get().setTextSubMode('story')
+      return { missing: [] }
+    }
+    if (recipe.kind === 'voice') {
+      const draft = recipe.voice || {}
+      const created = await get().createVoiceEntry({
+        ...draft,
+        name: draft.name || recipe.name,
+      })
+      get().setGenerationMode('audio')
+      get().setAudioSubMode('voices')
+      // Not fatal: createVoiceEntry already reported why in voicesError.
+      if (created) get().loadVoices()
+      return { missing: [] }
+    }
+
     const { models } = get()
     const model = models.find(m => m.model_type === recipe.model_type)
     const mode = model ? getModelMode(recipe.model_type, model.family) : ((recipe.mode as GenerationMode) || 'video')
@@ -2718,6 +2741,15 @@ export const useStore = create<AppState>((set, get) => ({
       availableLoras: [],
       selectedModelPerMode: { ...s.selectedModelPerMode, [mode]: recipe.model_type },
     }))
+
+    if (recipe.kind === 'sfx') {
+      get().setAudioSubMode('sfx')
+      const sfxPrompt = String(
+        (recipe.params as Record<string, unknown>)?.MMAudio_prompt
+        ?? recipe.prompt_example ?? '',
+      )
+      set(s => ({ params: { ...s.params, MMAudio_prompt: sfxPrompt, prompt: sfxPrompt } }))
+    }
 
     if (recipe.model_type) {
       get().loadModelOptions(recipe.model_type)

@@ -1,0 +1,14 @@
+{
+  "recipe_version": 1,
+  "name": "Rain on a Window",
+  "description": "Steady rain against glass with the odd gust. Loops as a bed under a chapter.",
+  "kind": "sfx",
+  "mode": "audio",
+  "model_type": "mmaudio_v2",
+  "params": {
+    "MMAudio_prompt": "steady rain against a window pane, occasional wind gust, no music, no voices",
+    "duration_seconds": 10,
+    "MMAudio_neg_prompt": "music, singing, speech"
+  },
+  "prompt_example": "steady rain against a window pane, occasional wind gust, no music, no voices"
+}

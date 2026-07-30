@@ -126,6 +126,31 @@ back several voices — and a deleted file surfaces as `reference_missing` with
 audiobook copies the configuration, so edits inside a book cannot rewrite the
 shared entry.
 
+### Blueprints
+
+One-click presets, in four kinds. `kind` on each card says what it sets up and
+which call the payload belongs to — nothing is applied by reading one.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /recipes` | Blueprint cards: `kind`, `kind_label`, name, description, thumbnail |
+| `GET /recipes/{id}` | One blueprint in full, including its kind's payload |
+| `GET /recipes/{id}/thumbnail` | Preview image, when the blueprint has one |
+| `POST /recipes/save-from-output` | Save a finished generation as a blueprint |
+| `POST /recipes/import` · `DELETE /recipes/{id}` | Import a blueprint file, delete a user one |
+
+| `kind` | Payload | Use it with |
+|---|---|---|
+| `generation` | `model_type`, `params`, `prompt_example`, `loras[]` | `POST /generate` |
+| `sfx` | same, with `params.MMAudio_prompt` | `POST /generate` (lands in Audio/SFX) |
+| `story` | `story{premise, genre, pov, tense, min_pages, …}` | `POST /story/stories` |
+| `voice` | `voice{model_type, params, language, …}` | `POST /voices` |
+
+LoRAs are referenced by pointer (`filename`, `multiplier`, `source_url`), never
+bundled, so a blueprint carries no weights. A `voice` blueprint built on a
+description-only engine still has to be auditioned and frozen — see the voices
+section for why.
+
 ### Everything else
 
 The API also covers Director pipelines (`/director/*`), LoRA management and

@@ -1,0 +1,17 @@
+{
+  "recipe_version": 1,
+  "name": "Noir Novella",
+  "description": "Rain, debts and a narrator who knows more than they say. First person, past tense, about 60 pages.",
+  "kind": "story",
+  "story": {
+    "genre": "noir crime",
+    "tone": "terse, rain-soaked, wry",
+    "pov": "first",
+    "tense": "past",
+    "audience": "adult",
+    "min_pages": 60,
+    "explicitness": "none",
+    "temperature": 0.9,
+    "premise": "A repo man takes one last job for an old friend and finds his own name in the paperwork."
+  }
+}
