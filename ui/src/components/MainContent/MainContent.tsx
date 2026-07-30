@@ -4,6 +4,7 @@ import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
 import { ChatView } from './ChatView'
+import { AudiobookEditor } from './AudiobookEditor'
 import { useStore } from '../../stores/useStore'
 import type { GenerationJob } from '../../types'
 
@@ -337,6 +338,7 @@ export function MainContent() {
   const outputsLoading = useStore(s => s.outputsLoading)
   const jobs = useStore(s => s.jobs)
   const generationMode = useStore(s => s.generationMode)
+  const audioSubMode = useStore(s => s.audioSubMode)
   const stopGeneration = useStore(s => s.stopGeneration)
   const dismissJob = useStore(s => s.dismissJob)
   const setSelectedOutput = useStore(s => s.setSelectedOutput)
@@ -560,6 +562,9 @@ export function MainContent() {
   // Text mode owns the whole main area — a conversation, not a media feed.
   // Placed after every hook above so the hook order stays stable.
   if (generationMode === 'text') return <ChatView />
+  // Audiobook editing replaces the media feed: the work is the text,
+  // and rendered chapters still show up in the gallery as outputs.
+  if (generationMode === 'audio' && audioSubMode === 'audiobook') return <AudiobookEditor />
 
   return (
     <main className="flex-1 flex flex-col h-full overflow-hidden">

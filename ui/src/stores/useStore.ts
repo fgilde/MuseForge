@@ -1297,6 +1297,8 @@ interface AppState {
   /** Internal: story poll loop. Exposed on the store only so actions can
    *  call each other; components must not invoke it. */
   _pollStory: (sid: string) => void
+  /** Internal: audiobook render poll loop. */
+  _pollAbRender: (jobId: string) => void
 
   // Storywriter
   stories: api.StorySummary[]
@@ -1324,6 +1326,32 @@ interface AppState {
   saveChapterText: (index: number, text: string) => Promise<void>
   extendActiveStory: (chapters: number) => Promise<void>
   exportActiveStory: (format: 'md' | 'txt') => Promise<string | null>
+
+  // AudioBook Creator
+  audiobooks: api.AudiobookProjectSummary[]
+  /** Not persisted, same reasoning as activeChatId. */
+  activeAudiobookId: string | null
+  activeAudiobook: api.AudiobookProject | null
+  /** Chapter the editor is showing, by id. */
+  activeAbChapterId: string | null
+  abPlan: api.AudiobookPlan | null
+  /** Render job in flight, or null. */
+  abRenderJobId: string | null
+  abRenderMessage: string
+  /** Finished audio of the current chapter plus its karaoke map. */
+  abAudioUrl: string | null
+  abTimeline: api.AudiobookTimelineEntry[]
+  abError: string | null
+  abBusy: boolean
+  loadAudiobooks: () => Promise<void>
+  createAudiobook: (title?: string) => Promise<string | null>
+  selectAudiobook: (pid: string | null) => Promise<void>
+  deleteAudiobook: (pid: string) => Promise<void>
+  patchAudiobook: (patch: api.AudiobookPatch) => Promise<void>
+  setAbChapter: (chapterId: string | null) => void
+  importAudiobookFile: (file: File, opts?: { autoSplit?: boolean; replace?: boolean }) => Promise<void>
+  planAbChapter: () => Promise<void>
+  renderAbChapter: (opts?: { book?: boolean; format?: 'mp3' | 'wav' | 'flac' | 'm4b'; force?: boolean }) => Promise<void>
 
   // Prompt enhancement
   isEnhancing: boolean
@@ -5322,6 +5350,185 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (e) {
       set({ storyError: e instanceof Error ? e.message : 'Could not extend the story' })
     }
+  },
+
+  // ── AudioBook Creator ───────────────────────────────────────────────
+  audiobooks: [],
+  activeAudiobookId: null,
+  activeAudiobook: null,
+  activeAbChapterId: null,
+  abPlan: null,
+  abRenderJobId: null,
+  abRenderMessage: '',
+  abAudioUrl: null,
+  abTimeline: [],
+  abError: null,
+  abBusy: false,
+
+  loadAudiobooks: async () => {
+    try {
+      const { projects } = await api.fetchAudiobookProjects()
+      set({ audiobooks: projects })
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not load audiobooks' })
+    }
+  },
+
+  createAudiobook: async (title) => {
+    try {
+      const project = await api.createAudiobookProject({ title: title || 'Untitled audiobook' })
+      await get().loadAudiobooks()
+      set({
+        activeAudiobookId: project.project_id,
+        activeAudiobook: project,
+        activeAbChapterId: project.chapters[0]?.id ?? null,
+        abPlan: null, abAudioUrl: null, abTimeline: [], abError: null,
+      })
+      return project.project_id
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not create the project' })
+      return null
+    }
+  },
+
+  selectAudiobook: async (pid) => {
+    if (!pid) {
+      set({ activeAudiobookId: null, activeAudiobook: null, activeAbChapterId: null,
+            abPlan: null, abAudioUrl: null, abTimeline: [] })
+      return
+    }
+    set({ activeAudiobookId: pid, abError: null, abPlan: null, abAudioUrl: null, abTimeline: [] })
+    const project = await api.fetchAudiobookProject(pid)
+    if (!project) {
+      set({ activeAudiobook: null, abError: 'Project not found' })
+      return
+    }
+    set({ activeAudiobook: project, activeAbChapterId: project.chapters[0]?.id ?? null })
+  },
+
+  deleteAudiobook: async (pid) => {
+    try {
+      await api.deleteAudiobookProject(pid)
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not delete the project' })
+      return
+    }
+    if (get().activeAudiobookId === pid) {
+      set({ activeAudiobookId: null, activeAudiobook: null, activeAbChapterId: null })
+    }
+    await get().loadAudiobooks()
+  },
+
+  /** The only write path. The backend re-sanitises what it stores, so we
+   *  adopt its response rather than trusting our local copy. */
+  patchAudiobook: async (patch) => {
+    const pid = get().activeAudiobookId
+    if (!pid) return
+    try {
+      const project = await api.updateAudiobookProject(pid, patch)
+      set({ activeAudiobook: project })
+      if (patch.chapters) get().loadAudiobooks()
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not save the project' })
+    }
+  },
+
+  setAbChapter: (chapterId) => set({
+    activeAbChapterId: chapterId,
+    // Audio and plan belong to the previous chapter.
+    abPlan: null, abAudioUrl: null, abTimeline: [],
+  }),
+
+  importAudiobookFile: async (file, opts) => {
+    const pid = get().activeAudiobookId
+    if (!pid) return
+    set({ abBusy: true, abError: null })
+    try {
+      // uploadImage is a misnomer: it posts to the generic /api/v1/upload,
+      // which stores any file and returns its server-side path. That is
+      // exactly what the import endpoint wants.
+      const { path } = await api.uploadImage(file)
+      const { project } = await api.importAudiobookDocument(pid, {
+        path,
+        auto_split: opts?.autoSplit ?? true,
+        replace: opts?.replace ?? false,
+      })
+      set({ activeAudiobook: project, activeAbChapterId: project.chapters[0]?.id ?? null })
+      get().loadAudiobooks()
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Import failed' })
+    } finally {
+      set({ abBusy: false })
+    }
+  },
+
+  planAbChapter: async () => {
+    const { activeAudiobookId: pid, activeAudiobook: project, activeAbChapterId: cid } = get()
+    if (!pid || !project || !cid) return
+    const index = project.chapters.findIndex(c => c.id === cid)
+    try {
+      set({ abPlan: await api.planAudiobookChapter(pid, { chapter_index: Math.max(0, index) }) })
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not plan the chapter' })
+    }
+  },
+
+  renderAbChapter: async (opts) => {
+    const { activeAudiobookId: pid, activeAudiobook: project, activeAbChapterId: cid } = get()
+    if (!pid || !project) return
+    const index = project.chapters.findIndex(c => c.id === cid)
+    set({ abError: null, abAudioUrl: null, abTimeline: [], abRenderMessage: 'Queued…' })
+    try {
+      const { job_id } = await api.renderAudiobook(pid, {
+        ...(opts?.book ? { book: true } : { chapter_index: Math.max(0, index) }),
+        format: opts?.format,
+        force: opts?.force,
+      })
+      set({ abRenderJobId: job_id })
+      get()._pollAbRender(job_id)
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not start the render',
+            abRenderMessage: '' })
+    }
+  },
+
+  /** Poll a render job; on success adopt the audio and its timeline. */
+  _pollAbRender: (jobId: string) => {
+    const tick = async () => {
+      if (get().abRenderJobId !== jobId) return
+      let job: Awaited<ReturnType<typeof api.fetchJobStatus>> | null = null
+      try {
+        job = await api.fetchJobStatus(jobId)
+      } catch { /* transient */ }
+      if (job) {
+        set({ abRenderMessage: job.message || job.status })
+        if (job.status === 'completed') {
+          const audio = (job.output_files || []).find(f => !f.endsWith('.json'))
+          const timeline = (job.output_files || []).find(f => f.endsWith('.timeline.json'))
+          set({
+            abRenderJobId: null,
+            abRenderMessage: '',
+            abAudioUrl: audio ? `/api/v1/file/${encodeURIComponent(audio)}` : null,
+          })
+          if (timeline) {
+            api.fetchAudiobookTimeline(`/api/v1/file/${encodeURIComponent(timeline)}`)
+              .then(entries => set({ abTimeline: entries }))
+              .catch(() => { /* karaoke is optional */ })
+          }
+          const pid = get().activeAudiobookId
+          if (pid) api.fetchAudiobookProject(pid).then(p => p && set({ activeAudiobook: p }))
+          get().loadOutputs()
+          return
+        }
+        if (job.status === 'failed' || job.status === 'cancelled') {
+          set({ abRenderJobId: null, abRenderMessage: '',
+                abError: job.error || `Render ${job.status}` })
+          return
+        }
+      }
+      setTimeout(tick, 1500)
+    }
+    tick()
   },
 
   exportActiveStory: async (format) => {

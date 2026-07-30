@@ -9,6 +9,7 @@ import { ImageRefSection } from './ImageRefSection'
 import { AudioModeSection } from './AudioModeSection'
 import { MusicControls } from './MusicControls'
 import { AudioSubModeToggle } from './AudioSubModeToggle'
+import { AudiobookPanel } from './AudiobookPanel'
 import { SfxControls } from './SfxControls'
 import { MixerControls } from './MixerControls'
 import { ModeToggle } from './ModeToggle'
@@ -200,9 +201,10 @@ export function Sidebar() {
         {isAudio && audioSubMode === 'sfx' && <SfxControls />}
         {isAudio && audioSubMode === 'mixer' && <MixerControls />}
         {isAudio && audioSubMode === 'music' && <MusicControls />}
+        {isAudio && audioSubMode === 'audiobook' && <AudiobookPanel />}
 
         {/* Prompt area (non-edit modes, skip for SFX/Mixer/Music which have their own UI) */}
-        {!isEdit && !(isAudio && (audioSubMode === 'sfx' || audioSubMode === 'mixer' || audioSubMode === 'music')) && (isMultiClip ? <MultiClipEditor /> : <PromptInput />)}
+        {!isEdit && !(isAudio && (audioSubMode === 'sfx' || audioSubMode === 'mixer' || audioSubMode === 'music' || audioSubMode === 'audiobook')) && (isMultiClip ? <MultiClipEditor /> : <PromptInput />)}
 
         {/* Video: reference images below prompt. In Frames mode the InputsPanel
             renders them as ordered tiles instead. */}

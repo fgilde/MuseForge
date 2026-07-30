@@ -1,4 +1,4 @@
-import { Mic, Music, Zap, Layers } from 'lucide-react'
+import { Mic, Music, Zap, Layers, BookAudio } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import type { AudioSubMode } from '../../types'
 
@@ -7,6 +7,7 @@ const modes: { value: AudioSubMode; label: string; icon: typeof Mic }[] = [
   { value: 'music', label: 'Music', icon: Music },
   { value: 'sfx', label: 'SFX', icon: Zap },
   { value: 'mixer', label: 'Mixer', icon: Layers },
+  { value: 'audiobook', label: 'Book', icon: BookAudio },
 ]
 
 export function AudioSubModeToggle() {
