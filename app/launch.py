@@ -328,6 +328,11 @@ def _init_pipeline():
     if not _pipeline_initialized:
         from services.director_pipeline import init as pipeline_init
         pipeline_init(_jobs, _run_generation, wgp, _gen_lock, _active_gen_states)
+        # Same dependency injection for the audiobook renderer: it submits
+        # child TTS generations through _run_generation and resolves
+        # workspaces through _workspace_dir, but must not import launch.
+        from services.audiobook.render import init as ab_render_init
+        ab_render_init(_jobs, _run_generation, _workspace_dir, _active_gen_states)
         _pipeline_initialized = True
 
 
@@ -6891,6 +6896,53 @@ async def ab_plan_chapter(pid: str, request: Request):
         "errors": errors,
         "ready": not errors,
     }
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/render")
+async def ab_render(pid: str, request: Request):
+    """Render a chapter or the whole book. Returns a job_id.
+
+    Body: {chapter_id? | chapter_index?, book?, format?, force?,
+    workspace?}. format is mp3/wav/flac for a chapter, and additionally
+    m4b (with chapter markers) when book is true. force ignores the
+    content-hash cache.
+
+    Poll /api/v1/status/{job_id}; output_files carries the finished audio.
+    Speech runs are cached by content and seed, so re-rendering after a
+    small edit only re-voices what changed.
+    """
+    from services.audiobook import render as ab_render_mod
+
+    body = await request.json() if await request.body() else {}
+    workspace = body.get("workspace") or _get_active_workspace()
+    out_dir = _ab_dir(workspace)
+    is_book = bool(body.get("book"))
+
+    _out_dir, project = _ab_load(pid, workspace)
+    params = {
+        "project_id": pid,
+        "format": (body.get("format") or ("m4b" if is_book else "wav")),
+        "force": bool(body.get("force")),
+        "workspace": workspace,
+    }
+    if not is_book:
+        chapter = _ab_pick_chapter(project, body)
+        params["chapter_id"] = chapter.id
+
+    _init_pipeline()
+    job_id = uuid.uuid4().hex[:8]
+    _jobs[job_id] = {
+        "id": job_id, "status": "queued", "progress": 0, "step": 0,
+        "total_steps": 0, "phase": "",
+        "message": "Queued (audiobook render)", "created_at": time.time(),
+        "params": params, "output_files": [], "error": None,
+        "workspace": workspace, "out_dir": out_dir,
+    }
+    worker = ab_render_mod.render_book_job if is_book else ab_render_mod.render_chapter_job
+    # Non-daemon: a full book render runs for hours and must survive a
+    # closed browser.
+    threading.Thread(target=worker, args=(job_id,), daemon=False).start()
+    return {"job_id": job_id, "status": "queued", "book": is_book}
 
 
 def _ab_pick_chapter(project, body: dict):

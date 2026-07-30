@@ -168,11 +168,13 @@ export type AspectRatio = 'auto' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
 export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '1080p'
 export type GenerationMode = 'image' | 'video' | 'audio' | 'avatar' | 'tools' | 'text'
 export type EditSubMode = 'retake' | 'inpaint' | 'restyle' | 'outpaint' | 'edit_anything' | 'recast'
-export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer'
-/** Text mode sub-modes. `story` is not built yet — the toggle shows it and
- *  both the sidebar and the main area render a short "coming soon" note
- *  instead of a panel. Selectable rather than disabled so the state is
- *  real and the eventual Story panel is a pure addition. */
+/** `audiobook` owns no generation model of its own — it drives the TTS
+ *  models through the audiobook backend, so `getFamiliesForMode` returns []
+ *  for it and the sidebar hides the Model + Forge bottom bar (same shape as
+ *  `mixer`). */
+export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer' | 'audiobook'
+/** Text mode sub-modes. `chat` is a conversation, `story` is the long-form
+ *  Storywriter (outline pass + chapter prose passes, server-side state). */
 export type TextSubMode = 'chat' | 'story'
 
 export interface ChoiceConfig {

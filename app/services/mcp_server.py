@@ -29,12 +29,19 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP(
     "MuseForge",
     instructions=(
-        "MuseForge is a local AI video, image and audio generation studio. "
-        "Typical flow: list_models() to find a model_type -> generate() to "
-        "submit a job -> job_status() until status is 'completed' -> the "
-        "output_files paths can be fetched via get_output_url(). Generation "
-        "can take minutes and the first use of a model downloads weights "
-        "(potentially many GB) — poll patiently."
+        "MuseForge is a local AI studio for video, images, audio, long-form "
+        "text and audiobooks.\n\n"
+        "Media: list_models() to find a model_type -> generate() -> "
+        "job_status() until 'completed' -> get_output_url() to download.\n"
+        "Text: chat() for conversation; story_start() -> story_status() for "
+        "long-form prose, then story_export().\n"
+        "Audiobooks: audiobook_create() -> audiobook_import() -> assign "
+        "voices -> audiobook_plan() to verify -> audiobook_render().\n\n"
+        "Generation takes minutes to hours and the first use of any model "
+        "downloads weights (potentially many GB), so poll patiently. "
+        "Anything without a dedicated tool is reachable through "
+        "api_request(); api_request('GET', '/openapi.json') returns the "
+        "full API schema."
     ),
     stateless_http=True,
     # Mounted at /mcp by launch.py — serve at the mount root so the
@@ -59,6 +66,12 @@ def _get(path: str, **kw):
 
 def _post(path: str, json=None, timeout: float = 60):
     r = requests.post(f"http://127.0.0.1:{_api_port}{path}", json=json, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def _put(path: str, json=None, timeout: float = 60):
+    r = requests.put(f"http://127.0.0.1:{_api_port}{path}", json=json, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
@@ -144,6 +157,229 @@ def enhance_prompt(prompt: str, mode: str = "video") -> dict:
     MuseForge's local LLM (downloads the LLM on first use, can take a
     while). mode: "video" or "image"."""
     return _post("/api/v1/llm/enhance-prompt", json={"prompt": prompt, "mode": mode}, timeout=600)
+
+
+# ── Text mode: chat and long-form writing ─────────────────────────────
+
+
+@mcp.tool()
+def chat(message: str, thread_id: str = "", system_prompt: str = "",
+         model_id: str = "") -> dict:
+    """Talk to the local LLM with conversation memory.
+
+    Without thread_id a new conversation is created and its id returned —
+    pass that id back to continue the same conversation. Threads persist on
+    the server, so the UI and other clients see them too.
+
+    model_id pins a model for a new thread (see list_text_models); it is
+    ignored when continuing an existing one. The first call may take
+    minutes if the model still has to download.
+
+    Returns {reply, thread_id, stream_id}.
+    """
+    tid = thread_id.strip()
+    if not tid:
+        body = {}
+        if system_prompt:
+            body["system_prompt"] = system_prompt
+        if model_id:
+            body["model_id"] = model_id
+        tid = _post("/api/v1/chat/threads", json=body)["id"]
+    result = _post(f"/api/v1/chat/threads/{tid}/messages",
+                   json={"content": message}, timeout=3600)
+    return {"reply": (result.get("message") or {}).get("content", ""),
+            "thread_id": tid,
+            "stream_id": result.get("stream_id")}
+
+
+@mcp.tool()
+def list_chat_threads() -> dict:
+    """Existing chat conversations, newest first."""
+    return _get("/api/v1/chat/threads")
+
+
+@mcp.tool()
+def list_text_models() -> dict:
+    """Text models per Storywriter pass.
+
+    Returns {outline, prose}: the outline pass wants instruction-following,
+    the prose pass wants a writer, so the catalogs differ deliberately.
+    Chat can use either.
+    """
+    return _get("/api/v1/story/models")
+
+
+@mcp.tool()
+def story_start(premise: str, min_pages: int = 50, params: dict | None = None) -> dict:
+    """Start writing a long-form story. Returns {story_id} immediately.
+
+    premise: what the story is about, in prose. min_pages: target length
+    (~275 words per page) — the outline pass derives a chapter count from
+    it unless params sets chapter_count.
+
+    params may also carry: title, genre, tone, pov ("first" |
+    "third_limited" | "third_omniscient"), tense ("past" | "present"),
+    audience, chapter_count, explicitness ("none" | "moderate" |
+    "explicit", only effective when the instance has mature mode enabled),
+    outline_model, prose_model, temperature.
+
+    Writing runs for many minutes to hours. Poll story_status(story_id);
+    live text streams under stream_id story-<id>-outline and
+    story-<id>-ch<index> via the stream-status endpoint.
+    """
+    body = dict(params or {})
+    body["premise"] = premise
+    body["min_pages"] = min_pages
+    return _post("/api/v1/story/stories", json=body)
+
+
+@mcp.tool()
+def story_status(story_id: str) -> dict:
+    """Full story state: status, progress, outline, and every chapter with
+    its text and word count. Status runs queued -> planning -> writing ->
+    completed, or failed/cancelled/crashed."""
+    return _get(f"/api/v1/story/stories/{story_id}", timeout=120)
+
+
+@mcp.tool()
+def list_stories() -> dict:
+    """Story summaries in the active workspace, newest first."""
+    return _get("/api/v1/story/stories")
+
+
+@mcp.tool()
+def story_stop(story_id: str) -> dict:
+    """Stop a running story. Chapters already written are kept."""
+    return _post(f"/api/v1/story/stories/{story_id}/stop")
+
+
+@mcp.tool()
+def story_extend(story_id: str, additional_chapters: int = 1) -> dict:
+    """Append chapters, continuing from the story's current synopsis."""
+    return _post(f"/api/v1/story/stories/{story_id}/extend",
+                 json={"additional_chapters": additional_chapters})
+
+
+@mcp.tool()
+def story_regenerate_chapter(story_id: str, chapter_index: int,
+                             instruction: str = "") -> dict:
+    """Rewrite one chapter. instruction steers the rewrite ("darker", "more
+    dialogue", "cut the flashback"). Continuity for later chapters is
+    replayed afterwards."""
+    body = {"instruction": instruction} if instruction else {}
+    return _post(
+        f"/api/v1/story/stories/{story_id}/chapters/{chapter_index}/regenerate",
+        json=body)
+
+
+@mcp.tool()
+def story_edit_chapter(story_id: str, chapter_index: int, text: str) -> dict:
+    """Replace a chapter's text. The running synopsis is marked stale so the
+    next pass rebuilds it from what is actually written. Only allowed while
+    the story is not running."""
+    return _put(f"/api/v1/story/stories/{story_id}/chapters/{chapter_index}",
+                {"text": text})
+
+
+@mcp.tool()
+def story_export(story_id: str, fmt: str = "md") -> dict:
+    """Write the story into the workspace as "md" or "txt". The file then
+    appears as a text output, downloadable via get_output_url()."""
+    return _post(f"/api/v1/story/stories/{story_id}/export", json={"format": fmt})
+
+
+# ── AudioBook Creator ─────────────────────────────────────────────────
+
+
+@mcp.tool()
+def audiobook_create(title: str = "Untitled audiobook", language: str = "en") -> dict:
+    """Create an audiobook project. Returns the full project.
+
+    Workflow: create -> audiobook_import a document -> assign voices
+    (audiobook_update, or the UI) -> audiobook_plan to check readiness ->
+    audiobook_render.
+    """
+    return _post("/api/v1/audiobook/projects",
+                 json={"title": title, "language": language})
+
+
+@mcp.tool()
+def list_audiobooks() -> dict:
+    """Audiobook project summaries in the active workspace."""
+    return _get("/api/v1/audiobook/projects")
+
+
+@mcp.tool()
+def audiobook_get(project_id: str) -> dict:
+    """Full project: chapters, blocks, voice profiles, sfx, music."""
+    return _get(f"/api/v1/audiobook/projects/{project_id}", timeout=120)
+
+
+@mcp.tool()
+def audiobook_import(project_id: str, path: str, auto_split: bool = True,
+                     replace: bool = False) -> dict:
+    """Import a document as chapters.
+
+    path is a file already on the server — upload it first with
+    upload_image/upload_audio for media, or place it in the workspace.
+    Supports .txt, .md, .docx, .pdf and .epub (the last three need their
+    optional parser installed; the error names the package if missing).
+    auto_split detects chapter headings; replace swaps the existing
+    chapters instead of appending.
+    """
+    return _post(f"/api/v1/audiobook/projects/{project_id}/import",
+                 json={"path": path, "auto_split": auto_split, "replace": replace},
+                 timeout=300)
+
+
+@mcp.tool()
+def audiobook_update(project_id: str, changes: dict) -> dict:
+    """Patch a project. changes may carry any of: title, language,
+    chapters, voice_profiles, sfx, music, default_profile_id,
+    render_settings.
+
+    A voice profile is {id, name, color, model_type, voice_ref_path,
+    emotion_ref_path, default_emotion, params}; runs reference it by
+    profile_id. Call audiobook_get first and send back modified structures
+    — this replaces the fields you pass.
+    """
+    return _put(f"/api/v1/audiobook/projects/{project_id}", changes)
+
+
+@mcp.tool()
+def audiobook_render(project_id: str, chapter_index: int = -1, book: bool = False,
+                     fmt: str = "", force: bool = False) -> dict:
+    """Render audiobook audio. Returns {job_id} — poll job_status().
+
+    chapter_index renders one chapter; book=True renders the whole book and
+    defaults to m4b with chapter markers. fmt overrides the format
+    (mp3/wav/flac, plus m4b for a book). force ignores the cache.
+
+    Speech runs are cached by content and seed, so re-rendering after a
+    small edit only re-voices what actually changed. A full book runs for
+    a long time; the job survives a disconnect.
+    """
+    body: dict = {"force": force}
+    if book:
+        body["book"] = True
+    else:
+        body["chapter_index"] = max(0, chapter_index)
+    if fmt:
+        body["format"] = fmt
+    return _post(f"/api/v1/audiobook/projects/{project_id}/render", json=body)
+
+
+@mcp.tool()
+def audiobook_plan(project_id: str, chapter_index: int = 0) -> dict:
+    """Dry-run the text-to-speech mapping for a chapter.
+
+    Returns one plan per speech run plus `errors` and `ready`. Check this
+    before rendering: it reports paragraphs with no voice assigned and
+    models that need a reference clip, which would otherwise fail the
+    render minutes in.
+    """
+    return _post(f"/api/v1/audiobook/projects/{project_id}/plan",
+                 json={"chapter_index": chapter_index})
 
 
 @mcp.tool()

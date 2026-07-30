@@ -1894,6 +1894,9 @@ export const useStore = create<AppState>((set, get) => ({
       music: 'ace_step_v1_5_xl_sft_lm_4b',
       sfx: 'mmaudio_v2',
       mixer: '',  // Mixer doesn't use a model — it's an ffmpeg-based tool
+      // Audiobook picks a TTS model per voice profile inside the project,
+      // so there is no single mode-level model to restore.
+      audiobook: '',
     }
     const saved = savedModels[subMode]
     const targetModel = (saved && models.some(m => m.model_type === saved))

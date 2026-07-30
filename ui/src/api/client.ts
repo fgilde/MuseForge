@@ -1031,9 +1031,19 @@ export async function uploadImage(file: File): Promise<{ filename: string; path:
     method: 'POST',
     body: form,
   })
-  if (!res.ok) throw new Error('Upload failed')
+  if (!res.ok) {
+    // Surface the server's reason (413 too large, unsupported audio, ...)
+    // instead of a flat "Upload failed" — every caller shows this string.
+    const err = await res.json().catch(() => ({ detail: 'Upload failed' }))
+    throw new Error(err.detail || 'Upload failed')
+  }
   return res.json()
 }
+
+/** `/api/v1/upload` is not image-only — it stores any file and hands back a
+ *  server-side path. The audiobook importer needs exactly that for
+ *  txt/md/docx/pdf/epub, so it reuses this endpoint under a truthful name. */
+export const uploadFile = uploadImage
 
 // --- System Config ---
 
@@ -1293,6 +1303,430 @@ export async function sendChatMessage(tid: string, body: {
     throw new Error(err.detail || 'Generation failed')
   }
   return res.json()
+}
+
+// --- Storywriter (Text mode → Story) ---
+//
+// Long-form generation runs as a server-side worker (same shape as the
+// Director pipeline): POST returns immediately with a story_id, the UI polls
+// GET .../{sid} for state and `getLlmStreamStatus('story-<sid>-<pass>')` for
+// the tokens of the pass currently running.
+//
+// Stream ids are deterministic: `story-<sid>-outline` for the planning pass
+// and `story-<sid>-ch<index>` for a chapter's prose pass.
+
+/** Same five fields the Director's progress dict carries. */
+export interface StoryProgress {
+  current: number
+  total: number
+  message: string
+  step: number
+  total_steps: number
+}
+
+export type StoryStatus = 'queued' | 'planning' | 'writing' | 'paused' | 'completed' | 'failed' | 'cancelled'
+
+export interface StoryParams {
+  premise: string
+  title?: string
+  genre?: string
+  tone?: string
+  pov?: 'first' | 'third_limited' | 'third_omniscient'
+  tense?: 'past' | 'present'
+  audience?: string
+  min_pages?: number
+  /** null / omitted → the outline model picks a chapter count. */
+  chapter_count?: number | null
+  explicitness?: 'none' | 'moderate' | 'explicit'
+  outline_model?: string
+  prose_model?: string
+  temperature?: number
+}
+
+export interface StorySummary {
+  id: string
+  title: string
+  status: StoryStatus | string
+  chapter_count: number
+  word_count: number
+  created_at: number
+  updated_at: number
+  progress?: StoryProgress | null
+}
+
+export interface StoryChapter {
+  index: number
+  title: string
+  beats: string[]
+  text: string
+  word_count: number
+  status: string
+  generated_at: number | null
+  model_id?: string | null
+}
+
+/** One recorded LLM call — what "Show prompt" displays. */
+export interface StoryLlmPass {
+  pass: string
+  model_id: string | null
+  system_prompt: string
+  user_prompt: string
+  response_text: string
+  thinking_text?: string | null
+  at: number
+}
+
+export interface StoryState {
+  story_id: string
+  title: string
+  premise: string
+  params: StoryParams
+  status: StoryStatus | string
+  outline: unknown
+  chapters: StoryChapter[]
+  synopsis_running?: string
+  progress?: StoryProgress | null
+  error?: string | null
+  llm_passes?: StoryLlmPass[]
+  output_files?: string[]
+}
+
+export interface StoryModelLists {
+  outline: import('../types').LlmModelOption[]
+  prose: import('../types').LlmModelOption[]
+}
+
+/** Shared 404/error unwrap for the story endpoints, which land in stages. */
+async function storyJson<T>(res: Response, what: string): Promise<T> {
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '' }))
+    throw new Error(err.detail || `${what} failed (HTTP ${res.status})`)
+  }
+  return res.json()
+}
+
+export async function fetchStories(): Promise<{ stories: StorySummary[] }> {
+  return storyJson(await fetch(`${BASE}/api/v1/story/stories`), 'Loading stories')
+}
+
+export async function createStory(params: StoryParams): Promise<{ story_id: string; status: string }> {
+  const res = await fetch(`${BASE}/api/v1/story/stories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  return storyJson(res, 'Starting the story')
+}
+
+/** Full story state, or null when it's gone (404). */
+export async function fetchStory(sid: string): Promise<StoryState | null> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}`)
+  if (res.status === 404) return null
+  return storyJson(res, 'Loading the story')
+}
+
+export async function stopStory(sid: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/stop`, { method: 'POST' })
+  if (!res.ok && res.status !== 404) throw new Error('Failed to stop the story')
+}
+
+export async function deleteStory(sid: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 404) throw new Error('Failed to delete the story')
+}
+
+export async function regenerateStoryChapter(
+  sid: string, index: number, instruction?: string,
+): Promise<{ status?: string }> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/chapters/${index}/regenerate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(instruction ? { instruction } : {}),
+  })
+  return storyJson(res, 'Regenerating the chapter')
+}
+
+/** Manual edit — replaces a chapter's prose verbatim. */
+export async function saveStoryChapter(sid: string, index: number, text: string): Promise<unknown> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/chapters/${index}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  })
+  return storyJson(res, 'Saving the chapter')
+}
+
+export async function extendStory(sid: string, additionalChapters: number): Promise<unknown> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/extend`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ additional_chapters: additionalChapters }),
+  })
+  return storyJson(res, 'Extending the story')
+}
+
+export async function exportStory(sid: string, format: 'md' | 'txt'): Promise<{ path: string }> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ format }),
+  })
+  return storyJson(res, 'Export')
+}
+
+/** Curated model lists per pass (outline wants a reasoner, prose a writer). */
+export async function fetchStoryModels(): Promise<StoryModelLists> {
+  return storyJson(await fetch(`${BASE}/api/v1/story/models`), 'Loading story models')
+}
+
+/** Stop the LLM pass behind a stream id. The partial text is kept. */
+export async function cancelLlmStream(streamId: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/llm/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stream_id: streamId }),
+  })
+  if (!res.ok) throw new Error('Failed to cancel')
+}
+
+// --- AudioBook Creator (Audio mode → Audiobook) ---
+//
+// Projects are JSON in the workspace. `PUT .../{pid}` is the ONLY write path:
+// every editor mutation sends the changed collection(s) whole and the server
+// re-sanitises them (dropping e.g. overrides on runs with no profile_id).
+
+export interface AudiobookRun {
+  id: string
+  text: string
+  profile_id?: string | null
+  /** Backend key is `model_type`, not `model_id` — see OVERRIDE_KEYS. */
+  overrides?: { emotion?: string; stability?: number; style?: number; speed?: number; model_type?: string } | null
+}
+
+export interface AudiobookBlock {
+  id: string
+  type: 'paragraph' | 'sfx'
+  runs?: AudiobookRun[]
+  attached_sfx?: { sfx_id: string; loop?: boolean; volume?: number } | null
+  attached_music?: { music_id: string; loop?: boolean; volume?: number } | null
+  sfx_id?: string | null
+}
+
+export interface AudiobookChapter {
+  id: string
+  title: string
+  blocks: AudiobookBlock[]
+  music_id?: string | null
+  language?: string | null
+  audio_path?: string | null
+  audio_hash?: string | null
+  audio_duration?: number | null
+}
+
+export interface AudiobookVoiceProfile {
+  id: string
+  name: string
+  color: string
+  model_type: string
+  voice_ref_path?: string | null
+  emotion_ref_path?: string | null
+  default_emotion?: string | null
+  params: Record<string, number | string | boolean>
+}
+
+export interface AudiobookSfxAsset {
+  id: string
+  label: string
+  prompt: string
+  duration: number
+  audio_path?: string | null
+  playback_mode: 'parallel' | 'sequential'
+  loop: boolean
+  volume: number
+}
+
+export interface AudiobookMusicAsset {
+  id: string
+  title: string
+  source: 'generated' | 'upload' | string
+  prompt: string
+  audio_path?: string | null
+  duration: number
+  volume: number
+  loop: boolean
+}
+
+export interface AudiobookProject {
+  version: number
+  /** The GET/PUT payload calls it `project_id`; the list endpoint calls it
+   *  `id`. `normalizeProject` collapses both into `project_id`. */
+  project_id: string
+  title: string
+  language: string
+  created_at: number
+  updated_at: number
+  default_profile_id?: string | null
+  chapters: AudiobookChapter[]
+  voice_profiles: AudiobookVoiceProfile[]
+  sfx: AudiobookSfxAsset[]
+  music: AudiobookMusicAsset[]
+  render_settings: Record<string, unknown>
+}
+
+export interface AudiobookProjectSummary {
+  id: string
+  title: string
+  language: string
+  created_at: number
+  updated_at: number
+  chapter_count: number
+  voice_count: number
+  rendered_chapters: number
+  workspace?: string
+}
+
+/** Everything the writer may change. Partial — send only what moved. */
+export type AudiobookPatch = Partial<Pick<AudiobookProject,
+  'title' | 'language' | 'chapters' | 'voice_profiles' | 'sfx' | 'music' | 'default_profile_id' | 'render_settings'
+>> & { workspace?: string }
+
+export interface AudiobookRunPlan {
+  run_id: string
+  model_type: string
+  params: Record<string, unknown>
+  seed: number
+  emotion: string | null
+  emotion_mode: string
+  warnings: string[]
+  estimated_seconds: number
+}
+
+export interface AudiobookPlan {
+  chapter_id: string
+  runs: AudiobookRunPlan[]
+  errors: string[]
+  ready: boolean
+}
+
+/** One sounding element on the rendered chapter's absolute timeline. Speech
+ *  entries double as the karaoke map (`run_id` + `start`). */
+export interface AudiobookTimelineEntry {
+  kind: 'speech' | 'sfx' | 'ambience' | 'music' | string
+  start: number
+  end: number
+  duration?: number
+  run_id?: string | null
+  block_id?: string | null
+}
+
+/** The GET payload names the id `project_id`, the list payload `id`. Fill in
+ *  whichever is missing so the rest of the app only ever reads one. */
+function normalizeProject(raw: AudiobookProject & { id?: string }): AudiobookProject {
+  return {
+    ...raw,
+    project_id: raw.project_id || raw.id || '',
+    chapters: raw.chapters ?? [],
+    voice_profiles: raw.voice_profiles ?? [],
+    sfx: raw.sfx ?? [],
+    music: raw.music ?? [],
+    render_settings: raw.render_settings ?? {},
+  }
+}
+
+export async function fetchAudiobookProjects(workspace?: string): Promise<{ projects: AudiobookProjectSummary[] }> {
+  const q = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+  return storyJson(await fetch(`${BASE}/api/v1/audiobook/projects${q}`), 'Loading audiobook projects')
+}
+
+export async function createAudiobookProject(
+  body: { title?: string; language?: string; workspace?: string } = {},
+): Promise<AudiobookProject> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return normalizeProject(await storyJson(res, 'Creating the audiobook'))
+}
+
+export async function fetchAudiobookProject(pid: string, workspace?: string): Promise<AudiobookProject | null> {
+  const q = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+  const res = await fetch(`${BASE}/api/v1/audiobook/projects/${pid}${q}`)
+  if (res.status === 404) return null
+  return normalizeProject(await storyJson(res, 'Loading the audiobook'))
+}
+
+export async function updateAudiobookProject(pid: string, patch: AudiobookPatch): Promise<AudiobookProject> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/projects/${pid}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  return normalizeProject(await storyJson(res, 'Saving the audiobook'))
+}
+
+export async function deleteAudiobookProject(pid: string, workspace?: string): Promise<void> {
+  const q = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+  const res = await fetch(`${BASE}/api/v1/audiobook/projects/${pid}${q}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 404) throw new Error('Failed to delete the audiobook project')
+}
+
+/** `path` must already be on the server — upload with `uploadFile` first. */
+export async function importAudiobookDocument(pid: string, body: {
+  path: string
+  auto_split?: boolean
+  profile_id?: string
+  replace?: boolean
+  workspace?: string
+}): Promise<{ project: AudiobookProject; imported_chapters: number; language: string | null }> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/projects/${pid}/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const out = await storyJson<{ project: AudiobookProject; imported_chapters: number; language: string | null }>(res, 'Import')
+  return { ...out, project: normalizeProject(out.project) }
+}
+
+export async function planAudiobookChapter(pid: string, body: {
+  chapter_id?: string
+  chapter_index?: number
+  workspace?: string
+}): Promise<AudiobookPlan> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/projects/${pid}/plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return storyJson(res, 'Planning the chapter')
+}
+
+/** Kicks off a render job; poll `fetchJobStatus(job_id)` for `output_files`. */
+export async function renderAudiobook(pid: string, body: {
+  chapter_id?: string
+  chapter_index?: number
+  format?: 'mp3' | 'wav' | 'flac' | 'm4b'
+  force?: boolean
+  book?: boolean
+  workspace?: string
+}): Promise<{ job_id: string }> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/projects/${pid}/render`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return storyJson(res, 'Render')
+}
+
+/** Karaoke map for a finished render. Accepts the MixPlan payload
+ *  (`{timeline: [...]}`) or a bare entry array; anything else → []. */
+export async function fetchAudiobookTimeline(url: string): Promise<AudiobookTimelineEntry[]> {
+  const res = await fetch(url)
+  if (!res.ok) return []
+  const data = await res.json().catch(() => null)
+  const list = Array.isArray(data) ? data : Array.isArray(data?.timeline) ? data.timeline : []
+  return list.filter((e: unknown): e is AudiobookTimelineEntry =>
+    !!e && typeof (e as AudiobookTimelineEntry).start === 'number')
 }
 
 // --- Audio Analysis ---
