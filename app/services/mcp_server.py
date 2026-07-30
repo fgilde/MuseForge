@@ -298,6 +298,9 @@ def audiobook_create(title: str = "Untitled audiobook", language: str = "en") ->
     Workflow: create -> audiobook_import a document -> assign voices
     (audiobook_update, or the UI) -> audiobook_plan to check readiness ->
     audiobook_render.
+
+    The project id is under "project_id" in the returned object; pass that
+    to the other audiobook tools.
     """
     return _post("/api/v1/audiobook/projects",
                  json={"title": title, "language": language})

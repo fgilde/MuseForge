@@ -6894,7 +6894,9 @@ async def ab_plan_chapter(pid: str, request: Request):
         "chapter_id": chapter.id,
         "runs": [p.to_dict() for p in plans],
         "errors": errors,
-        "ready": not errors,
+        # No speech runs means nothing to voice — rendering would emit
+        # silence, so that is not "ready" either.
+        "ready": bool(plans) and not errors,
     }
 
 

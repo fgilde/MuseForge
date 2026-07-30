@@ -213,6 +213,10 @@ def list_projects(out_dir: str) -> list[dict]:
                 chapters = data.get("chapters") or []
                 results.append({
                     "id": data.get("project_id") or name[len(_AUDIOBOOK_FILE_PREFIX):-5],
+                    # Mirrors the key the full project serialises as, so a
+                    # client that lists and then fetches can use one field
+                    # name throughout instead of switching between the two.
+                    "project_id": data.get("project_id") or name[len(_AUDIOBOOK_FILE_PREFIX):-5],
                     "title": data.get("title") or "",
                     "language": data.get("language") or "",
                     "version": data.get("version"),
