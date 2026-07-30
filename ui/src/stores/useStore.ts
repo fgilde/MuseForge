@@ -1363,6 +1363,25 @@ interface AppState {
     audio_path?: string
   }) => Promise<void>
   deleteAbAsset: (kind: 'sfx' | 'music', assetId: string) => Promise<void>
+  /** LLM proposals for the current chapter. Held here so the review dialog
+   *  survives a re-render while the user ticks boxes. */
+  abSplitProposal: { splits: api.AbSplitProposal[]; dropped: number } | null
+  abCastProposal: {
+    characters: api.AbCastCharacter[]
+    assignments: api.AbCastAssignment[]
+    effects: api.AbCastEffect[]
+    dropped: number
+  } | null
+  abAssisting: 'split' | 'cast' | null
+  suggestAbSplit: (targetWords?: number) => Promise<void>
+  applyAbSplit: (splits: api.AbSplitProposal[]) => Promise<void>
+  suggestAbCast: () => Promise<void>
+  applyAbCast: (picked: {
+    characters?: api.AbCastCharacter[]
+    assignments?: api.AbCastAssignment[]
+    effects?: api.AbCastEffect[]
+  }) => Promise<void>
+  clearAbProposals: () => void
 
   // Prompt enhancement
   isEnhancing: boolean
@@ -5540,6 +5559,85 @@ export const useStore = create<AppState>((set, get) => ({
       setTimeout(tick, 1500)
     }
     tick()
+  },
+
+  abSplitProposal: null,
+  abCastProposal: null,
+  abAssisting: null,
+  clearAbProposals: () => set({ abSplitProposal: null, abCastProposal: null }),
+
+  suggestAbSplit: async (targetWords) => {
+    const { activeAudiobookId: pid, activeAudiobook: p, activeAbChapterId: cid } = get()
+    if (!pid || !p) return
+    const index = Math.max(0, p.chapters.findIndex(c => c.id === cid))
+    set({ abAssisting: 'split', abError: null, abSplitProposal: null })
+    try {
+      const res = await api.suggestAudiobookSplit(pid, {
+        chapter_index: index, target_words: targetWords,
+      })
+      set({ abSplitProposal: { splits: res.splits, dropped: res.dropped } })
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Split analysis failed' })
+    } finally {
+      set({ abAssisting: null })
+    }
+  },
+
+  applyAbSplit: async (splits) => {
+    const { activeAudiobookId: pid, activeAudiobook: p, activeAbChapterId: cid } = get()
+    if (!pid || !p || splits.length === 0) return
+    const index = Math.max(0, p.chapters.findIndex(c => c.id === cid))
+    try {
+      const project = await api.applyAudiobookSplit(pid, { chapter_index: index, splits })
+      set({ activeAudiobook: project, abSplitProposal: null })
+      get().loadAudiobooks()
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not split the chapter' })
+    }
+  },
+
+  suggestAbCast: async () => {
+    const { activeAudiobookId: pid, activeAudiobook: p, activeAbChapterId: cid } = get()
+    if (!pid || !p) return
+    const index = Math.max(0, p.chapters.findIndex(c => c.id === cid))
+    set({ abAssisting: 'cast', abError: null, abCastProposal: null })
+    try {
+      const res = await api.suggestAudiobookCast(pid, { chapter_index: index })
+      set({ abCastProposal: {
+        characters: res.characters, assignments: res.assignments,
+        effects: res.effects, dropped: res.dropped,
+      } })
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Cast analysis failed' })
+    } finally {
+      set({ abAssisting: null })
+    }
+  },
+
+  applyAbCast: async (picked) => {
+    const { activeAudiobookId: pid, activeAudiobook: p, activeAbChapterId: cid } = get()
+    if (!pid || !p) return
+    const index = Math.max(0, p.chapters.findIndex(c => c.id === cid))
+    try {
+      const { project, created_effects } = await api.applyAudiobookCast(pid, {
+        chapter_index: index, ...picked,
+      })
+      set({ activeAudiobook: project, abCastProposal: null })
+      // Applied effects exist as assets and are already attached to their
+      // paragraphs, but carry no audio yet. Fill THOSE assets — creating new
+      // ones would leave the attached originals silent forever.
+      for (const eff of created_effects) {
+        api.generateAudiobookAssetAudio(pid, 'sfx', eff.asset_id)
+          .catch(() => { /* surfaced by the panel's error line */ })
+      }
+      if (created_effects.length > 0) {
+        set({ abRenderMessage: `Generating ${created_effects.length} effect(s)…` })
+        const fresh = await api.fetchAudiobookProject(pid)
+        if (fresh) set({ activeAudiobook: fresh })
+      }
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not apply the suggestions' })
+    }
   },
 
   createAbAsset: async (kind, body) => {

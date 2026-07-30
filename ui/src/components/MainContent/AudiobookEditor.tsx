@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { BookAudio, Play, Loader2, AlertTriangle, X, Headphones, RefreshCw } from 'lucide-react'
+import { BookAudio, Play, Loader2, AlertTriangle, X, Headphones, RefreshCw, Wand2, Scissors } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import type { AudiobookBlock, AudiobookRun } from '../../api/client'
 
@@ -57,6 +57,14 @@ export function AudiobookEditor() {
   const patchAudiobook = useStore(s => s.patchAudiobook)
   const planChapter = useStore(s => s.planAbChapter)
   const renderChapter = useStore(s => s.renderAbChapter)
+  const assisting = useStore(s => s.abAssisting)
+  const splitProposal = useStore(s => s.abSplitProposal)
+  const castProposal = useStore(s => s.abCastProposal)
+  const suggestSplit = useStore(s => s.suggestAbSplit)
+  const applySplit = useStore(s => s.applyAbSplit)
+  const suggestCast = useStore(s => s.suggestAbCast)
+  const applyCast = useStore(s => s.applyAbCast)
+  const clearProposals = useStore(s => s.clearAbProposals)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
@@ -143,6 +151,28 @@ export function AudiobookEditor() {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              onClick={() => suggestCast()}
+              disabled={!chapter || assisting !== null}
+              className="rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary disabled:opacity-40"
+              title="Let the LLM propose speakers, emotions and sound effects"
+            >
+              {assisting === 'cast'
+                ? <Loader2 size={12} className="mr-1 inline animate-spin" />
+                : <Wand2 size={12} className="mr-1 inline" />}
+              Cast
+            </button>
+            <button
+              onClick={() => suggestSplit()}
+              disabled={!chapter || assisting !== null}
+              className="rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary disabled:opacity-40"
+              title="Let the LLM propose where this chapter should break"
+            >
+              {assisting === 'split'
+                ? <Loader2 size={12} className="mr-1 inline animate-spin" />
+                : <Scissors size={12} className="mr-1 inline" />}
+              Split
+            </button>
             <button
               onClick={async () => { await planChapter(); setShowPlan(true) }}
               disabled={!chapter}
@@ -403,6 +433,67 @@ export function AudiobookEditor() {
         </div>
       )}
 
+      {/* Split review */}
+      {splitProposal && (
+        <ReviewDialog
+          title="Suggested chapter breaks"
+          dropped={splitProposal.dropped}
+          onClose={clearProposals}
+          empty={splitProposal.splits.length === 0}
+          emptyText="The model found no good break points in this chapter."
+          items={splitProposal.splits.map(s => ({
+            key: s.after_block_id,
+            primary: s.new_title,
+            secondary: s.reason || 'break after this paragraph',
+          }))}
+          applyLabel="Split chapter"
+          onApply={keys => applySplit(splitProposal.splits.filter(s => keys.has(s.after_block_id)))}
+        />
+      )}
+
+      {/* Cast review */}
+      {castProposal && (
+        <ReviewDialog
+          title="Suggested cast"
+          dropped={castProposal.dropped}
+          onClose={clearProposals}
+          empty={castProposal.assignments.length === 0}
+          emptyText="The model returned nothing usable for this chapter."
+          groups={[
+            {
+              label: `Characters (${castProposal.characters.length})`,
+              items: castProposal.characters.map(c => ({
+                key: `char:${c.name}`,
+                primary: c.name,
+                secondary: [c.gender, c.description].filter(Boolean).join(' · ') || 'new voice profile',
+              })),
+            },
+            {
+              label: `Lines (${castProposal.assignments.length})`,
+              items: castProposal.assignments.map(a => ({
+                key: `run:${a.run_id}`,
+                primary: a.speaker,
+                secondary: a.emotion ? `emotion: ${a.emotion}` : 'no emotion',
+              })),
+            },
+            {
+              label: `Effects (${castProposal.effects.length})`,
+              items: castProposal.effects.map(e => ({
+                key: `eff:${e.block_id}`,
+                primary: e.label,
+                secondary: `${e.prompt} · ${e.playback_mode}`,
+              })),
+            },
+          ]}
+          applyLabel="Apply selected"
+          onApply={keys => applyCast({
+            characters: castProposal.characters.filter(c => keys.has(`char:${c.name}`)),
+            assignments: castProposal.assignments.filter(a => keys.has(`run:${a.run_id}`)),
+            effects: castProposal.effects.filter(e => keys.has(`eff:${e.block_id}`)),
+          })}
+        />
+      )}
+
       {/* Plan dialog */}
       {showPlan && plan && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -451,6 +542,113 @@ export function AudiobookEditor() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+
+interface ReviewItem { key: string; primary: string; secondary: string }
+
+/**
+ * Checkbox review for LLM proposals — nothing is applied without the user
+ * ticking it. Everything starts selected, because the common case is
+ * accepting most of it and dropping a few, not the other way round.
+ */
+function ReviewDialog({ title, items, groups, dropped, empty, emptyText, applyLabel, onApply, onClose }: {
+  title: string
+  items?: ReviewItem[]
+  groups?: { label: string; items: ReviewItem[] }[]
+  dropped: number
+  empty: boolean
+  emptyText: string
+  applyLabel: string
+  onApply: (keys: Set<string>) => void
+  onClose: () => void
+}) {
+  const all = groups ? groups.flatMap(g => g.items) : (items ?? [])
+  const [picked, setPicked] = useState<Set<string>>(() => new Set(all.map(i => i.key)))
+  const toggle = (key: string) => setPicked(prev => {
+    const next = new Set(prev)
+    if (next.has(key)) next.delete(key); else next.add(key)
+    return next
+  })
+
+  const renderItems = (list: ReviewItem[]) => list.map(item => (
+    <label
+      key={item.key}
+      className="flex cursor-pointer items-start gap-2 rounded-md px-1.5 py-1 hover:bg-bg-hover"
+    >
+      <input
+        type="checkbox"
+        checked={picked.has(item.key)}
+        onChange={() => toggle(item.key)}
+        className="mt-0.5 h-3.5 w-3.5 shrink-0 rounded border-border bg-bg-tertiary accent-accent-blue"
+      />
+      <span className="min-w-0">
+        <span className="block truncate text-[11px] text-text-primary">{item.primary}</span>
+        <span className="block text-[10px] text-text-muted">{item.secondary}</span>
+      </span>
+    </label>
+  ))
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="glass-panel relative flex max-h-[85vh] w-full flex-col rounded-2xl shadow-2xl md:w-[560px]">
+        <div className="flex shrink-0 items-center justify-between border-b border-border px-5 py-3">
+          <h2 className="text-sm font-semibold">{title}</h2>
+          <div className="flex items-center gap-2">
+            {all.length > 0 && (
+              <button
+                onClick={() => setPicked(p => (p.size === all.length ? new Set() : new Set(all.map(i => i.key))))}
+                className="text-[10px] text-accent-blue hover:text-accent-blue-hover"
+              >
+                {picked.size === all.length ? 'None' : 'All'}
+              </button>
+            )}
+            <button onClick={onClose} aria-label="Close" className="rounded-lg p-1.5 text-text-secondary hover:bg-bg-hover hover:text-text-primary">
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
+          {empty ? (
+            <p className="text-xs text-text-secondary">{emptyText}</p>
+          ) : groups ? (
+            <div className="space-y-3">
+              {groups.filter(g => g.items.length > 0).map(g => (
+                <div key={g.label}>
+                  <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">{g.label}</div>
+                  {renderItems(g.items)}
+                </div>
+              ))}
+            </div>
+          ) : renderItems(items ?? [])}
+
+          {dropped > 0 && (
+            <p className="mt-3 text-[10px] text-indicator-warning">
+              {dropped} suggestion{dropped === 1 ? '' : 's'} referenced text that
+              does not exist and {dropped === 1 ? 'was' : 'were'} discarded.
+            </p>
+          )}
+        </div>
+
+        {!empty && (
+          <div className="flex shrink-0 justify-end gap-2 border-t border-border px-5 py-3">
+            <button onClick={onClose} className="rounded-lg border border-border px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary">
+              Cancel
+            </button>
+            <button
+              onClick={() => onApply(picked)}
+              disabled={picked.size === 0}
+              className="rounded-lg bg-cta px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
+            >
+              {applyLabel} ({picked.size})
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

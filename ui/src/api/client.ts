@@ -1747,6 +1747,22 @@ export async function createAudiobookAsset(
   return { ...data, project: normalizeProject(data.project) }
 }
 
+/** Generate audio for an asset that already exists (e.g. one created by
+ *  apply-cast, which attaches the asset before any audio is rendered). */
+export async function generateAudiobookAssetAudio(
+  pid: string, kind: 'sfx' | 'music', assetId: string,
+): Promise<{ job_id: string; asset_id: string }> {
+  const res = await fetch(
+    `${BASE}/api/v1/audiobook/projects/${pid}/assets/${kind}/${assetId}/generate`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+  )
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Could not start generation' }))
+    throw new Error(err.detail || 'Could not start generation')
+  }
+  return res.json()
+}
+
 export async function deleteAudiobookAsset(
   pid: string, kind: 'sfx' | 'music', assetId: string,
 ): Promise<AudiobookProject> {
@@ -1756,6 +1772,68 @@ export async function deleteAudiobookAsset(
   if (!res.ok) throw new Error('Could not delete the asset')
   const data = await res.json()
   return normalizeProject(data.project)
+}
+
+export interface AbSplitProposal { after_block_id: string; new_title: string; reason?: string }
+export interface AbCastCharacter { name: string; gender?: string | null; description?: string }
+export interface AbCastAssignment { run_id: string; speaker: string; emotion?: string | null }
+export interface AbCastEffect {
+  block_id: string; label: string; prompt: string
+  playback_mode: 'parallel' | 'sequential'; loop: boolean; volume: number; duration: number
+}
+
+/** Chapter-split proposals. Nothing is applied until applyAudiobookSplit. */
+export async function suggestAudiobookSplit(pid: string, body: {
+  chapter_index?: number; chapter_id?: string; target_words?: number
+}): Promise<{ chapter_id: string; splits: AbSplitProposal[]; dropped: number }> {
+  return abPost(pid, 'suggest-split', body)
+}
+
+export async function applyAudiobookSplit(pid: string, body: {
+  chapter_index?: number; chapter_id?: string; splits: AbSplitProposal[]
+}): Promise<AudiobookProject> {
+  const data = await abPost<{ project: AudiobookProject }>(pid, 'apply-split', body)
+  return normalizeProject(data.project)
+}
+
+/** Speaker / emotion / effect suggestions, ids already validated server-side. */
+export async function suggestAudiobookCast(pid: string, body: {
+  chapter_index?: number; chapter_id?: string
+}): Promise<{
+  chapter_id: string
+  characters: AbCastCharacter[]
+  assignments: AbCastAssignment[]
+  effects: AbCastEffect[]
+  dropped: number
+}> {
+  return abPost(pid, 'suggest-cast', body)
+}
+
+export async function applyAudiobookCast(pid: string, body: {
+  chapter_index?: number; chapter_id?: string
+  characters?: AbCastCharacter[]; assignments?: AbCastAssignment[]; effects?: AbCastEffect[]
+}): Promise<{
+  project: AudiobookProject
+  created_effects: { asset_id: string; prompt: string; duration: number }[]
+}> {
+  const data = await abPost<{
+    project: AudiobookProject
+    created_effects: { asset_id: string; prompt: string; duration: number }[]
+  }>(pid, 'apply-cast', body)
+  return { ...data, project: normalizeProject(data.project) }
+}
+
+async function abPost<T>(pid: string, path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/projects/${pid}/${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `${path} failed` }))
+    throw new Error(err.detail || `${path} failed`)
+  }
+  return res.json()
 }
 
 export async function fetchAudiobookTimeline(url: string): Promise<AudiobookTimelineEntry[]> {

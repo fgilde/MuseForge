@@ -350,6 +350,87 @@ def audiobook_update(project_id: str, changes: dict) -> dict:
 
 
 @mcp.tool()
+def audiobook_add_effect(project_id: str, prompt: str, label: str = "",
+                         duration: float = 5.0, ambience: bool = True) -> dict:
+    """Add a sound effect, generating its audio from a text prompt.
+
+    Write the prompt in English regardless of the book's language — the
+    audio model is trained on English descriptions. ambience=True loops
+    quietly under the speech; False makes it a one-shot the speech pauses
+    for. The asset exists at once with no audio and fills in when the job
+    finishes.
+    """
+    return _post(f"/api/v1/audiobook/projects/{project_id}/assets/sfx", json={
+        "prompt": prompt, "label": label or prompt[:40], "duration": duration,
+        "playback_mode": "parallel" if ambience else "sequential",
+        "loop": ambience, "volume": 0.3 if ambience else 0.8,
+    })
+
+
+@mcp.tool()
+def audiobook_add_music(project_id: str, prompt: str, title: str = "",
+                        duration: float = 60.0) -> dict:
+    """Add a background music bed, generating it from a description.
+
+    Assign it to a chapter with audiobook_update (chapter.music_id); the
+    render ducks it automatically while anyone speaks.
+    """
+    return _post(f"/api/v1/audiobook/projects/{project_id}/assets/music", json={
+        "prompt": prompt, "title": title or prompt[:40], "duration": duration,
+    })
+
+
+@mcp.tool()
+def audiobook_suggest_cast(project_id: str, chapter_index: int = 0) -> dict:
+    """Ask the LLM who speaks which line, with what emotion, plus effects.
+
+    Returns proposals only — apply a reviewed subset with
+    audiobook_apply_cast. Every id is validated against the chapter first,
+    and invented ones are reported in `dropped` rather than applied.
+    """
+    return _post(f"/api/v1/audiobook/projects/{project_id}/suggest-cast",
+                 json={"chapter_index": chapter_index}, timeout=900)
+
+
+@mcp.tool()
+def audiobook_apply_cast(project_id: str, chapter_index: int = 0,
+                         suggestions: dict | None = None) -> dict:
+    """Apply cast suggestions. Pass the (possibly filtered) characters,
+    assignments and effects from audiobook_suggest_cast.
+
+    Missing voice profiles are created so no assignment can point at a
+    profile that does not exist. Effects are attached and their audio
+    generated in the background.
+    """
+    body = {"chapter_index": chapter_index, **(suggestions or {})}
+    return _post(f"/api/v1/audiobook/projects/{project_id}/apply-cast",
+                 json=body, timeout=300)
+
+
+@mcp.tool()
+def audiobook_suggest_split(project_id: str, chapter_index: int = 0,
+                            target_words: int = 2500) -> dict:
+    """Ask the LLM where a long chapter should break. Proposals only —
+    apply them with audiobook_apply_split."""
+    return _post(f"/api/v1/audiobook/projects/{project_id}/suggest-split",
+                 json={"chapter_index": chapter_index, "target_words": target_words},
+                 timeout=900)
+
+
+@mcp.tool()
+def audiobook_apply_split(project_id: str, chapter_index: int = 0,
+                          splits: list | None = None) -> dict:
+    """Split a chapter at the given break points.
+
+    splits is a list of {after_block_id, new_title} from
+    audiobook_suggest_split. Blocks keep their identity, so voice
+    assignments and attached effects survive the split.
+    """
+    return _post(f"/api/v1/audiobook/projects/{project_id}/apply-split",
+                 json={"chapter_index": chapter_index, "splits": splits or []})
+
+
+@mcp.tool()
 def audiobook_render(project_id: str, chapter_index: int = -1, book: bool = False,
                      fmt: str = "", force: bool = False) -> dict:
     """Render audiobook audio. Returns {job_id} — poll job_status().

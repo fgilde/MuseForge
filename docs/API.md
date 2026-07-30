@@ -54,6 +54,13 @@ run without overwriting each other's output.
 | `GET/PUT/DELETE /audiobook/projects/{id}` | Read, patch, delete. `PUT` is the only write path |
 | `POST /audiobook/projects/{id}/import` | Import txt/md/docx/pdf/epub as chapters |
 | `POST /audiobook/projects/{id}/plan` | Dry-run the TTS mapping; returns blocking `errors` and `ready` |
+| `POST /audiobook/projects/{id}/assets/{sfx\|music}` | Add an effect or music bed, generating its audio |
+| `POST /audiobook/projects/{id}/assets/{kind}/{aid}/generate` | Generate audio for an asset that already exists |
+| `DELETE /audiobook/projects/{id}/assets/{kind}/{aid}` | Delete an asset and unlink it everywhere |
+| `POST /audiobook/projects/{id}/suggest-cast` | LLM proposals: speaker, emotion and effects per run |
+| `POST /audiobook/projects/{id}/apply-cast` | Apply a reviewed subset of those proposals |
+| `POST /audiobook/projects/{id}/suggest-split` | LLM proposals for where a chapter should break |
+| `POST /audiobook/projects/{id}/apply-split` | Split a chapter at the given break points |
 | `POST /audiobook/projects/{id}/render` | Render a chapter or the whole book. Returns `{job_id}` |
 
 A project is `chapters[] -> blocks[] -> runs[]`, where each run carries its
@@ -63,6 +70,11 @@ assignments cannot drift when the text is edited. Always `plan` before
 reference clip, which would otherwise fail a render minutes in. Rendered
 speech runs are cached by content and seed, so re-rendering after a small
 edit only re-voices what changed.
+
+The two LLM passes (`suggest-cast`, `suggest-split`) return proposals and
+never write: every id they mention is checked against the project first, and
+invented ids are dropped and counted rather than applied to whatever happens
+to match. Applying is a separate call with the subset you accept.
 
 ### Everything else
 
@@ -152,6 +164,12 @@ Or in an `mcp.json`-style config:
 | `audiobook_import(id, path, ...)` | Import a document as chapters |
 | `audiobook_update(id, changes)` | Patch chapters, voices, sfx, music |
 | `audiobook_plan(id, chapter_index)` | Verify readiness before rendering |
+| `audiobook_add_effect(id, prompt, ...)` | Add a sound effect, generated from a prompt |
+| `audiobook_add_music(id, prompt, ...)` | Add a background music bed |
+| `audiobook_suggest_cast(id, chapter)` | Propose speakers, emotions and effects |
+| `audiobook_apply_cast(id, chapter, suggestions)` | Apply a reviewed subset |
+| `audiobook_suggest_split(id, chapter, words)` | Propose chapter break points |
+| `audiobook_apply_split(id, chapter, splits)` | Split a chapter |
 | `audiobook_render(id, ...)` | Render a chapter or the whole book |
 
 **The escape hatch.** `api_request(method, path, body?)` reaches every

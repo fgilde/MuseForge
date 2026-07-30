@@ -7018,6 +7018,243 @@ async def ab_render(pid: str, request: Request):
     return {"job_id": job_id, "status": "queued", "book": is_book}
 
 
+def _ab_llm_generate(**kwargs):
+    """Adapter handing the assist module a generate() it can call.
+
+    Injected rather than imported so services/audiobook/assist.py stays free
+    of llm_service and testable with a stub.
+    """
+    from services import llm_service
+    _ensure_llm_loaded()
+    return llm_service.generate_streaming(**kwargs)
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/suggest-split")
+async def ab_suggest_split(pid: str, request: Request):
+    """Ask the LLM where a chapter should break.
+
+    Body: {chapter_id | chapter_index, target_words?, workspace?}. Returns
+    proposals only — nothing is applied until the client posts apply-split,
+    so the user reviews them first.
+    """
+    from services.audiobook import assist as ab_assist
+
+    body = await request.json()
+    _out_dir, project = _ab_load(pid, body.get("workspace"))
+    chapter = _ab_pick_chapter(project, body)
+    try:
+        result = await asyncio.to_thread(
+            ab_assist.propose_chapter_split,
+            chapter,
+            int(body.get("target_words") or 2500),
+            generate=_ab_llm_generate,
+            stream_id=f"ab-split-{pid}",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Split analysis failed: {e}")
+    return {"chapter_id": chapter.id, **result}
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/apply-split")
+async def ab_apply_split(pid: str, request: Request):
+    """Split a chapter at the given block ids.
+
+    Body: {chapter_id | chapter_index, splits: [{after_block_id, new_title}],
+    workspace?}. Blocks keep their identity, so voice assignments and
+    attached assets survive the split — only which chapter holds them moves.
+    """
+    from services.audiobook import model as ab_model, store as ab_store
+
+    body = await request.json()
+    out_dir = _ab_dir(body.get("workspace"))
+    splits = body.get("splits") or []
+    if not splits:
+        raise HTTPException(status_code=400, detail="splits is required")
+
+    project_check = ab_store.load_project(out_dir, pid)
+    if project_check is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    chapter_ref = _ab_pick_chapter(project_check, body)
+
+    def _apply(project):
+        idx = next((i for i, c in enumerate(project.chapters) if c.id == chapter_ref.id), None)
+        if idx is None:
+            return
+        source = project.chapters[idx]
+        cut_after = {s.get("after_block_id"): (s.get("new_title") or "Untitled")
+                     for s in splits if s.get("after_block_id")}
+
+        pieces, current, titles = [], [], [source.title]
+        for block in source.blocks:
+            current.append(block)
+            if block.id in cut_after:
+                pieces.append(current)
+                titles.append(cut_after[block.id])
+                current = []
+        if current:
+            pieces.append(current)
+        if len(pieces) < 2:
+            return  # nothing to do; leave the chapter untouched
+
+        new_chapters = []
+        for i, blocks in enumerate(pieces):
+            if i == 0:
+                source.blocks = blocks
+                # The audio no longer matches the shortened chapter.
+                source.audio_path = None
+                source.audio_hash = None
+                source.audio_duration = None
+                new_chapters.append(source)
+            else:
+                new_chapters.append(ab_model.Chapter(
+                    id=ab_model.new_id(),
+                    title=titles[i],
+                    blocks=blocks,
+                    language=source.language,
+                ))
+        project.chapters = project.chapters[:idx] + new_chapters + project.chapters[idx + 1:]
+
+    project = ab_store.update_project(out_dir, pid, _apply)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    return {"project": project.to_dict(), "chapters": len(project.chapters)}
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/suggest-cast")
+async def ab_suggest_cast(pid: str, request: Request):
+    """Suggest a speaker, an emotion and sound effects per run.
+
+    Body: {chapter_id | chapter_index, workspace?}. Returns proposals with
+    every id already validated against the chapter — invented ids are
+    dropped and counted in `dropped` rather than applied to something that
+    happens to match. Nothing is written; the client applies a reviewed
+    subset via apply-cast.
+    """
+    from services.audiobook import assist as ab_assist
+
+    body = await request.json()
+    _out_dir, project = _ab_load(pid, body.get("workspace"))
+    chapter = _ab_pick_chapter(project, body)
+    try:
+        result = await asyncio.to_thread(
+            ab_assist.analyze_chapter,
+            project, chapter,
+            generate=_ab_llm_generate,
+            stream_id=f"ab-magic-{pid}",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cast analysis failed: {e}")
+    return {"chapter_id": chapter.id, **result}
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/apply-cast")
+async def ab_apply_cast(pid: str, request: Request):
+    """Apply a reviewed subset of cast suggestions.
+
+    Body: {chapter_id | chapter_index, characters?, assignments?, effects?,
+    workspace?}. Characters that have no voice profile yet get one, so an
+    assignment can never point at a profile that does not exist. Effects
+    are created as assets and attached to their paragraph, but their audio
+    still has to be generated — the response lists them so the client can
+    kick that off.
+    """
+    from services.audiobook import model as ab_model, store as ab_store
+
+    body = await request.json()
+    out_dir = _ab_dir(body.get("workspace"))
+    characters = body.get("characters") or []
+    assignments = body.get("assignments") or []
+    effects = body.get("effects") or []
+
+    probe = ab_store.load_project(out_dir, pid)
+    if probe is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    chapter_ref = _ab_pick_chapter(probe, body)
+    created_effects = []
+
+    _SWATCHES = ["#22d3ee", "#a78bfa", "#f472b6", "#4ade80", "#fb923c",
+                 "#facc15", "#60a5fa", "#f87171"]
+
+    def _apply(project):
+        # 1. Voice profiles by speaker name, reusing what is already cast.
+        by_name = {v.name.strip().lower(): v for v in project.voice_profiles}
+        wanted = {"narrator"} | {
+            (a.get("speaker") or "").strip().lower() for a in assignments
+        }
+        wanted |= {(c.get("name") or "").strip().lower() for c in characters}
+        wanted.discard("")
+
+        for name_key in sorted(wanted):
+            if name_key in by_name:
+                continue
+            display = next(
+                (c.get("name") for c in characters
+                 if (c.get("name") or "").strip().lower() == name_key),
+                None,
+            ) or ("Narrator" if name_key == "narrator" else name_key.title())
+            profile = ab_model.VoiceProfile(
+                id=ab_model.new_id(),
+                name=display,
+                color=_SWATCHES[len(project.voice_profiles) % len(_SWATCHES)],
+                # Default engine: cloning plus native emotion tags, which is
+                # what the emotions below need to have any effect.
+                model_type="index_tts2",
+                params={},
+            )
+            project.voice_profiles = list(project.voice_profiles) + [profile]
+            by_name[name_key] = profile
+            if not project.default_profile_id and name_key == "narrator":
+                project.default_profile_id = profile.id
+
+        # 2. Run-level speaker and emotion.
+        wanted_runs = {a["run_id"]: a for a in assignments if a.get("run_id")}
+        chapter = next((c for c in project.chapters if c.id == chapter_ref.id), None)
+        if chapter is None:
+            return
+        for block in chapter.blocks:
+            if getattr(block, "type", None) != "paragraph" or not block.runs:
+                continue
+            for run in block.runs:
+                item = wanted_runs.get(run.id)
+                if not item:
+                    continue
+                profile = by_name.get((item.get("speaker") or "").strip().lower())
+                if profile is None:
+                    continue
+                run.profile_id = profile.id
+                emotion = item.get("emotion")
+                # An override without a profile is discarded by sanitize, so
+                # the profile assignment above has to come first.
+                run.overrides = {"emotion": emotion} if emotion else None
+
+        # 3. Effects as assets, attached to their paragraph.
+        for eff in effects:
+            bid = eff.get("block_id")
+            block = next((b for b in chapter.blocks if b.id == bid), None)
+            if block is None or not eff.get("prompt"):
+                continue
+            asset = ab_model.SfxAsset(
+                id=ab_model.new_id(),
+                label=(eff.get("label") or "Effect")[:80],
+                prompt=eff["prompt"][:400],
+                duration=float(eff.get("duration") or 6.0),
+                audio_path=None,
+                playback_mode=eff.get("playback_mode") or "parallel",
+                loop=bool(eff.get("loop", True)),
+                volume=float(eff.get("volume", 0.3)),
+            )
+            project.sfx = list(project.sfx) + [asset]
+            block.attached_sfx = {"sfx_id": asset.id, "loop": asset.loop,
+                                  "volume": asset.volume}
+            created_effects.append({"asset_id": asset.id, "prompt": asset.prompt,
+                                    "duration": asset.duration})
+
+    project = ab_store.update_project(out_dir, pid, _apply)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    return {"project": project.to_dict(), "created_effects": created_effects}
+
+
 def _ab_asset_generation_params(kind: str, prompt: str, duration: float,
                                 workspace: str) -> dict:
     """Build the generation body for a sound effect or a music bed.
@@ -7150,6 +7387,65 @@ async def ab_create_asset(pid: str, kind: str, request: Request):
         threading.Thread(target=_worker, daemon=False).start()
 
     return {"project": project.to_dict(), "asset_id": asset_id, "job_id": job_id}
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/assets/{kind}/{asset_id}/generate")
+async def ab_generate_asset_audio(pid: str, kind: str, asset_id: str, request: Request):
+    """Generate audio for an asset that already exists.
+
+    Needed because apply-cast creates effect assets and attaches them to
+    their paragraphs before any audio exists — generating through the create
+    endpoint would produce a second, unattached asset instead of filling in
+    this one.
+    """
+    from services.audiobook import store as ab_store
+
+    if kind not in ("sfx", "music"):
+        raise HTTPException(status_code=400, detail='kind must be "sfx" or "music"')
+    body = await request.json() if await request.body() else {}
+    workspace = body.get("workspace") or _get_active_workspace()
+    out_dir = _ab_dir(workspace)
+
+    project = ab_store.load_project(out_dir, pid)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    pool = project.sfx if kind == "sfx" else project.music
+    asset = next((a for a in pool if a.id == asset_id), None)
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"Asset {asset_id} not found")
+    if not asset.prompt:
+        raise HTTPException(status_code=400, detail="Asset has no prompt to generate from")
+
+    job_id = uuid.uuid4().hex[:8]
+    params = _ab_asset_generation_params(kind, asset.prompt, float(asset.duration or 5.0), workspace)
+    _jobs[job_id] = {
+        "id": job_id, "status": "queued", "progress": 0, "step": 0,
+        "total_steps": 0, "phase": "",
+        "message": f"Queued ({kind})", "created_at": time.time(),
+        "params": params, "output_files": [], "error": None,
+        "workspace": workspace, "out_dir": out_dir,
+    }
+
+    def _worker():
+        try:
+            _run_generation(job_id)
+        finally:
+            produced = (_jobs.get(job_id) or {}).get("output_files") or []
+            if produced:
+                path = os.path.join(out_dir, produced[0])
+
+                def _attach(proj):
+                    target = proj.sfx if kind == "sfx" else proj.music
+                    for item in target:
+                        if item.id == asset_id:
+                            item.audio_path = path
+                try:
+                    ab_store.update_project(out_dir, pid, _attach)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[AudioBook] Could not attach {kind} audio: {e}")
+
+    threading.Thread(target=_worker, daemon=False).start()
+    return {"job_id": job_id, "asset_id": asset_id}
 
 
 @api.delete("/api/v1/audiobook/projects/{pid}/assets/{kind}/{asset_id}")

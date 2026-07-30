@@ -54,6 +54,12 @@ const TOOLS: Array<[string, string]> = [
   ['audiobook_import', 'Import txt/md/docx/pdf/epub as chapters'],
   ['audiobook_update', 'Patch chapters, voices, sfx or music'],
   ['audiobook_plan', 'Verify a chapter is ready to render'],
+  ['audiobook_add_effect', 'Add a sound effect generated from a prompt'],
+  ['audiobook_add_music', 'Add a background music bed'],
+  ['audiobook_suggest_cast', 'Propose speakers, emotions and effects'],
+  ['audiobook_apply_cast', 'Apply a reviewed subset of cast proposals'],
+  ['audiobook_suggest_split', 'Propose where a chapter should break'],
+  ['audiobook_apply_split', 'Split a chapter at chosen break points'],
   ['audiobook_render', 'Render a chapter or the whole book'],
 ]
 
