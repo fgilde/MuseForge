@@ -10628,6 +10628,39 @@ async def generate(request: Request):
                         ),
                     )
 
+                # Present is not the same as loadable. A LoRA built for another
+                # base model sits happily in the folder and then kills the
+                # generation minutes later with "contains unexpected module
+                # keys" — four of those in this install's log, all from SDXL
+                # files in loras/wan. Refuse it now, while the caller is here.
+                try:
+                    _bases = list_lora_directory_models()["directory_bases"]
+                    _known = {
+                        os.path.basename(one["filename"]): one
+                        for one in (list_all_installed_loras()["loras"] or [])
+                    }
+                except Exception:  # noqa: BLE001 — never block a job on this
+                    _bases, _known = {}, {}
+                _wrong = []
+                for one in _wanted:
+                    entry = _known.get(os.path.basename(str(one)))
+                    if not entry:
+                        continue
+                    expected = _bases.get(entry.get("directory") or "")
+                    base = entry.get("base_model")
+                    if base and expected and base not in expected:
+                        _wrong.append(f"{one} (built for {base})")
+                if _wrong:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "These LoRAs were built for a different base model "
+                            f"and would fail to load: {', '.join(_wrong)}. "
+                            "They are in the wrong folder — move them to the "
+                            "one for their base model, or remove them."
+                        ),
+                    )
+
     # Defense: normalize video_prompt_type so flags whose required input
     # is missing get stripped before wgp.py's validation rejects the job.
     # This catches stale UI state (e.g. "I" persisting in a saved snapshot
@@ -14536,6 +14569,8 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             skipped = 0
             cancelled = False
             skip_reasons: list[str] = []
+            # The generator's own error text, straight off the worker stream.
+            stream_error = ""
             clip_output_files: dict[int, str] = {}
             join_output_file = None
 
@@ -14713,6 +14748,10 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         print(f"\n  [ERROR] {data}")
                         in_status_line = False
                         task_error = True
+                        # Keep the text, not just print it: this IS the reason
+                        # the job failed, and the finish below has to report it
+                        # instead of falling back to "no reason given".
+                        stream_error = str(data or "").strip() or stream_error
                         update_job(job, message=f"Error: {data}")
                     elif cmd == "progress":
                         if isinstance(data, list) and len(data) >= 2:
@@ -15335,6 +15374,11 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
 
             if success:
                 failure_reason = ""
+            elif stream_error:
+                # The generator said what went wrong — that beats anything this
+                # layer can infer. Reporting the fallback instead was a
+                # regression: it replaced a real message with "no reason given".
+                failure_reason = stream_error
             elif skip_reason:
                 failure_reason = skip_reason
             elif completed == 0 and total_tasks > 0:
