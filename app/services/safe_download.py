@@ -126,6 +126,27 @@ def _install_request_timeouts() -> None:
         requests.request = _module_request
 
 
+def _enable_hf_progress_bars() -> None:
+    """Make huggingface_hub emit progress bars in a container.
+
+    hf_hub creates its bars with ``disable=is_tqdm_disabled(...)``, which
+    returns None for a normal log level — and tqdm reads None as "disable
+    unless the output is a TTY". A Docker container has no TTY, so every
+    HuggingFace download ran with its progress bar disabled: tqdm's __init__
+    returned early, no update() ever fired, and this module tracked nothing.
+    Measured, not assumed: the same 6 MB download reports 0 tracked entries
+    without this and 6 with it.
+
+    That also meant a download could not be CANCELLED, since the progress
+    callback is the only point where a blocking transfer hands back control.
+
+    TQDM_POSITION=-1 is hf_hub's own documented escape hatch for this
+    (is_tqdm_disabled returns False explicitly). Set before hf_hub is
+    imported. Never overrides a value the operator chose.
+    """
+    os.environ.setdefault("TQDM_POSITION", "-1")
+
+
 # ── Layer 2: UI download tracking via tqdm patch ───────────────────
 
 _active_downloads: dict = {}
@@ -146,6 +167,19 @@ _download_context: Optional[str] = None
 # cancelled generation kept downloading for its whole model set while holding
 # the generation lock, so the app looked hung and new jobs queued for ever.
 _cancel_requests: set = set()
+
+
+class _SilentFp:
+    """Swallows tqdm's rendering. Only the counters matter here."""
+
+    def write(self, *_args, **_kwargs) -> None:
+        return None
+
+    def flush(self, *_args, **_kwargs) -> None:
+        return None
+
+
+_SILENT_FP = _SilentFp()
 
 
 class DownloadCancelled(RuntimeError):
@@ -394,6 +428,15 @@ def _install_tqdm_hook() -> None:
                 desc = str(desc).strip(": ()") or f"download-{id(self)}"
                 self._museforge_file_id = desc
                 self._museforge_filename = desc
+                # Enabling the bars (see _enable_hf_progress_bars) would
+                # otherwise spam the log: without a TTY every refresh is a
+                # fresh line, and a 10 GB file writes thousands. The progress
+                # belongs in /api/v1/downloads/active, not in the log, so drop
+                # the drawing while keeping the counters.
+                try:
+                    self.fp = _SILENT_FP
+                except Exception:
+                    pass
                 rate, elapsed = _rate_and_elapsed(self)
                 _record_download_progress(
                     self._museforge_file_id,
@@ -472,6 +515,12 @@ def install() -> None:
     (the actual stall-protection) from installing.
     """
     try:
+        # First: enabling the bars is what makes tracking and cancelling
+        # possible at all, and it has to happen before hf_hub reads the env.
+        _enable_hf_progress_bars()
+    except Exception as e:
+        print(f"[safe_download] could not enable HF progress bars: {e}")
+    try:
         _install_request_timeouts()
     except Exception as e:
         print(f"[safe_download] timeout patches install failed: {e}")
@@ -544,6 +593,16 @@ if __name__ == "__main__":
     _record_download_progress("cut.bin", "cut.bin", 10, 100)
     _record_download_done("cut.bin", downloaded=10, total=100)
     assert _active_downloads["cut.bin"]["status"] == "incomplete"
+
+    # The switch that makes any of this reachable: hf_hub bars are disabled in
+    # a non-TTY container, so nothing was ever tracked or cancellable.
+    _enable_hf_progress_bars()
+    assert os.environ.get("TQDM_POSITION") == "-1"
+    # An operator's own value must win.
+    os.environ["TQDM_POSITION"] = "0"
+    _enable_hf_progress_bars()
+    assert os.environ["TQDM_POSITION"] == "0"
+    os.environ["TQDM_POSITION"] = "-1"
 
     _active_downloads.clear()
     _cancel_requests.clear()
