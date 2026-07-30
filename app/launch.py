@@ -7438,10 +7438,17 @@ async def ab_import_text(pid: str, request: Request):
     chapters = result.get("chapters") or []
 
     def _apply(project):
-        if body.get("replace"):
-            project.chapters = list(chapters)
-        else:
-            project.chapters = list(project.chapters) + list(chapters)
+        existing = list(project.chapters)
+        # A new project is seeded with an empty "Chapter 1". Appending after it
+        # left the imported book starting at index 1, with an empty chapter in
+        # front that plan and render then report as not ready — the normal
+        # first thing anyone hits. Nothing is lost: these carry no text.
+        if not body.get("replace") and existing and not any(
+            (b.text() or "").strip() for c in existing for b in c.blocks
+        ):
+            existing = []
+        project.chapters = (list(chapters) if body.get("replace")
+                            else existing + list(chapters))
         if result.get("language"):
             project.language = result["language"]
 
@@ -7468,12 +7475,19 @@ async def ab_plan_chapter(pid: str, request: Request):
     _out_dir, project = _ab_load(pid, body.get("workspace"))
     chapter = _ab_pick_chapter(project, body)
     plans, errors = ab_tts.plan_chapter(project, chapter)
+    # No speech runs means nothing to voice — rendering would emit silence, so
+    # that is not "ready". It also has to SAY so: "ready: false" with an empty
+    # error list is unactionable, and an empty chapter is the normal state right
+    # after creating a project, so it is the first thing a caller hits.
+    if not plans and not errors:
+        errors = [
+            f"Chapter '{chapter.title or chapter.id}' has no text yet — import a "
+            "document or type into it before rendering."
+        ]
     return {
         "chapter_id": chapter.id,
         "runs": [p.to_dict() for p in plans],
         "errors": errors,
-        # No speech runs means nothing to voice — rendering would emit
-        # silence, so that is not "ready" either.
         "ready": bool(plans) and not errors,
     }
 
