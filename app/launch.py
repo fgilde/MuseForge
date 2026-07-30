@@ -808,7 +808,24 @@ def list_lora_directory_models():
         by_dir.setdefault(os.path.basename(os.path.normpath(lora_dir)), []).append(model_type)
     for name in list_lora_directories()["directories"]:
         by_dir.setdefault(name, [])
-    return {"directory_models": {k: sorted(v) for k, v in sorted(by_dir.items())}}
+
+    # Which CivitAI baseModel values belong in each directory. A LoRA whose
+    # own base_model is not among them is in the wrong place: five SD 1.5 /
+    # SDXL LoRAs sat in loras/wan, where the directory check alone would have
+    # offered them for 32 wan models that cannot load them.
+    bases: dict[str, set[str]] = {}
+    for one in CIVITAI_MODEL_FILTERS:
+        target = one.get("default_dir")
+        if not target:
+            continue
+        for base in str(one.get("civitai_base") or "").split(","):
+            base = base.strip()
+            if base:
+                bases.setdefault(target, set()).add(base)
+    return {
+        "directory_models": {k: sorted(v) for k, v in sorted(by_dir.items())},
+        "directory_bases": {k: sorted(v) for k, v in sorted(bases.items())},
+    }
 
 
 @api.get("/api/v1/loras/preview/{filename}")

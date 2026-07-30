@@ -92,6 +92,7 @@ export function LoraBrowser() {
   // directory -> model types that load from it. Answers "then what CAN use
   // this?", which is the actual question when a download landed elsewhere.
   const [dirModels, setDirModels] = useState<Record<string, string[]>>({})
+  const [dirBases, setDirBases] = useState<Record<string, string[]>>({})
   const [used, setUsed] = useState<string | null>(null)
   const [installedLoading, setInstalledLoading] = useState(false)
   const [showUrlImport, setShowUrlImport] = useState(false)
@@ -115,7 +116,9 @@ export function LoraBrowser() {
       await checkLoraUpdates(true) // force=true: bypass 24h staleness window
       const r = await fetchInstalledLoras()
       setInstalledLoras(r.loras)
-      fetchLoraDirectoryModels().then(setDirModels).catch(() => setDirModels({}))
+      fetchLoraDirectoryModels()
+        .then(map => { setDirModels(map.models); setDirBases(map.bases) })
+        .catch(() => { setDirModels({}); setDirBases({}) })
     } catch (e) {
       console.error('LoRA update check failed:', e)
     } finally {
@@ -777,7 +780,15 @@ export function LoraBrowser() {
                         // Anything else is not a failure to report but a fact
                         // to explain: LoRAs are stored per architecture.
                         const owners = dirModels[lora.directory]
-                        const usable = !owners || owners.includes(currentModel)
+                        // The directory alone is not proof: an SD 1.5 LoRA can
+                        // sit in loras/wan, and every wan model would then be
+                        // offered for a file none of them can load.
+                        const expected = dirBases[lora.directory]
+                        const wrongBase = Boolean(
+                          lora.base_model && expected?.length
+                          && !expected.includes(lora.base_model),
+                        )
+                        const usable = !wrongBase && (!owners || owners.includes(currentModel))
                         const on = activatedLoras?.includes(lora.filename)
                         return (
                           <button
@@ -792,9 +803,11 @@ export function LoraBrowser() {
                             disabled={!usable}
                             title={usable
                               ? (on ? 'Already active for this model' : 'Activate it for the selected model and close')
-                              : owners && owners.length
-                                ? `In loras/${lora.directory}, which only these models load from — e.g. ${owners.slice(0, 3).join(', ')}. Switch model to use it.`
-                                : `In loras/${lora.directory}, which no installed model loads from. This file cannot be used here.`}
+                              : wrongBase
+                                ? `Built for ${lora.base_model}, but it sits in loras/${lora.directory}, which is for ${expected.slice(0, 3).join(', ')}. MuseForge has no ${lora.base_model} model, so this file cannot be used — delete it or move it.`
+                                : owners && owners.length
+                                  ? `In loras/${lora.directory}, which only these models load from — e.g. ${owners.slice(0, 3).join(', ')}. Switch model to use it.`
+                                  : `In loras/${lora.directory}, which no installed model loads from. This file cannot be used here.`}
                             className={`mt-1.5 w-full rounded px-1.5 py-1 text-[9px] font-medium transition-colors ${
                               !usable
                                 ? 'bg-white/10 text-white/40 cursor-not-allowed'
@@ -803,9 +816,11 @@ export function LoraBrowser() {
                                   : 'bg-cta text-white hover:opacity-90'
                             }`}
                           >
-                            {!usable
-                              ? `for ${lora.directory} models`
-                              : used === cardKey ? 'Added' : on ? 'Active' : 'Use this LoRA'}
+                            {wrongBase
+                              ? `${lora.base_model} — wrong folder`
+                              : !usable
+                                ? `for ${lora.directory} models`
+                                : used === cardKey ? 'Added' : on ? 'Active' : 'Use this LoRA'}
                           </button>
                         )
                       })()}

@@ -2724,10 +2724,16 @@ export type LoraUpdateStatus = 'current' | 'available' | 'unknown' | 'local' | '
 /** Which model types can use each LoRA directory. LoRAs are stored per
  *  architecture, so this is what turns "not available for this model" into
  *  "these models can use it". A directory mapping to [] is a dead end. */
-export async function fetchLoraDirectoryModels(): Promise<Record<string, string[]>> {
+export async function fetchLoraDirectoryModels(): Promise<{
+  models: Record<string, string[]>
+  /** CivitAI baseModel values that belong in each directory. A LoRA whose own
+   *  base_model is absent from its directory's list is in the wrong place. */
+  bases: Record<string, string[]>
+}> {
   const res = await fetch(`${BASE}/api/v1/loras/directory-models`)
   if (!res.ok) throw new Error('Failed to load LoRA directory map')
-  return (await res.json()).directory_models ?? {}
+  const json = await res.json()
+  return { models: json.directory_models ?? {}, bases: json.directory_bases ?? {} }
 }
 
 export interface InstalledLora {
