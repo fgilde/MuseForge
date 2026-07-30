@@ -150,8 +150,20 @@ def load_library(out_dir: str) -> list[dict]:
             data = json.load(f)
     except (OSError, ValueError):
         return []
-    entries = data.get("voices") if isinstance(data, dict) else data
-    return [sanitize_entry(e) for e in (entries or []) if isinstance(e, dict)]
+    entries = [e for e in (data.get("voices") if isinstance(data, dict) else data) or []
+               if isinstance(e, dict)]
+    voices = [sanitize_entry(e) for e in entries]
+    # Write the healed seeds straight back. sanitize_entry mints one for a
+    # voice saved before seeds existed, and a mint that is never persisted is
+    # worse than none: the voice gets a NEW identity on every request, which
+    # is exactly the drift this is meant to stop.
+    if any(before.get("seed") != after["seed"]
+           for before, after in zip(entries, voices)):
+        try:
+            save_library(out_dir, voices)
+        except OSError as e:
+            print(f"[voices] Could not persist healed seeds: {e}")
+    return voices
 
 
 def save_library(out_dir: str, voices: list[dict]) -> None:
@@ -260,6 +272,19 @@ if __name__ == "__main__":
         legacy = sanitize_entry({"id": "old", "name": "Legacy",
                                  "model_type": "qwen3_tts_voicedesign"})
         assert isinstance(legacy["seed"], int) and legacy["seed"] > 0
+
+        # -- a minted seed must be PERSISTED, not re-minted per read. An
+        #    unsaved heal gives the voice a new identity on every request,
+        #    which is worse than having no seed at all.
+        legacy_dir = os.path.join(d, "legacy")   # own library: the writes below
+        os.makedirs(legacy_dir, exist_ok=True)   # would clobber the one above
+        save_library(legacy_dir, [{"id": "seedless", "name": "Seedless",
+                                   "model_type": "kugelaudio_0_open"}])
+        healed = load_library(legacy_dir)[0]
+        assert healed["seed"] > 0
+        assert load_library(legacy_dir)[0]["seed"] == healed["seed"],             "a re-minted seed on every read is the drift this is meant to stop"
+        raw = json.load(open(library_path(legacy_dir), encoding="utf-8"))
+        assert raw["voices"][0]["seed"] == healed["seed"], "the heal never reached disk"
         for bad in (0, -5, None, "", "abc"):
             assert sanitize_entry({"seed": bad})["seed"] > 0, bad
         assert to_audiobook_profile(v2)["seed"] == v2["seed"],             "the book copy must speak with the voice that was auditioned"
