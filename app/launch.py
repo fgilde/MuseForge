@@ -10491,6 +10491,37 @@ async def generate(request: Request):
     if not is_sfx and wgp.get_model_def(body["model_type"]) is None:
         raise HTTPException(status_code=400, detail=f"Unknown model: {body['model_type']}")
 
+    # Reject a LoRA that is not installed HERE, while the caller is still
+    # listening. Deeper down it only makes wgp's validation skip the task,
+    # which used to end as a job reporting "Done" with no file: the reported
+    # "generation just stops and nothing happens". LoRAs live per
+    # architecture, so a file downloaded for another model is genuinely not
+    # available for this one — say which, and where to look.
+    if not is_sfx:
+        _wanted = body.get("activated_loras") or []
+        if isinstance(_wanted, str):
+            _wanted = [one.strip() for one in _wanted.split(",") if one.strip()]
+        if _wanted:
+            try:
+                _have = set(list_loras(body["model_type"])["loras"])
+            except Exception:  # noqa: BLE001 — never block a job on this probe
+                _have = None
+            if _have is not None:
+                _missing = [one for one in _wanted
+                            if os.path.basename(str(one)) not in _have]
+                if _missing:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"These LoRAs are not installed for "
+                            f"{body['model_type']}: {', '.join(_missing)}. "
+                            "LoRAs are stored per architecture — download them "
+                            "with this model selected, or pick a model they "
+                            f"were built for. Installed here: "
+                            f"{', '.join(sorted(_have)) or 'none'}."
+                        ),
+                    )
+
     # Defense: normalize video_prompt_type so flags whose required input
     # is missing get stripped before wgp.py's validation rejects the job.
     # This catches stale UI state (e.g. "I" persisting in a saved snapshot
@@ -14398,6 +14429,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             completed = 0
             skipped = 0
             cancelled = False
+            skip_reasons: list[str] = []
             clip_output_files: dict[int, str] = {}
             join_output_file = None
 
@@ -14496,9 +14528,35 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         cancelled = True
                         break
 
-                validated_params = wgp.validate_task(task, state)
+                # wgp reports every validation problem through gr.Info — a
+                # Gradio toast, 139 call sites. Over the API that message went
+                # nowhere, so a task rejected for a missing LoRA or an empty
+                # prompt was skipped with no reason anywhere the caller could
+                # see. Collect the toasts instead of losing them.
+                # ponytail: swaps a module attribute, so it is not safe under
+                # truly parallel generations — they are serialised by the
+                # generation lock, and the window is one validate call.
+                _reasons: list[str] = []
+                _orig_info = wgp.gr.Info
+
+                def _collect_info(message="", *args, **kwargs):
+                    text = str(message).strip()
+                    if text:
+                        _reasons.append(text)
+                    try:
+                        return _orig_info(message, *args, **kwargs)
+                    except Exception:  # noqa: BLE001 — no Gradio context here
+                        return None
+
+                wgp.gr.Info = _collect_info
+                try:
+                    validated_params = wgp.validate_task(task, state)
+                finally:
+                    wgp.gr.Info = _orig_info
                 if validated_params is None:
-                    print(f"  [SKIP] Task {task_no} failed validation")
+                    reason = " ".join(_reasons) or "the task failed validation"
+                    print(f"  [SKIP] Task {task_no} failed validation: {reason}")
+                    skip_reasons.append(reason)
                     skipped += 1
                     continue
 
@@ -14720,7 +14778,18 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             if skipped > 0:
                 summary += f" ({skipped} skipped)"
             print(summary)
-            success = not cancelled and completed == (total_tasks - skipped)
+            # A run where nothing was produced is not a success. The old test
+            # (completed == total_tasks - skipped) is TRUE when every task was
+            # skipped, so a job whose only task failed validation reported
+            # "Done" with no file and no error — the reported symptom was
+            # "generation just stops and nothing happens".
+            success = (
+                not cancelled
+                and completed == (total_tasks - skipped)
+                and (completed > 0 or total_tasks == 0)
+            )
+            # De-duplicated: a multi-clip job hits the same reason per clip.
+            skip_reason = "; ".join(dict.fromkeys(skip_reasons))
 
             # Clean up continuation temp files
             if os.path.isdir(out_dir):
@@ -15153,6 +15222,17 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     message="Finalizing...",
                 )
 
+            if success:
+                failure_reason = ""
+            elif skip_reason:
+                failure_reason = skip_reason
+            elif completed == 0 and total_tasks > 0:
+                # Nothing ran and nothing explained why. Still better than a
+                # bare "Generation failed": it says what was observed.
+                failure_reason = ("The generation produced no output and gave no "
+                                  "reason. Check the server log for the traceback.")
+            else:
+                failure_reason = "Generation failed"
             finish_job(
                 job,
                 "completed" if success else "failed",
@@ -15160,7 +15240,8 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 step=0,
                 total_steps=0,
                 phase="",
-                message="Done" if success else "Generation failed",
+                message="Done" if success else f"Failed: {failure_reason}",
+                **({} if success else {"error": failure_reason}),
             )
             return success and job.get("status") == "completed"
 
