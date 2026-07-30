@@ -75,7 +75,10 @@ export function AudiobookEditor() {
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
-  const [popover, setPopover] = useState<{ runId: string; blockId: string; from: number; to: number; x: number; y: number } | null>(null)
+  const [popover, setPopover] = useState<{
+    runId: string; blockId: string; from: number; to: number
+    text: string; spansRuns: boolean; x: number; y: number
+  } | null>(null)
   const [showPlan, setShowPlan] = useState(false)
 
   const chapter = useMemo(
@@ -97,6 +100,53 @@ export function AudiobookEditor() {
     el.addEventListener('timeupdate', onTime)
     return () => el.removeEventListener('timeupdate', onTime)
   }, [timeline, audioUrl])
+
+  /** Resolve the current selection into the run that owns it.
+   *
+   * Reads the DOM range rather than searching the run text for the selected
+   * string: indexOf finds the FIRST occurrence, so selecting the second
+   * "she said" in a paragraph would have marked up the first one.
+   *
+   * A selection crossing several runs is reported with spansRuns so the UI
+   * can say that voice/emotion apply to the first region only — assigning
+   * one voice across regions that already have different voices has no
+   * single sensible meaning.
+   */
+  const resolveSelection = () => {
+    const sel = window.getSelection()
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
+    const range = sel.getRangeAt(0)
+    const text = sel.toString()
+    if (!text.trim()) return null
+
+    const startEl = (range.startContainer.nodeType === Node.TEXT_NODE
+      ? range.startContainer.parentElement
+      : (range.startContainer as Element))?.closest('[data-run-id]')
+    if (!startEl) return null
+    const endEl = (range.endContainer.nodeType === Node.TEXT_NODE
+      ? range.endContainer.parentElement
+      : (range.endContainer as Element))?.closest('[data-run-id]')
+
+    const runId = startEl.getAttribute('data-run-id') || ''
+    const blockId = startEl.getAttribute('data-block-id') || ''
+    const spansRuns = endEl !== startEl
+
+    // Offsets are only meaningful inside the anchor run's own text node.
+    const from = range.startContainer.nodeType === Node.TEXT_NODE
+      ? range.startOffset
+      : 0
+    const to = spansRuns
+      ? (startEl.textContent || '').length
+      : (range.endContainer.nodeType === Node.TEXT_NODE ? range.endOffset : from + text.length)
+
+    const rect = range.getBoundingClientRect()
+    return {
+      runId, blockId, from, to: Math.max(from, to), text, spansRuns,
+      // Anchor to the selection itself, not the mouse — a keyboard or
+      // double-click selection has no useful cursor position.
+      x: rect.left, y: rect.bottom,
+    }
+  }
 
   const saveBlocks = (blocks: AudiobookBlock[]) => {
     if (!project || !chapter) return
@@ -138,7 +188,7 @@ export function AudiobookEditor() {
     const run = chapter.blocks
       .find(b => b.id === popover.blockId)?.runs
       ?.find(r => r.id === popover.runId)
-    const text = (run?.text ?? '').slice(popover.from, popover.to)
+    const text = popover.text
     if (!text.trim()) return
     previewPassage(text, {
       profileId: run?.profile_id ?? project?.default_profile_id ?? null,
@@ -164,7 +214,22 @@ export function AudiobookEditor() {
   }
 
   return (
-    <div className="flex h-full flex-col overflow-hidden" onMouseDown={() => setPopover(null)}>
+    <div
+      className="flex h-full flex-col overflow-hidden"
+      onMouseDown={() => {
+        // Collapse the selection as well as closing the popover. Without
+        // this the following mouseup still saw the old selection and
+        // re-opened the popover immediately, so it could not be dismissed
+        // while anything was marked.
+        setPopover(null)
+        window.getSelection()?.removeAllRanges()
+      }}
+      onMouseUp={() => {
+        const next = resolveSelection()
+        if (next) setPopover(next)
+      }}
+      onKeyDown={e => { if (e.key === 'Escape') setPopover(null) }}
+    >
       {/* Header */}
       <div className="shrink-0 border-b border-border px-5 py-3">
         <div className="flex items-start justify-between gap-3">
@@ -363,22 +428,8 @@ export function AudiobookEditor() {
                     return (
                       <span
                         key={run.id}
-                        onMouseUp={e => {
-                          const sel = window.getSelection()
-                          if (!sel || sel.isCollapsed) return
-                          const text = sel.toString()
-                          const offset = run.text.indexOf(text)
-                          if (offset < 0) return
-                          e.stopPropagation()
-                          setPopover({
-                            runId: run.id,
-                            blockId: block.id,
-                            from: offset,
-                            to: offset + text.length,
-                            x: e.clientX,
-                            y: e.clientY,
-                          })
-                        }}
+                        data-run-id={run.id}
+                        data-block-id={block.id}
                         title={voice ? `${voice.name}${run.overrides?.emotion ? ` · ${run.overrides.emotion}` : ''}` : 'No voice assigned'}
                         className={isActive ? 'rounded bg-accent-blue/25' : undefined}
                         style={voice ? {
@@ -422,6 +473,27 @@ export function AudiobookEditor() {
           style={{ left: Math.min(popover.x, window.innerWidth - 240), top: popover.y + 8 }}
           onMouseDown={e => e.stopPropagation()}
         >
+          <div className="mb-1.5 flex items-start gap-1.5">
+            <p className="min-w-0 flex-1 truncate text-[10px] italic text-text-secondary"
+               title={popover.text}>
+              “{popover.text}”
+            </p>
+            <button
+              onClick={() => { setPopover(null); window.getSelection()?.removeAllRanges() }}
+              aria-label="Close"
+              className="shrink-0 rounded p-0.5 text-text-muted hover:text-text-primary"
+            >
+              <X size={11} />
+            </button>
+          </div>
+
+          {popover.spansRuns && (
+            <p className="mb-1.5 text-[9px] text-indicator-warning">
+              The selection crosses two voice regions — voice and emotion
+              apply to the first one only.
+            </p>
+          )}
+
           <button
             onClick={previewSelection}
             disabled={previewBusy !== null}
