@@ -7864,6 +7864,69 @@ async def preview_library_voice(voice_id: str, request: Request):
             "warnings": plans[0].warnings}
 
 
+@api.post("/api/v1/voices/{voice_id}/speak")
+async def speak_with_library_voice(voice_id: str, request: Request):
+    """Read arbitrary text with a library voice — Audio → Speech's path.
+
+    Body: {text, language?, emotion?, workspace?}. Returns a job_id; the
+    audio lands in the workspace as a normal output.
+
+    Distinct from /preview: that one is a short audition and records the
+    sample on the voice, this one is real output and does not.
+    """
+    from services import voice_library
+    from services.audiobook import model as ab_model, tts as ab_tts
+
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    workspace = body.get("workspace") or _get_active_workspace()
+    out_dir = _voice_dir(workspace)
+    voice = voice_library.get_voice(out_dir, voice_id)
+    if voice is None:
+        raise HTTPException(status_code=404, detail=f"Voice {voice_id} not found")
+    if voice.get("reference_missing"):
+        raise HTTPException(
+            status_code=400,
+            detail="This voice's reference recording is gone — upload it again.")
+
+    lang = (body.get("language") or voice.get("language") or "en").lower()[:2]
+    emotion = body.get("emotion") or voice.get("default_emotion")
+    profile = ab_model.VoiceProfile.from_dict(
+        voice_library.to_audiobook_profile(voice))
+    run = ab_model.Run(id=f"speak-{voice_id}", text=text, profile_id=profile.id,
+                       overrides={"emotion": emotion} if emotion else None)
+    chapter = ab_model.Chapter(id="speak", title="Speech",
+                               blocks=[ab_model.Block(id="s", type="paragraph",
+                                                      runs=[run])],
+                               language=lang)
+    probe = ab_model.Project(id="speak", title="Speech", language=lang,
+                             chapters=[chapter], voice_profiles=[profile],
+                             default_profile_id=profile.id)
+    plans, errors = ab_tts.plan_chapter(probe, chapter, workspace=workspace)
+    if errors or not plans:
+        raise HTTPException(status_code=400,
+                            detail="; ".join(errors) or "This voice cannot speak that text")
+
+    params = dict(plans[0].params)
+    params["workspace"] = workspace
+    params["_audio_sub_mode"] = "speech"
+    job_id = uuid.uuid4().hex[:8]
+    _jobs[job_id] = {
+        "id": job_id, "status": "queued", "progress": 0, "step": 0,
+        "total_steps": 0, "phase": "",
+        "message": f"Queued (speech: {voice['name']})",
+        "created_at": time.time(), "params": params,
+        "output_files": [], "error": None,
+        "workspace": workspace, "out_dir": out_dir,
+    }
+    threading.Thread(target=_run_generation, args=(job_id,), daemon=False).start()
+    return {"job_id": job_id, "voice_id": voice_id,
+            "warnings": plans[0].warnings}
+
+
 @api.post("/api/v1/audiobook/projects/{pid}/voices/import")
 async def ab_import_library_voice(pid: str, request: Request):
     """Copy a library voice into an audiobook project.
@@ -7954,6 +8017,69 @@ async def ab_preview_voice(pid: str, profile_id: str, request: Request):
     threading.Thread(target=_run_generation, args=(job_id,), daemon=False).start()
     return {"job_id": job_id, "voice_id": profile_id, "text": text,
             "warnings": plan.warnings}
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/preview-passage")
+async def ab_preview_passage(pid: str, request: Request):
+    """Speak a selected passage so it can be checked before a full render.
+
+    Body: {text, profile_id?, emotion?, chapter_id?, workspace?}. Without
+    profile_id the project default is used. Returns a job_id; the audio is
+    in the job's output_files.
+
+    Same planner as a real render, so what you hear is what the chapter will
+    sound like — and a voice that cannot speak this passage says why now
+    rather than after a chapter's worth of waiting.
+    """
+    from services.audiobook import model as ab_model, tts as ab_tts
+
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    workspace = body.get("workspace") or _get_active_workspace()
+    _out_dir, project = _ab_load(pid, workspace)
+    profile_id = body.get("profile_id") or project.default_profile_id
+    if not profile_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No voice assigned and the project has no default voice.")
+    if not any(v.id == profile_id for v in project.voice_profiles):
+        raise HTTPException(status_code=404, detail=f"Voice {profile_id} not found")
+
+    emotion = body.get("emotion")
+    run = ab_model.Run(
+        id="passage-preview", text=text[:2000], profile_id=profile_id,
+        overrides={"emotion": emotion} if emotion else None,
+    )
+    chapter_lang = None
+    if body.get("chapter_id"):
+        source = project.chapter(body["chapter_id"])
+        chapter_lang = getattr(source, "language", None) if source else None
+    chapter = ab_model.Chapter(
+        id="passage-preview", title="Preview",
+        blocks=[ab_model.Block(id="pp", type="paragraph", runs=[run])],
+        language=chapter_lang or project.language,
+    )
+    plans, errors = ab_tts.plan_chapter(project, chapter, workspace=workspace)
+    if errors or not plans:
+        raise HTTPException(status_code=400,
+                            detail="; ".join(errors) or "This passage cannot be previewed")
+
+    params = dict(plans[0].params)
+    params["workspace"] = workspace
+    job_id = uuid.uuid4().hex[:8]
+    _jobs[job_id] = {
+        "id": job_id, "status": "queued", "progress": 0, "step": 0,
+        "total_steps": 0, "phase": "",
+        "message": "Queued (passage preview)", "created_at": time.time(),
+        "params": params, "output_files": [], "error": None,
+        "workspace": workspace, "out_dir": _ab_dir(workspace),
+    }
+    threading.Thread(target=_run_generation, args=(job_id,), daemon=False).start()
+    return {"job_id": job_id, "profile_id": profile_id,
+            "characters": len(text), "warnings": plans[0].warnings}
 
 
 @api.get("/api/v1/audiobook/sfx-library")

@@ -134,6 +134,31 @@ class ModelCaps:
     default_params: dict = field(default_factory=dict)
 
 
+# Qwen3 TTS takes language NAMES, not ISO codes: its model_mode choices come
+# from get_qwen3_languages() and it hard-rejects anything else with
+# "Unsupported languages: ['en']". Chatterbox is the opposite and wants the
+# ISO code (see its handler's "model_mode": "en" default), which is why the
+# translation happens per model rather than globally.
+_QWEN3_LANGUAGE_NAMES = {
+    "en": "english", "de": "german", "fr": "french", "es": "spanish",
+    "it": "italian", "pt": "portuguese", "ru": "russian", "ja": "japanese",
+    "zh": "chinese", "ko": "korean",
+}
+# Anything not in that table falls back to "auto", which the model always
+# accepts and detects from the text — better than failing the render.
+_QWEN3_LANGUAGE_FALLBACK = "auto"
+
+
+def qwen3_language(lang: Optional[str]) -> str:
+    """ISO code (or a name already) -> the value Qwen3 TTS accepts."""
+    code = (lang or "").strip().lower()
+    if not code:
+        return _QWEN3_LANGUAGE_FALLBACK
+    if code in _QWEN3_LANGUAGE_NAMES.values() or code == "auto":
+        return code
+    return _QWEN3_LANGUAGE_NAMES.get(code[:2], _QWEN3_LANGUAGE_FALLBACK)
+
+
 MODEL_CAPS: dict[str, ModelCaps] = {
     "index_tts2": ModelCaps(
         model_type="index_tts2",
@@ -435,7 +460,10 @@ def plan_run(
     if caps.supports_pause:
         params["pause_seconds"] = float(pause_seconds)
     if caps.language_key:
-        params[caps.language_key] = lang
+        params[caps.language_key] = (
+            qwen3_language(lang) if model_type.startswith("qwen3_tts")
+            else lang
+        )
     if model_type == "qwen3_tts_customvoice":
         speaker = profile.params.get("speaker")
         if not speaker:
@@ -620,10 +648,34 @@ if __name__ == "__main__":
     )
     assert qd_plan.params["alt_prompt"] == \
         "young female, warm tone, speaking in a melancholic tone", qd_plan.params["alt_prompt"]
-    assert qd_plan.params["model_mode"] == "de"
+    # Qwen3 wants the language NAME; the ISO code made it raise
+    # "Unsupported languages: ['de']" and fail the whole render.
+    assert qd_plan.params["model_mode"] == "german", qd_plan.params["model_mode"]
     assert "audio_guide" not in qd_plan.params
     assert any("cannot clone" in one for one in qd_plan.warnings)
     assert qd_plan.params["top_k"] == 50
+
+    # 9b. Language mapping: codes become Qwen3 names, unknown ones fall back
+    # to "auto" (always accepted) rather than breaking the render, and a name
+    # that is already correct passes through untouched.
+    assert qwen3_language("en") == "english"
+    assert qwen3_language("DE") == "german"
+    assert qwen3_language("de-AT") == "german", "region suffix must still map"
+    assert qwen3_language("english") == "english"
+    assert qwen3_language("auto") == "auto"
+    assert qwen3_language("xx") == "auto"
+    assert qwen3_language("") == "auto"
+    assert qwen3_language(None) == "auto"
+    # Chatterbox is the opposite convention and must NOT be translated.
+    cb_de = plan_run(
+        Project(id="p", language="de",
+                voice_profiles=[VoiceProfile(id="v-cb2", name="CB",
+                                            model_type="chatterbox",
+                                            voice_ref_path=__file__)],
+                default_profile_id="v-cb2"),
+        Run(id="r8b", text="Hallo", profile_id="v-cb2"),
+    )
+    assert cb_de.params["model_mode"] == "de", cb_de.params["model_mode"]
 
     # 10. Qwen3 custom voice needs a speaker preset.
     custom = VoiceProfile(id="v-qc", name="Serena", model_type="qwen3_tts_customvoice")

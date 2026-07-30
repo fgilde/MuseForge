@@ -68,6 +68,12 @@ export function Sidebar() {
   const isDirector = sidebarMode === 'director'
   /** Manages saved voices — no prompt, no model, no Forge button. */
   const isVoiceLibrary = isAudio && audioSubMode === 'voices'
+  // Audiobook and the voice library both own no generation model and run
+  // their work from their own buttons, so the model+Forge bar does not
+  // belong to them. Without this the bar showed an EMPTY model combo (the
+  // sub-mode offers no families) still holding whatever was selected
+  // before — e.g. mmaudio_v2 — and a Forge button that would submit it.
+  const ownsNoGenModel = isVoiceLibrary || (isAudio && audioSubMode === 'audiobook')
   const isI2vOnly = modelOptions?.i2v_class && !modelOptions?.t2v_class
 
   const modeToggle = (size: 'sm' | 'md') => (
@@ -230,7 +236,7 @@ export function Sidebar() {
           owns no model — and in Text mode, which owns no generation
           model either and sends from its own composer. The voice library
           is the same shape: it renders auditions per voice, not a Forge run. */}
-      {!isTools && !isText && !isVoiceLibrary && (
+      {!isTools && !isText && !ownsNoGenModel && (
       <div className="px-3 py-2.5 border-t border-border">
         <div className="flex items-center gap-2">
           <AdvancedSettings />
