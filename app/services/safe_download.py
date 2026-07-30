@@ -426,6 +426,11 @@ def _install_tqdm_hook() -> None:
                 # writes "Fetching N files: ..." for HF group bars.
                 # Strip the meaningless padding/whitespace for display.
                 desc = str(desc).strip(": ()") or f"download-{id(self)}"
+                # hf_hub truncates long filenames to 40 chars and appends a
+                # "(…)" marker, which then shows up mid-word in the panel.
+                # strip(": ()") above already removed the closing paren, so
+                # match what is actually left: "name(…".
+                desc = desc.replace("(…", "…")
                 self._museforge_file_id = desc
                 self._museforge_filename = desc
                 # Enabling the bars (see _enable_hf_progress_bars) would
@@ -596,6 +601,12 @@ if __name__ == "__main__":
 
     # The switch that makes any of this reachable: hf_hub bars are disabled in
     # a non-TTY container, so nothing was ever tracked or cancellable.
+    # Display name: hf_hub truncates to 40 chars and appends "(…)", and the
+    # strip above eats the closing paren, so the marker left behind is "(…".
+    _trunc = "ace_step_v1_transformer_quanto_bf16_int8(…)"
+    _clean = _trunc.strip(": ()").replace("(…", "…")
+    assert _clean == "ace_step_v1_transformer_quanto_bf16_int8…", _clean
+
     _enable_hf_progress_bars()
     assert os.environ.get("TQDM_POSITION") == "-1"
     # An operator's own value must win.
