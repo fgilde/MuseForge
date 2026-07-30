@@ -593,6 +593,17 @@ export function MainContent() {
               ? `${outputs.length} / ${outputsTotal} items`
               : `${outputs.length} ${outputs.length === 1 ? 'item' : 'items'}`}
           </div>
+          {/* Blueprints belong here, not only on the empty state: once a mode
+              had a single output the only way in was a bare bookmark icon in
+              the sidebar's bottom bar, which reads as decoration. */}
+          <button
+            onClick={() => useStore.getState().setRecipesOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary shrink-0"
+            title="Blueprints — one-click presets for a look"
+          >
+            <BookMarked size={13} />
+            <span className="hidden md:inline">Blueprints</span>
+          </button>
           <WorkspaceSelector />
         </div>
       </div>
