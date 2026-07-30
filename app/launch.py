@@ -6756,8 +6756,11 @@ async def story_edit_chapter(sid: str, index: int, request: Request):
     if text is None:
         raise HTTPException(status_code=400, detail="text is required")
     try:
+        # lang edits the translation in that language; without it the
+        # original changes and its translations are flagged stale.
         ok = story_pipeline.update_chapter_text(
-            _story_dir(body.get("workspace")), sid, index, text
+            _story_dir(body.get("workspace")), sid, index, text,
+            lang=body.get("lang"),
         )
     except story_pipeline.StoryBusyError:
         raise HTTPException(status_code=409, detail="Story is running — stop it before editing")
@@ -6789,6 +6792,308 @@ async def story_extend(sid: str, request: Request):
     if not ok:
         raise HTTPException(status_code=409, detail=reason)
     return {"status": "extending", "story_id": sid, "additional_chapters": count}
+
+
+@api.get("/api/v1/activity")
+def list_activity():
+    """Everything currently running, with the call that stops it.
+
+    Generation jobs, Director pipelines, Storywriter runs and audiobook
+    renders all have their own status and cancel routes; this collects them
+    so the UI can show one list instead of the user hunting for whichever
+    screen owns a given task. `cancel` is the exact endpoint to POST to,
+    so the UI never has to know the per-feature conventions.
+    """
+    items = []
+
+    # Generation + render jobs (audiobook renders are jobs too, tagged by
+    # their params so they read as what they are rather than "generation").
+    for job in list(_jobs.values()):
+        if job.get("status") not in ("queued", "running"):
+            continue
+        params = job.get("params") or {}
+        if params.get("project_id") and params.get("chapter_id") is not None:
+            kind, label = "audiobook", "Audiobook chapter render"
+        elif params.get("project_id"):
+            kind, label = "audiobook", "Audiobook render"
+        elif params.get("sfx_mode"):
+            kind, label = "job", "Sound effect"
+        else:
+            kind, label = "job", params.get("model_type") or "Generation"
+        items.append({
+            "kind": kind,
+            "id": job["id"],
+            "label": label,
+            "status": job.get("status"),
+            "message": job.get("message") or "",
+            "progress": job.get("progress") or 0,
+            "step": job.get("step") or 0,
+            "total_steps": job.get("total_steps") or 0,
+            "started_at": job.get("created_at"),
+            "cancel": f"/api/v1/cancel/{job['id']}",
+        })
+
+    # Director pipelines
+    try:
+        from services import director_pipeline
+        for state in (director_pipeline.list_pipeline_states(_workspace_dir()) or []):
+            if state.get("status") not in ("queued", "planning", "running", "paused"):
+                continue
+            pid = state.get("pipeline_id") or state.get("id")
+            progress = state.get("progress") or {}
+            items.append({
+                "kind": "director",
+                "id": pid,
+                "label": state.get("pipeline_type") or "Director pipeline",
+                "status": state.get("status"),
+                "message": progress.get("message") or "",
+                "progress": 0,
+                "step": progress.get("step") or 0,
+                "total_steps": progress.get("total_steps") or 0,
+                "started_at": state.get("created_at"),
+                "cancel": f"/api/v1/director/pipeline/{pid}/stop",
+            })
+    except Exception as e:  # noqa: BLE001 — a broken pipeline file must not
+        print(f"[activity] Could not list pipelines: {e}")
+
+    # Storywriter runs
+    try:
+        from services import story_pipeline
+        for summary in (story_pipeline.list_stories(_story_dir()) or []):
+            if summary.get("status") not in ("queued", "planning", "writing"):
+                continue
+            sid = summary.get("id")
+            live = story_pipeline.get_story(sid) or {}
+            progress = live.get("progress") or {}
+            items.append({
+                "kind": "story",
+                "id": sid,
+                "label": summary.get("title") or "Story",
+                "status": summary.get("status"),
+                "message": progress.get("message") or "",
+                "progress": 0,
+                "step": progress.get("step") or 0,
+                "total_steps": progress.get("total_steps") or 0,
+                "started_at": summary.get("created_at"),
+                "cancel": f"/api/v1/story/stories/{sid}/stop",
+            })
+    except Exception as e:  # noqa: BLE001
+        print(f"[activity] Could not list stories: {e}")
+
+    items.sort(key=lambda i: i.get("started_at") or 0, reverse=True)
+    return {"activity": items, "count": len(items)}
+
+
+@api.post("/api/v1/activity/stop-all")
+def stop_all_activity():
+    """Stop everything at once. Reports per item so a single stubborn task
+    does not hide that the rest went down."""
+    results = []
+    for item in list_activity()["activity"]:
+        try:
+            if item["kind"] == "job":
+                cancel_job(item["id"])
+            elif item["kind"] == "audiobook":
+                cancel_job(item["id"])
+            elif item["kind"] == "director":
+                from services import director_pipeline
+                director_pipeline.stop_pipeline(item["id"])
+            elif item["kind"] == "story":
+                from services import story_pipeline
+                story_pipeline.stop_story(item["id"])
+            results.append({"kind": item["kind"], "id": item["id"], "stopped": True})
+        except Exception as e:  # noqa: BLE001
+            results.append({"kind": item["kind"], "id": item["id"],
+                            "stopped": False, "error": str(e)})
+    return {"results": results}
+
+
+# ══ Storywriter: languages, rewriting, chapters, analysis ═════════════
+
+
+@api.get("/api/v1/story/languages")
+def story_language_options():
+    """Languages offered for writing and translating.
+
+    A short curated list rather than every ISO code — these are the ones the
+    uncensored open-weight models actually write well.
+    """
+    from services import story_pipeline
+    codes = ["en", "de", "fr", "es", "it", "pt", "nl", "pl", "ru", "ja", "zh", "ko"]
+    return {"languages": [{"code": c, "name": story_pipeline.language_name(c)}
+                          for c in codes]}
+
+
+@api.post("/api/v1/story/stories/{sid}/translate")
+async def story_translate(sid: str, request: Request):
+    """Translate the whole story into another language.
+
+    Body: {language, workspace?}. Runs as a worker like extend; poll the
+    story for progress. The original stays untouched — a translation is an
+    additional view, not a replacement.
+    """
+    from services import story_pipeline
+
+    body = await request.json()
+    lang = (body.get("language") or "").strip()
+    if not lang:
+        raise HTTPException(status_code=400, detail="language is required")
+    ok, reason = story_pipeline.translate_story(
+        sid, lang, out_dir=_story_dir(body.get("workspace")),
+        ensure_model=_ensure_llm_loaded,
+    )
+    if not ok:
+        raise HTTPException(status_code=409, detail=reason)
+    return {"status": "translating", "story_id": sid, "language": lang}
+
+
+@api.post("/api/v1/story/stories/{sid}/chapters/{index}/retranslate")
+async def story_retranslate_chapter(sid: str, index: int, request: Request):
+    """Re-translate one chapter, e.g. after editing the original."""
+    from services import story_pipeline
+
+    body = await request.json()
+    lang = (body.get("language") or "").strip()
+    if not lang:
+        raise HTTPException(status_code=400, detail="language is required")
+    ok, reason = story_pipeline.retranslate_chapter(
+        sid, index, lang, out_dir=_story_dir(body.get("workspace")),
+        ensure_model=_ensure_llm_loaded,
+    )
+    if not ok:
+        raise HTTPException(status_code=409, detail=reason)
+    return {"status": "translating", "story_id": sid, "chapter_index": index,
+            "language": lang}
+
+
+@api.post("/api/v1/story/stories/{sid}/chapters/{index}/rewrite")
+async def story_rewrite_passage(sid: str, index: int, request: Request):
+    """Rewrite a selected passage. Returns the proposal, applies nothing.
+
+    Body: {selected_text, instruction, lang?, workspace?}. The selection has
+    to match exactly once — zero or several hits is an error rather than a
+    guess, because rewriting the wrong paragraph is worse than refusing.
+    """
+    from services import story_pipeline
+
+    body = await request.json()
+    selected = body.get("selected_text") or ""
+    instruction = (body.get("instruction") or "").strip()
+    if not selected.strip():
+        raise HTTPException(status_code=400, detail="selected_text is required")
+    if not instruction:
+        raise HTTPException(status_code=400, detail="instruction is required")
+
+    result = story_pipeline.rewrite_passage(
+        sid, index, selected, instruction,
+        lang=body.get("lang"), out_dir=_story_dir(body.get("workspace")),
+        ensure_model=_ensure_llm_loaded,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "Rewrite failed")
+    return result
+
+
+@api.post("/api/v1/story/stories/{sid}/chapters/{index}/apply-rewrite")
+async def story_apply_rewrite(sid: str, index: int, request: Request):
+    """Replace a passage with a reviewed rewrite.
+
+    Body: {selected_text, replacement, lang?, workspace?}.
+    """
+    from services import story_pipeline
+
+    body = await request.json()
+    selected = body.get("selected_text") or ""
+    replacement = body.get("replacement")
+    if not selected.strip() or replacement is None:
+        raise HTTPException(status_code=400,
+                            detail="selected_text and replacement are required")
+    try:
+        ok = story_pipeline.apply_passage_rewrite(
+            _story_dir(body.get("workspace")), sid, index, selected, replacement,
+            lang=body.get("lang"),
+        )
+    except story_pipeline.StoryBusyError:
+        raise HTTPException(status_code=409, detail="Story is running — stop it first")
+    if not ok:
+        raise HTTPException(status_code=400,
+                            detail="The passage no longer matches — reload and retry")
+    return {"status": "applied", "story_id": sid, "chapter_index": index}
+
+
+@api.post("/api/v1/story/stories/{sid}/chapters")
+async def story_insert_chapter(sid: str, request: Request):
+    """Insert a chapter. Body: {at_index, title?, text?, brief?, write?}.
+
+    write=true has the LLM write it, using the surrounding chapters as the
+    seam so it fits where it lands; otherwise an empty chapter is inserted
+    for you to fill. at_index beyond the end appends.
+    """
+    from services import story_pipeline
+
+    body = await request.json()
+    try:
+        at_index = int(body.get("at_index", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="at_index must be a number")
+    out_dir = _story_dir(body.get("workspace"))
+
+    if body.get("write"):
+        ok, reason = story_pipeline.write_chapter_at(
+            sid, at_index, brief=body.get("brief") or "",
+            out_dir=out_dir, ensure_model=_ensure_llm_loaded,
+        )
+        if not ok:
+            raise HTTPException(status_code=409, detail=reason)
+        return {"status": "writing", "story_id": sid, "at_index": at_index}
+
+    try:
+        ok = story_pipeline.insert_chapter(
+            out_dir, sid, at_index,
+            title=body.get("title") or "", text=body.get("text") or "",
+        )
+    except story_pipeline.StoryBusyError:
+        raise HTTPException(status_code=409, detail="Story is running — stop it first")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Story {sid} not found")
+    return {"status": "inserted", "story_id": sid, "at_index": at_index}
+
+
+@api.delete("/api/v1/story/stories/{sid}/chapters/{index}")
+def story_delete_chapter(sid: str, index: int, workspace: str = None):
+    """Delete a chapter and renumber the rest."""
+    from services import story_pipeline
+    try:
+        ok = story_pipeline.delete_chapter(_story_dir(workspace), sid, index)
+    except story_pipeline.StoryBusyError:
+        raise HTTPException(status_code=409, detail="Story is running — stop it first")
+    if not ok:
+        raise HTTPException(status_code=404, detail="Story or chapter not found")
+    return {"status": "deleted", "story_id": sid, "chapter_index": index}
+
+
+@api.post("/api/v1/story/stories/{sid}/analyze")
+async def story_analyze(sid: str, request: Request):
+    """Audit the story: characters, who speaks where, timeline, and issues
+    such as plot holes and continuity breaks.
+
+    Runs one pass per chapter and merges, because a novel does not fit in a
+    context window. That means it takes a while on a long story; the result
+    is persisted on the story so it can be read back without re-running.
+    """
+    from services import story_pipeline
+
+    body = await request.json() if await request.body() else {}
+    result = await asyncio.to_thread(
+        story_pipeline.analyze_story,
+        sid,
+        out_dir=_story_dir(body.get("workspace")),
+        ensure_model=_ensure_llm_loaded,
+        lang=body.get("lang"),
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "Analysis failed")
+    return result
 
 
 @api.get("/api/v1/story/export-formats")
@@ -7323,6 +7628,240 @@ async def ab_apply_cast(pid: str, request: Request):
     if project is None:
         raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
     return {"project": project.to_dict(), "created_effects": created_effects}
+
+
+# Short neutral lines for auditioning a voice. Deliberately per language:
+# a German narrator sample read in English tells you nothing about how the
+# voice will actually sound in the book.
+_VOICE_SAMPLE_TEXTS = {
+    "de": "Der Regen hatte aufgehört, doch die Straßen glänzten noch immer.",
+    "en": "The rain had stopped, but the streets were still shining.",
+    "fr": "La pluie avait cessé, mais les rues brillaient encore.",
+    "es": "La lluvia había parado, pero las calles seguían brillando.",
+    "it": "La pioggia era cessata, ma le strade brillavano ancora.",
+}
+
+# Starting points for the voices a book actually needs. Each is a real
+# configuration, not a label — the model choice is the substance, because
+# only some engines can clone a voice or take an emotion at all.
+VOICE_PRESETS = [
+    {
+        "id": "narrator",
+        "name": "Narrator",
+        "color": "#22d3ee",
+        "model_type": "index_tts2",
+        "default_emotion": None,
+        "params": {"temperature": 0.75},
+        "description": "Even, unhurried reading voice. Clone it from a "
+                       "reference clip; emotion tags work per sentence.",
+        "needs_reference": True,
+    },
+    {
+        "id": "protagonist",
+        "name": "Protagonist",
+        "color": "#a78bfa",
+        "model_type": "index_tts2",
+        "default_emotion": None,
+        "params": {"temperature": 0.85},
+        "description": "Slightly warmer and more expressive than the "
+                       "narrator, for the character we follow.",
+        "needs_reference": True,
+    },
+    {
+        "id": "antagonist",
+        "name": "Antagonist",
+        "color": "#f87171",
+        "model_type": "index_tts2",
+        "default_emotion": "angry",
+        "params": {"temperature": 0.9},
+        "description": "Defaults to a harder delivery; override per line "
+                       "where the scene calls for restraint.",
+        "needs_reference": True,
+    },
+    {
+        "id": "designed_voice",
+        "name": "Designed voice",
+        "color": "#4ade80",
+        "model_type": "qwen3_tts_voicedesign",
+        "default_emotion": None,
+        "params": {"voice_description": "middle-aged woman, warm, measured"},
+        "description": "No reference clip needed — describe the voice in "
+                       "words and the model builds it.",
+        "needs_reference": False,
+    },
+    {
+        "id": "multilingual",
+        "name": "Multilingual",
+        "color": "#fb923c",
+        "model_type": "chatterbox",
+        "default_emotion": None,
+        "params": {"temperature": 0.8},
+        "description": "For books that switch language. Emotion maps onto "
+                       "an expressiveness setting rather than tags.",
+        "needs_reference": True,
+    },
+]
+
+
+@api.get("/api/v1/audiobook/voice-presets")
+def ab_voice_presets():
+    """Voice starting points, and the sample lines used for auditions."""
+    return {"presets": VOICE_PRESETS,
+            "sample_texts": _VOICE_SAMPLE_TEXTS}
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/voices/{profile_id}/preview")
+async def ab_preview_voice(pid: str, profile_id: str, request: Request):
+    """Speak a short line with this voice so it can be auditioned.
+
+    Body: {text?, language?, workspace?}. Returns a job_id; the finished
+    audio is in the job's output_files. Uses the same TTS mapping as a real
+    render, so what you hear is what the book will sound like — including
+    the profile's default emotion.
+    """
+    from services.audiobook import model as ab_model, tts as ab_tts
+
+    body = await request.json() if await request.body() else {}
+    workspace = body.get("workspace") or _get_active_workspace()
+    _out_dir, project = _ab_load(pid, workspace)
+    profile = next((v for v in project.voice_profiles if v.id == profile_id), None)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Voice {profile_id} not found")
+
+    lang = (body.get("language") or project.language or "en").lower()[:2]
+    text = (body.get("text") or "").strip() or _VOICE_SAMPLE_TEXTS.get(
+        lang, _VOICE_SAMPLE_TEXTS["en"])
+
+    # Plan it exactly like a chapter run so a preview cannot succeed where
+    # the real render would fail (missing reference clip, unusable model).
+    probe_run = ab_model.Run(id=f"preview-{profile_id}", text=text,
+                             profile_id=profile.id)
+    probe_block = ab_model.Block(id="preview", type="paragraph", runs=[probe_run])
+    probe_chapter = ab_model.Chapter(id="preview", title="Preview",
+                                     blocks=[probe_block],
+                                     language=project.language)
+    plans, errors = ab_tts.plan_chapter(project, probe_chapter, workspace=workspace)
+    if errors or not plans:
+        raise HTTPException(status_code=400,
+                            detail="; ".join(errors) or "This voice cannot be previewed yet")
+
+    plan = plans[0]
+    params = dict(plan.params)
+    params["workspace"] = workspace
+    job_id = uuid.uuid4().hex[:8]
+    _jobs[job_id] = {
+        "id": job_id, "status": "queued", "progress": 0, "step": 0,
+        "total_steps": 0, "phase": "",
+        "message": f"Queued (voice preview: {profile.name})",
+        "created_at": time.time(), "params": params,
+        "output_files": [], "error": None,
+        "workspace": workspace, "out_dir": _ab_dir(workspace),
+    }
+    threading.Thread(target=_run_generation, args=(job_id,), daemon=False).start()
+    return {"job_id": job_id, "voice_id": profile_id, "text": text,
+            "warnings": plan.warnings}
+
+
+@api.get("/api/v1/audiobook/sfx-library")
+def ab_sfx_library(workspace: str = None, limit: int = 60):
+    """Sound effects already sitting in the workspace, ready to reuse.
+
+    Anything produced by the Audio → SFX mode (or an earlier audiobook)
+    counts: there is no reason to regenerate a door slam you already have.
+    Recognised by the sidecar's audio sub-mode or the sfx_mode flag, newest
+    first.
+    """
+    out_dir = _workspace_dir(workspace)
+    if not os.path.isdir(out_dir):
+        return {"effects": []}
+
+    audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+    found = []
+    try:
+        entries = list(os.scandir(out_dir))
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        stem, ext = os.path.splitext(entry.name)
+        if ext.lower() not in audio_exts:
+            continue
+        meta_path = os.path.join(out_dir, f"{entry.name}.meta.json")
+        params, is_sfx = {}, False
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    params = (json.load(f) or {}).get("params") or {}
+            except (OSError, ValueError):
+                params = {}
+            is_sfx = bool(params.get("sfx_mode")) or params.get("_audio_sub_mode") == "sfx"
+        if not is_sfx:
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        found.append({
+            "name": entry.name,
+            "path": entry.path,
+            "url": f"/api/v1/file/{entry.name}",
+            "prompt": params.get("MMAudio_prompt") or params.get("prompt") or "",
+            "size_bytes": stat.st_size,
+            "created_at": stat.st_mtime,
+        })
+    found.sort(key=lambda f: f["created_at"], reverse=True)
+    return {"effects": found[:max(1, min(int(limit), 300))]}
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/assets/sfx/adopt")
+async def ab_adopt_sfx(pid: str, request: Request):
+    """Add an existing audio file to the project as an effect.
+
+    Body: {path | name, label?, playback_mode?, loop?, volume?, duration?,
+    workspace?}. No generation happens — the file is reused as it is, which
+    is the point.
+    """
+    from services.audiobook import model as ab_model, store as ab_store
+
+    body = await request.json()
+    workspace = body.get("workspace") or _get_active_workspace()
+    out_dir = _ab_dir(workspace)
+    raw = body.get("path") or body.get("name") or ""
+    if not raw:
+        raise HTTPException(status_code=400, detail="path or name is required")
+
+    candidate = raw if os.path.isfile(raw) else _safe_join(
+        _workspace_dir(workspace), os.path.basename(raw))
+    if not candidate or not os.path.isfile(candidate):
+        raise HTTPException(status_code=404, detail=f"Audio file not found: {raw}")
+
+    duration = body.get("duration")
+    if duration in (None, 0):
+        try:
+            from services.audiobook import render as ab_render
+            duration = ab_render.probe_duration(candidate)
+        except Exception:  # noqa: BLE001
+            duration = None
+
+    asset = ab_model.SfxAsset(
+        id=uuid.uuid4().hex[:12],
+        label=body.get("label") or os.path.splitext(os.path.basename(candidate))[0][:80],
+        prompt=body.get("prompt") or "",
+        duration=float(duration or 5.0),
+        audio_path=candidate,
+        playback_mode=body.get("playback_mode") or "parallel",
+        loop=bool(body.get("loop", False)),
+        volume=float(body.get("volume", 0.5)),
+    )
+
+    def _add(project):
+        project.sfx = list(project.sfx) + [asset]
+
+    project = ab_store.update_project(out_dir, pid, _add)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    return {"project": project.to_dict(), "asset_id": asset.id}
 
 
 def _ab_asset_generation_params(kind: str, prompt: str, duration: float,

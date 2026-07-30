@@ -13,6 +13,16 @@ tail of the previous prose) is the whole point: the full story text is
 never sent back to the model, so a 40-chapter book costs the same context
 as a 3-chapter one.
 
+Four post-production passes reuse the same plumbing, all additive — a
+story written before they existed loads and behaves unchanged:
+
+  - translate  — chapter-by-chapter literary translation into any number
+                 of target languages, stored beside the original prose.
+  - rewrite    — one marked passage, one instruction, one replacement.
+  - write_at   — insert a chapter and have it written to fit the seam.
+  - analyze    — one audit pass per chapter, merged server-side into
+                 characters / dialogue map / issues / timeline.
+
 Structure deliberately mirrors ``services/director_pipeline.py`` — same
 atomic state file, same file-lock-outside-memory-lock save order, same
 "cancellation is an absorbing terminal state" update wrapper, same
@@ -93,6 +103,9 @@ _CANCELLED_ARTIFACT_FIELDS = {
     "character_state",
     "outline",
     "title",
+    # A finished analysis of a cancelled story is a legitimate artifact, and
+    # analysing one is allowed (it only reads the prose).
+    "analysis",
 }
 
 # Fields written to _story_{pid}.json. Everything else in the in-memory dict
@@ -118,6 +131,11 @@ _STORY_PERSISTED_FIELDS = (
     "error",
     "total_time_sec",
     "_params_snapshot",
+    # Derived on every save from the original language + the translations
+    # actually present (see _persisted_snapshot).
+    "languages",
+    # Result of the last analyze_story(), with its own analyzed_at.
+    "analysis",
 )
 
 # ── Length maths ───────────────────────────────────────────────────────────
@@ -142,6 +160,38 @@ CONTEXT_TAIL_WORDS = 1500
 DEFAULT_PROSE_TEMPERATURE = 0.9
 OUTLINE_TEMPERATURE = 0.25
 CONTINUITY_TEMPERATURE = 0.2
+# A translation and an audit must not invent — near-greedy sampling.
+TRANSLATE_TEMPERATURE = 0.3
+ANALYZE_TEMPERATURE = 0.2
+# Characters of surrounding prose handed to the rewrite pass on each side.
+REWRITE_CONTEXT_CHARS = 600
+# The head of the FOLLOWING chapter handed to an inserted chapter, so it
+# can lead into prose that already exists.
+CONTEXT_HEAD_WORDS = 400
+# One analysis pass per chapter; a 4000-word chapter is ~24k characters, so
+# this truncates only the outliers.
+ANALYZE_MAX_CHARS = 24000
+ANALYZE_CHAPTER_MAX_TOKENS = 4096
+ANALYZE_SUMMARY_MAX_TOKENS = 1024
+# The dialogue map is a UI table, not a transcript: bounded per chapter and
+# overall, and the result says when it was cut.
+ANALYZE_DIALOGUE_PER_CHAPTER = 40
+MAX_DIALOGUE_ENTRIES = 200
+
+# Original language of a story when params carry none (every pre-language
+# story on disk).
+DEFAULT_LANGUAGE = "en"
+# Enough to name the common cases in the prompt; anything else is passed
+# through as its code, which models handle fine ("write in nl").
+_LANGUAGE_NAMES = {
+    "en": "English", "de": "German", "fr": "French", "es": "Spanish",
+    "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "pl": "Polish",
+    "ru": "Russian", "uk": "Ukrainian", "cs": "Czech", "sv": "Swedish",
+    "da": "Danish", "no": "Norwegian", "fi": "Finnish", "tr": "Turkish",
+    "el": "Greek", "hu": "Hungarian", "ro": "Romanian", "ja": "Japanese",
+    "ko": "Korean", "zh": "Chinese", "ar": "Arabic", "he": "Hebrew",
+    "hi": "Hindi", "id": "Indonesian", "vi": "Vietnamese", "th": "Thai",
+}
 # Long writing sessions must not unload the model between chapters —
 # reloading 16 GB of weights costs minutes per chapter.
 STORY_IDLE_TIMEOUT_S = 1800
@@ -249,6 +299,126 @@ CONTINUITY_SCHEMA = {
     "additionalProperties": False,
 }
 
+# analyze_story(): ONE pass per chapter. A whole novel never fits in one
+# context, so the model only ever audits the chapter in front of it and
+# _merge_chapter_analyses folds the passes together.
+_ISSUE_KINDS = ("plot_hole", "continuity", "timeline", "character", "pacing")
+_ISSUE_SEVERITIES = ("low", "medium", "high")
+
+ANALYZE_CHAPTER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "characters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "role": {"type": "string"},
+                    "description": {"type": "string"},
+                    "traits": {"type": "array", "items": {"type": "string"},
+                               "maxItems": 8},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+        "dialogue": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "speaker": {"type": "string"},
+                    "line_excerpt": {"type": "string"},
+                    "context": {"type": "string"},
+                },
+                "required": ["speaker", "line_excerpt"],
+                "additionalProperties": False,
+            },
+        },
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": list(_ISSUE_KINDS)},
+                    "severity": {"type": "string", "enum": list(_ISSUE_SEVERITIES)},
+                    # 1-based in the reply; validated and converted to the
+                    # state's 0-based index server-side.
+                    "chapter": {"type": "integer"},
+                    "description": {"type": "string"},
+                    "suggestion": {"type": "string"},
+                },
+                "required": ["kind", "severity", "description"],
+                "additionalProperties": False,
+            },
+        },
+        "when": {"type": "string"},
+        "where": {"type": "string"},
+        "summary": {"type": "string"},
+    },
+    "required": ["characters", "dialogue", "issues", "summary"],
+    "additionalProperties": False,
+}
+
+ANALYZE_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {"summary": {"type": "string"}},
+    "required": ["summary"],
+    "additionalProperties": False,
+}
+
+
+# ── Language ───────────────────────────────────────────────────────────────
+# The original language lives in params["language"]; translations live per
+# chapter under `translations[code]`. Everything reads through these helpers
+# so a story saved before languages existed answers "en" instead of None.
+
+def _lang_code(value) -> str:
+    """Normalize a language tag ("DE", "de_DE" -> "de-de"). "" if unusable."""
+    code = str(value or "").strip().lower().replace("_", "-")
+    return code if re.fullmatch(r"[a-z]{2,3}(-[a-z0-9]{2,8})*", code) else ""
+
+
+def language_name(code: str) -> str:
+    """Human name for a language tag, for the prompt. Falls back to the code."""
+    code = _lang_code(code) or DEFAULT_LANGUAGE
+    return _LANGUAGE_NAMES.get(code.split("-")[0], code)
+
+
+def _params_language(params: dict) -> str:
+    return _lang_code((params or {}).get("language")) or DEFAULT_LANGUAGE
+
+
+def _story_language(state: dict) -> str:
+    """The language the story itself is written in."""
+    return _params_language((state or {}).get("params") or {})
+
+
+def story_languages(state: dict) -> list[str]:
+    """Original language first, then every language a translation exists in."""
+    original = _story_language(state)
+    extra = set()
+    for chapter in (state or {}).get("chapters") or []:
+        for code, entry in (chapter.get("translations") or {}).items():
+            code = _lang_code(code)
+            if code and code != original and isinstance(entry, dict):
+                extra.add(code)
+    return [original] + sorted(extra)
+
+
+def _language_directive(code: str) -> str:
+    """The block that pins the output language of a pass."""
+    code = _lang_code(code) or DEFAULT_LANGUAGE
+    name = language_name(code)
+    return (
+        f"OUTPUT LANGUAGE: {name} ({code}).\n"
+        f"Write every word you output in {name} — prose, dialogue, titles, "
+        f"summaries and any other text. Never switch language mid-way, never "
+        f"add a translation or a note about the language. Proper names that "
+        f"the story has already established keep their established spelling."
+    )
+
 
 # ── Guides ─────────────────────────────────────────────────────────────────
 
@@ -278,8 +448,18 @@ def _is_nsfw(params: dict) -> bool:
     return bool(params.get("nsfw"))
 
 
-def _system_prompt(base_guide: str, explicit_guide: str, params: dict) -> str:
-    blocks = [_guide(base_guide), _content_guidance(_is_nsfw(params), explicit_guide)]
+def _system_prompt(base_guide: str, explicit_guide: Optional[str], params: dict,
+                   language: Optional[str] = None) -> str:
+    """Guide + content guidance + the output language of this pass.
+
+    `explicit_guide=None` skips the content block for passes that generate
+    no prose (the analysis pass). `language` overrides the story's own
+    language — the translation pass writes in the TARGET language.
+    """
+    blocks = [_guide(base_guide)]
+    if explicit_guide:
+        blocks.append(_content_guidance(_is_nsfw(params), explicit_guide))
+    blocks.append(_language_directive(language or _params_language(params)))
     return "\n\n".join(b for b in blocks if b).strip()
 
 
@@ -324,6 +504,13 @@ def _tail_words(text: str, limit: int = CONTEXT_TAIL_WORDS) -> str:
     return " ".join(words[-limit:]).strip()
 
 
+def _head_words(text: str, limit: int = CONTEXT_HEAD_WORDS) -> str:
+    words = (text or "").split()
+    if len(words) <= limit:
+        return (text or "").strip()
+    return " ".join(words[:limit]).strip()
+
+
 def _outline_block(outline: dict) -> str:
     """The story bible, flattened for the prompt."""
     lines = [
@@ -359,23 +546,32 @@ def _character_state_block(character_state: dict) -> str:
     return "\n".join(lines)
 
 
-def build_chapter_context(state: dict, index: int, instruction: Optional[str] = None) -> str:
+def build_chapter_context(state: dict, index: int, instruction: Optional[str] = None,
+                          *, bridge: bool = False) -> str:
     """The user message for one chapter pass.
 
     Contains the outline, the running synopsis, the character state and the
     TAIL of the prose written so far — never the whole story. Everything
     that makes long stories survivable lives in this function.
+
+    `bridge=True` is the inserted-chapter case (write_chapter_at): the
+    chapter after this one already exists, so the head of it goes into the
+    context too and the synopsis used is the one recorded when that
+    following chapter was written (i.e. the state of the story at this
+    point, not after the ending).
     """
     params = state.get("params") or {}
     outline = state.get("outline") or {}
     chapters = state.get("chapters") or []
     chapter = chapters[index] if 0 <= index < len(chapters) else {}
+    following = chapters[index + 1] if 0 <= index + 1 < len(chapters) else {}
     total = len(chapters)
 
     previous_text = "\n\n".join(
         (chapters[i].get("text") or "") for i in range(index)
     )
     tail = _tail_words(previous_text)
+    head = _head_words(following.get("text") or "") if bridge else ""
 
     target = chapter_target_words(params.get("min_pages"), total)
 
@@ -384,6 +580,9 @@ def build_chapter_context(state: dict, index: int, instruction: Optional[str] = 
         _outline_block(outline),
     ]
     synopsis = (state.get("synopsis_running") or "").strip()
+    if bridge:
+        # The story as it stood BEFORE the following chapter was written.
+        synopsis = (following.get("synopsis_at_start") or synopsis or "").strip()
     if synopsis:
         parts += ["", "=== WHAT HAS HAPPENED SO FAR (running synopsis) ===", synopsis]
     char_block = _character_state_block(state.get("character_state") or {})
@@ -396,22 +595,47 @@ def build_chapter_context(state: dict, index: int, instruction: Optional[str] = 
             "do not repeat it) ===",
             tail,
         ]
+    if head:
+        parts += [
+            "",
+            "=== BEGINNING OF THE FOLLOWING CHAPTER (verbatim — lead into it, "
+            "do not repeat it, do not resolve what it still treats as open) ===",
+            head,
+        ]
 
     beats = chapter.get("beats") or []
-    parts += [
-        "",
-        "=== YOUR TASK ===",
-        f'Write chapter {index + 1} of {total}: "{chapter.get("title", "")}"',
-    ]
+    parts += ["", "=== YOUR TASK ==="]
+    if bridge:
+        title = chapter.get("title") or ""
+        parts.append(
+            f"Write a NEW chapter {index + 1} of {total} that belongs between the "
+            f"previous chapter and the one that follows"
+            + (f': "{title}"' if title else ".")
+        )
+        parts.append(
+            "It has to fit the seam: continue from the verbatim end of the "
+            "previous chapter and land where the verbatim beginning of the "
+            "following chapter starts, so that a reader notices no join."
+        )
+    else:
+        parts.append(f'Write chapter {index + 1} of {total}: "{chapter.get("title", "")}"')
     if beats:
         parts.append("Cover these beats, in this order, as dramatised scenes:")
         parts.extend(f"- {b}" for b in beats)
+    elif bridge:
+        parts.append(
+            "No beats were planned for this chapter — invent the scenes it "
+            "needs, but only material that fits between the two chapters you "
+            "were given."
+        )
     else:
         parts.append(
             "No beats were planned for this chapter — continue the story from "
             "the synopsis and drive it toward the outline's ending."
         )
     style = [
+        f"Language: {language_name(_params_language(params))} "
+        f"({_params_language(params)})",
         f"Genre: {params.get('genre') or 'unspecified'}",
         f"Tone: {params.get('tone') or 'unspecified'}",
         f"Point of view: {params.get('pov') or 'third person limited'}",
@@ -457,28 +681,37 @@ def _continuity_context(state: dict, index: int) -> str:
 
 # ── Export formatting (pure) ───────────────────────────────────────────────
 
-def format_story(state: dict, fmt: str = "md") -> str:
-    """Render a story state as Markdown or plain text."""
+def format_story(state: dict, fmt: str = "md", lang: Optional[str] = None) -> str:
+    """Render a story state as Markdown or plain text.
+
+    `lang` other than the story's own language renders the translated
+    chapters; chapters with no translation yet are skipped exactly like
+    unwritten ones.
+    """
     title = state.get("title") or (state.get("outline") or {}).get("title") or "Untitled"
     outline = state.get("outline") or {}
-    chapters = [c for c in (state.get("chapters") or []) if (c.get("text") or "").strip()]
+    original = _story_language(state)
+    views = [
+        (chapter.get("index", position),) + _chapter_view(chapter, lang, original)
+        for position, chapter in enumerate(state.get("chapters") or [])
+    ]
+    views = [v for v in views if (v[2] or "").strip()]
     if fmt == "txt":
         blocks = [title.upper(), ""]
         if outline.get("logline"):
             blocks += [outline["logline"], ""]
-        for chapter in chapters:
-            heading = f"CHAPTER {chapter.get('index', 0) + 1}"
-            if chapter.get("title"):
-                heading += f": {chapter['title'].upper()}"
-            blocks += [heading, "", (chapter.get("text") or "").strip(), ""]
+        for number, chapter_title, text in views:
+            heading = f"CHAPTER {number + 1}"
+            if chapter_title:
+                heading += f": {chapter_title.upper()}"
+            blocks += [heading, "", text.strip(), ""]
         return "\n".join(blocks).rstrip() + "\n"
     blocks = [f"# {title}", ""]
     if outline.get("logline"):
         blocks += [f"*{outline['logline']}*", ""]
-    for chapter in chapters:
-        number = chapter.get("index", 0) + 1
-        blocks += [f"## {number}. {chapter.get('title') or ''}".rstrip(), ""]
-        blocks += [(chapter.get("text") or "").strip(), ""]
+    for number, chapter_title, text in views:
+        blocks += [f"## {number + 1}. {chapter_title or ''}".rstrip(), ""]
+        blocks += [text.strip(), ""]
     return "\n".join(blocks).rstrip() + "\n"
 
 
@@ -514,6 +747,8 @@ def _persisted_snapshot(state: dict) -> dict:
     snapshot["chapters"] = [dict(c) for c in (state.get("chapters") or [])]
     snapshot["llm_passes"] = list(state.get("llm_passes") or [])
     snapshot["output_files"] = list(state.get("output_files") or [])
+    # Derived, never authored: original language + the translations present.
+    snapshot["languages"] = story_languages(state)
     created = state.get("created_at")
     snapshot["total_time_sec"] = (
         (state.get("completed_at") or time.time()) - created if created else None
@@ -968,6 +1203,10 @@ def _pass_outline(pid: str) -> dict:
         premise,
         "",
         "=== REQUIREMENTS ===",
+        f"Language: {language_name(_params_language(params))} "
+        f"({_params_language(params)}) — the title, the logline, the setting, "
+        f"every character description and every chapter title and beat must be "
+        f"written in this language",
         f"Genre: {params.get('genre') or 'unspecified'}",
         f"Tone: {params.get('tone') or 'unspecified'}",
         f"Point of view: {params.get('pov') or 'third person limited'}",
@@ -1032,7 +1271,104 @@ def _new_chapter(index: int, plan: dict) -> dict:
         "edited": False,
         "instruction": None,
         "synopsis_at_start": "",
+        # {lang: {title, text, translated_at, stale}} — `text`/`title` above
+        # always stay the original language.
+        "translations": {},
     }
+
+
+def _chapter_view(chapter: dict, lang: Optional[str], original: str) -> tuple[str, str]:
+    """(title, text) of one chapter in `lang`.
+
+    Anything but the original language reads the stored translation; a
+    missing translation yields empty text, which callers report as an error
+    rather than silently falling back to the original.
+    """
+    code = _lang_code(lang)
+    if code and code != original:
+        entry = (chapter.get("translations") or {}).get(code) or {}
+        return (entry.get("title") or chapter.get("title") or "",
+                entry.get("text") or "")
+    return chapter.get("title") or "", chapter.get("text") or ""
+
+
+def _mark_translations_stale(chapter: dict) -> None:
+    """The original prose changed — every translation of it is now behind.
+
+    Only a hint for the UI: the translation stays readable and is never
+    thrown away.
+    """
+    for entry in (chapter.get("translations") or {}).values():
+        if isinstance(entry, dict):
+            entry["stale"] = True
+
+
+def _renumber_chapters(chapters: list) -> list:
+    """Make every chapter's `index` its list position again.
+
+    `index` is load-bearing in several places — _pending_chapter_indices and
+    _refresh_synopsis_if_stale feed it straight back into _pass_chapter /
+    _pass_continuity, which index the list with it, and format_story prints
+    `index + 1` as the chapter number. Insert and delete must therefore
+    renumber, not just reorder.
+    """
+    for position, chapter in enumerate(chapters):
+        chapter["index"] = position
+    return chapters
+
+
+def _insert_into_state(state: dict, at_index: int, title: str = "",
+                       text: str = "") -> int:
+    """Insert one chapter into a story state dict. Returns its position.
+
+    Keeps `outline["chapters"]` (the plan list, read positionally by
+    _outline_block) aligned with the chapter list, and marks the synopsis
+    stale only when actual prose came in.
+    """
+    chapters = [dict(c) for c in (state.get("chapters") or [])]
+    at = max(0, min(int(at_index), len(chapters)))
+    chapter = _new_chapter(at, {"title": title, "beats": []})
+    # _new_chapter's "Chapter N" fallback would be a lie after renumbering.
+    chapter["title"] = title or ""
+    if (text or "").strip():
+        chapter.update({
+            "text": text,
+            "word_count": _word_count(text),
+            "status": "done",
+            "generated_at": time.time(),
+        })
+    chapters.insert(at, chapter)
+    state["chapters"] = _renumber_chapters(chapters)
+
+    outline = dict(state.get("outline") or {})
+    plans = list(outline.get("chapters") or [])
+    if plans:
+        plans.insert(min(at, len(plans)), {"title": chapter["title"], "beats": []})
+        outline["chapters"] = plans
+        state["outline"] = outline
+    if (text or "").strip():
+        state["synopsis_stale"] = True
+    return at
+
+
+def _delete_from_state(state: dict, index: int) -> bool:
+    """Remove one chapter from a story state dict and renumber the rest."""
+    chapters = [dict(c) for c in (state.get("chapters") or [])]
+    if not 0 <= index < len(chapters):
+        return False
+    had_text = bool((chapters[index].get("text") or "").strip())
+    chapters.pop(index)
+    state["chapters"] = _renumber_chapters(chapters)
+
+    outline = dict(state.get("outline") or {})
+    plans = list(outline.get("chapters") or [])
+    if index < len(plans):
+        plans.pop(index)
+        outline["chapters"] = plans
+        state["outline"] = outline
+    if had_text:
+        state["synopsis_stale"] = True
+    return True
 
 
 def _pass_extend_outline(pid: str, additional: int) -> None:
@@ -1081,8 +1417,13 @@ def _pass_extend_outline(pid: str, additional: int) -> None:
     _update_story(pid, outline=outline, chapters=chapters)
 
 
-def _pass_chapter(pid: str, index: int, instruction: Optional[str] = None) -> str:
-    """Pass 2 — write chapter `index` as prose (high temperature, no JSON)."""
+def _pass_chapter(pid: str, index: int, instruction: Optional[str] = None,
+                  *, bridge: bool = False) -> str:
+    """Pass 2 — write chapter `index` as prose (high temperature, no JSON).
+
+    `bridge` is the inserted-chapter case: the context then also carries the
+    head of the chapter that follows (see build_chapter_context).
+    """
     state = _snapshot(pid) or {}
     params = state.get("params") or {}
     chapters = [dict(c) for c in (state.get("chapters") or [])]
@@ -1109,7 +1450,7 @@ def _pass_chapter(pid: str, index: int, instruction: Optional[str] = None) -> st
         pid, f"chapter-{index + 1}",
         model_id=model_id,
         system_prompt=_system_prompt("chapter", "chapter_explicit", params),
-        user_prompt=build_chapter_context(state, index, instruction),
+        user_prompt=build_chapter_context(state, index, instruction, bridge=bridge),
         stream_id=f"story-{pid}-ch{index}",
         max_new_tokens=chapter_token_budget(target),
         temperature=temperature,
@@ -1135,6 +1476,8 @@ def _pass_chapter(pid: str, index: int, instruction: Optional[str] = None) -> st
             "edited": False,
             "text_pre_edit": None,
         })
+        # New prose for this chapter: any translation of it is now behind.
+        _mark_translations_stale(live[index])
     # chapters is an artifact field, so this still lands after a Stop.
     _update_story(pid, chapters=live)
     return prose
@@ -1185,6 +1528,316 @@ def _pass_continuity(pid: str, index: int) -> None:
     )
 
 
+def _split_translated(text: str, fallback_title: str) -> tuple[str, str]:
+    """Split a "title\\n\\nprose" translation reply into (title, prose).
+
+    The guide demands that shape, but a model that ignores it must not cost
+    the user the first paragraph of the chapter — a first line that reads
+    like prose (long, or ending in sentence punctuation) is treated as prose
+    and the original title is kept.
+    # ponytail: heuristic split. A JSON-schema pass would be exact but puts a
+    # 2000-word literary translation through grammar-constrained decoding.
+    """
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return fallback_title, ""
+    head, _, rest = cleaned.partition("\n\n")
+    head = head.strip()
+    looks_like_title = (
+        rest.strip() and "\n" not in head and len(head) <= 120
+        and not head.endswith((".", "!", "?", "…", "”", '"', "»"))
+    )
+    if looks_like_title:
+        title = re.sub(r"^(title|titel)\s*[:\-]\s*", "", head, flags=re.IGNORECASE)
+        return title.strip(" \"'*#„“»«") or fallback_title, _clean_prose(rest)
+    return fallback_title, _clean_prose(cleaned)
+
+
+def _pass_translate(pid: str, index: int, target_lang: str) -> bool:
+    """Translate one chapter into `target_lang`; store it beside the original.
+
+    Own pass, own stream id (``story-{pid}-tr-{lang}-ch{i}``), low
+    temperature. The original `text`/`title` are never touched.
+    """
+    state = _snapshot(pid) or {}
+    params = state.get("params") or {}
+    chapters = state.get("chapters") or []
+    if not 0 <= index < len(chapters):
+        return False
+    chapter = chapters[index]
+    source = (chapter.get("text") or "").strip()
+    if not source:
+        return False
+    source_name = language_name(_story_language(state))
+    target_name = language_name(target_lang)
+
+    user_prompt = "\n".join([
+        f"Source language: {source_name}",
+        f"Target language: {target_name}",
+        "",
+        f"=== CHAPTER TITLE ({source_name}) ===",
+        chapter.get("title") or "(untitled)",
+        "",
+        f"=== CHAPTER TEXT ({source_name}) ===",
+        source,
+        "",
+        f"Translate the title and the whole chapter into {target_name}. "
+        "First line: the translated title only. Then one blank line. Then the "
+        "complete translated chapter, and nothing after it.",
+    ])
+    model_id = _pick_model("story_prose", params.get("prose_model"))
+    text = _run_llm(
+        pid, f"translate-{target_lang}-{index + 1}",
+        model_id=model_id,
+        # The target language, not the story's — and the story's own content
+        # rules, so an explicit book is not quietly bowdlerised.
+        system_prompt=_system_prompt("translate", "chapter_explicit", params,
+                                     language=target_lang),
+        user_prompt=user_prompt,
+        stream_id=f"story-{pid}-tr-{target_lang}-ch{index}",
+        # Translations run longer than the original in most language pairs.
+        max_new_tokens=chapter_token_budget(int(_word_count(source) * 1.5) + 200),
+        temperature=TRANSLATE_TEMPERATURE,
+    )
+    title, prose = _split_translated(text, chapter.get("title") or "")
+    if not prose:
+        print(f"[Story {pid}] Translation of chapter {index + 1} came back empty")
+        return False
+
+    live = [dict(c) for c in ((_snapshot(pid) or {}).get("chapters") or [])]
+    if not 0 <= index < len(live):
+        return False
+    translations = dict(live[index].get("translations") or {})
+    translations[target_lang] = {
+        "title": title,
+        "text": prose,
+        "translated_at": time.time(),
+        "stale": False,
+    }
+    live[index]["translations"] = translations
+    # chapters is an artifact field: a translation that lands after a Stop is
+    # still a legitimate artifact.
+    _update_story(pid, chapters=live)
+    return True
+
+
+def _pass_analyze_chapter(pid: str, index: int, lang: Optional[str]) -> dict:
+    """One audit pass over one chapter. Returns the raw parsed reply."""
+    state = _snapshot(pid) or {}
+    params = state.get("params") or {}
+    chapters = state.get("chapters") or []
+    if not 0 <= index < len(chapters):
+        return {}
+    original = _story_language(state)
+    title, text = _chapter_view(chapters[index], lang, original)
+    if not text.strip():
+        return {}
+    excerpt = text if len(text) <= ANALYZE_MAX_CHARS else \
+        text[:ANALYZE_MAX_CHARS] + "\n\n[... chapter truncated for this pass ...]"
+    total = len(chapters)
+
+    user_prompt = "\n".join([
+        f"Story: {state.get('title') or '(untitled)'}",
+        f"This story has {total} chapter(s).",
+        "",
+        "=== RUNNING SYNOPSIS OF THE WHOLE STORY (for cross-chapter checks) ===",
+        (state.get("synopsis_running") or "").strip() or "(none recorded)",
+        "",
+        f"=== CHAPTER {index + 1} OF {total}: {title or '(untitled)'} ===",
+        excerpt,
+        "",
+        f"Analyse chapter {index + 1}. Chapter numbers are 1-based and must "
+        f"stay within 1..{total}. Return at most "
+        f"{ANALYZE_DIALOGUE_PER_CHAPTER} dialogue entries, the most "
+        f"significant ones. JSON only.",
+    ])
+    model_id = _pick_model("story_outline", params.get("outline_model"))
+    raw = _run_llm(
+        pid, f"analyze-{index + 1}",
+        model_id=model_id,
+        # No content block: this pass writes no prose, it only reports.
+        system_prompt=_system_prompt("analyze", None, params,
+                                     language=_lang_code(lang) or original),
+        user_prompt=user_prompt,
+        stream_id=f"story-{pid}-an-ch{index}",
+        max_new_tokens=ANALYZE_CHAPTER_MAX_TOKENS,
+        temperature=ANALYZE_TEMPERATURE,
+        json_schema=ANALYZE_CHAPTER_SCHEMA,
+    )
+    return _parse_json_object(raw) or {}
+
+
+def _merge_chapter_analyses(entries: list, total_chapters: int) -> dict:
+    """Fold per-chapter audit passes into one story-level analysis.
+
+    `entries` is [(chapter_index, parsed_reply)] in chapter order. Merge
+    rules, all of them server-side because a model's cross-chapter claims
+    cannot be trusted:
+
+      characters   keyed by case-folded name; the first non-empty role and
+                   description win, `traits` and `chapters` are unioned in
+                   first-seen order, `first_chapter`/`last_chapter` are the
+                   min/max of the chapters the character was seen in.
+      dialogue_map concatenated in chapter order and capped at
+                   MAX_DIALOGUE_ENTRIES; `truncated` reports the cut.
+      issues       concatenated; `kind` and `severity` are snapped to the
+                   known vocabulary (an unknown kind becomes "continuity",
+                   an unknown severity "medium"), and `chapter` — the only
+                   index the model is free to choose — is validated against
+                   the real chapter count. An issue naming a chapter that
+                   does not exist is dropped and counted in `dropped_refs`.
+      timeline     one entry per analysed chapter; the chapter number comes
+                   from the loop, never from the reply.
+
+    Every `chapter` field in the result is a 0-based state index, the same
+    numbering as `chapter["index"]`.
+    """
+    characters: dict = {}
+    dialogue: list = []
+    issues: list = []
+    timeline: list = []
+    dropped_refs = 0
+    truncated = False
+
+    for index, data in entries:
+        data = data if isinstance(data, dict) else {}
+
+        for item in (data.get("characters") or []):
+            name = str((item or {}).get("name") or "").strip()
+            if not name:
+                continue
+            key = name.casefold()
+            entry = characters.setdefault(key, {
+                "name": name[:80], "role": "", "description": "",
+                "first_chapter": index, "last_chapter": index,
+                "chapters": [], "traits": [],
+            })
+            entry["role"] = entry["role"] or str(item.get("role") or "").strip()[:60]
+            entry["description"] = entry["description"] or \
+                str(item.get("description") or "").strip()[:400]
+            if index not in entry["chapters"]:
+                entry["chapters"].append(index)
+            entry["first_chapter"] = min(entry["first_chapter"], index)
+            entry["last_chapter"] = max(entry["last_chapter"], index)
+            for trait in (item.get("traits") or []):
+                trait = str(trait or "").strip()[:60]
+                if trait and trait.casefold() not in {
+                    t.casefold() for t in entry["traits"]
+                }:
+                    entry["traits"].append(trait)
+
+        for item in (data.get("dialogue") or [])[:ANALYZE_DIALOGUE_PER_CHAPTER]:
+            excerpt = str((item or {}).get("line_excerpt") or "").strip()
+            if not excerpt:
+                continue
+            if len(dialogue) >= MAX_DIALOGUE_ENTRIES:
+                truncated = True
+                break
+            dialogue.append({
+                "chapter": index,
+                "speaker": (str(item.get("speaker") or "unknown").strip()
+                            or "unknown")[:80],
+                "line_excerpt": excerpt[:400],
+                "context": str(item.get("context") or "").strip()[:240],
+            })
+
+        for item in (data.get("issues") or []):
+            description = str((item or {}).get("description") or "").strip()
+            if not description:
+                continue
+            raw_chapter = item.get("chapter")
+            if raw_chapter is None or str(raw_chapter).strip() == "":
+                chapter = index
+            else:
+                try:
+                    # 1-based in the reply, 0-based in the state.
+                    chapter = int(str(raw_chapter).strip()) - 1
+                except (TypeError, ValueError):
+                    dropped_refs += 1
+                    continue
+                if not 0 <= chapter < total_chapters:
+                    dropped_refs += 1
+                    continue
+            kind = str(item.get("kind") or "").strip().lower()
+            severity = str(item.get("severity") or "").strip().lower()
+            issues.append({
+                "kind": kind if kind in _ISSUE_KINDS else "continuity",
+                "severity": severity if severity in _ISSUE_SEVERITIES else "medium",
+                "chapter": chapter,
+                "description": description[:600],
+                "suggestion": str(item.get("suggestion") or "").strip()[:600],
+            })
+
+        timeline.append({
+            "chapter": index,
+            "when": str(data.get("when") or "").strip()[:160] or "unclear",
+            "where": str(data.get("where") or "").strip()[:160] or "unclear",
+            "summary": str(data.get("summary") or "").strip()[:800],
+        })
+
+    order = {"high": 0, "medium": 1, "low": 2}
+    issues.sort(key=lambda i: (i["chapter"], order.get(i["severity"], 3)))
+    return {
+        "characters": sorted(
+            characters.values(),
+            key=lambda c: (c["first_chapter"], -len(c["chapters"]), c["name"]),
+        ),
+        "dialogue_map": dialogue,
+        "truncated": truncated,
+        "issues": issues,
+        "timeline": timeline,
+        "dropped_refs": dropped_refs,
+    }
+
+
+def _pass_analyze_summary(pid: str, timeline: list, issues: list,
+                          lang: Optional[str]) -> str:
+    """Final short pass: an overall verdict over the per-chapter notes."""
+    state = _snapshot(pid) or {}
+    params = state.get("params") or {}
+    if not timeline:
+        return ""
+    notes = "\n".join(
+        f"Chapter {entry['chapter'] + 1} ({entry['when']}, {entry['where']}): "
+        f"{entry['summary']}"
+        for entry in timeline
+    )
+    problems = "\n".join(
+        f"- [{i['severity']}/{i['kind']}] chapter {i['chapter'] + 1}: "
+        f"{i['description']}"
+        for i in issues[:40]
+    ) or "(none reported)"
+    user_prompt = "\n".join([
+        f"Story: {state.get('title') or '(untitled)'}",
+        f"Genre: {params.get('genre') or 'unspecified'}",
+        "",
+        "=== PER-CHAPTER NOTES ===",
+        notes,
+        "",
+        "=== REPORTED PROBLEMS ===",
+        problems,
+        "",
+        "Write one overall editorial assessment of this manuscript: what it "
+        "does well, what its biggest structural weaknesses are, and what to "
+        "fix first. Six to twelve sentences. JSON only.",
+    ])
+    model_id = _pick_model("story_outline", params.get("outline_model"))
+    raw = _run_llm(
+        pid, "analyze-summary",
+        model_id=model_id,
+        system_prompt=_system_prompt("analyze", None, params,
+                                     language=_lang_code(lang) or _story_language(state)),
+        user_prompt=user_prompt,
+        stream_id=f"story-{pid}-an-summary",
+        max_new_tokens=ANALYZE_SUMMARY_MAX_TOKENS,
+        temperature=ANALYZE_TEMPERATURE,
+        json_schema=ANALYZE_SUMMARY_SCHEMA,
+    )
+    parsed = _parse_json_object(raw) or {}
+    # A failed verdict pass must not lose the per-chapter work.
+    return str(parsed.get("summary") or "").strip()
+
+
 def _refresh_synopsis_if_stale(pid: str) -> None:
     """Rebuild the record from scratch after a manual edit.
 
@@ -1232,6 +1885,63 @@ def _finish(pid: str, status: str, message: str, error: Optional[str] = None) ->
     )
 
 
+def _insert_chapter_live(pid: str, at_index: int, title: str = "",
+                         text: str = "") -> int:
+    """Insert a chapter into the LIVE state (worker side). Returns its index."""
+    state = _snapshot(pid) or {}
+    working = {
+        "chapters": state.get("chapters") or [],
+        "outline": state.get("outline") or {},
+    }
+    at = _insert_into_state(working, at_index, title, text)
+    # chapters and outline are both artifact fields, so this also lands if
+    # the user pressed Stop while the GPU queue was still draining.
+    _update_story(pid, chapters=working["chapters"], outline=working["outline"])
+    return at
+
+
+def _run_translation(pid: str, job: dict) -> None:
+    """The translate job: chapter by chapter, cancellable between chapters.
+
+    Its own branch of the worker because a translation must not plan, must
+    not write prose, and must not rebuild the continuity record — it only
+    adds `translations[lang]` to chapters that already exist.
+    """
+    target = _lang_code(job.get("lang"))
+    name = language_name(target)
+    chapters = (_snapshot(pid) or {}).get("chapters") or []
+    requested = job.get("indices")
+    if requested:
+        indices = [int(i) for i in requested]
+    else:
+        indices = [i for i, c in enumerate(chapters) if (c.get("text") or "").strip()]
+    indices = [i for i in indices if 0 <= i < len(chapters)]
+    if not target:
+        _finish(pid, "failed", "No target language", error="No target language.")
+        return
+    if not indices:
+        _finish(pid, "failed", f"Nothing to translate to {name}",
+                error="No written chapters to translate.")
+        return
+
+    _update_story(pid, status="writing", phase="writing")
+    done = 0
+    for position, index in enumerate(indices):
+        if _is_cancelled(pid):
+            return
+        _update_story(pid, progress=_progress(
+            position, len(indices),
+            f"Translating chapter {index + 1} of {len(chapters)} into {name}...",
+            step=position, total_steps=len(indices),
+        ))
+        if _pass_translate(pid, index, target):
+            done += 1
+        _save_story_state(pid)
+    if _is_cancelled(pid):
+        return
+    _finish(pid, "completed", f"Translated {done} chapter(s) into {name}")
+
+
 def _run_story(pid: str, job: dict) -> None:
     """The story worker. One per story, non-daemon (survives a disconnect)."""
     llm_service = None
@@ -1250,6 +1960,11 @@ def _run_story(pid: str, job: dict) -> None:
             return
 
         kind = job.get("kind", "new")
+
+        if kind == "translate":
+            _run_translation(pid, job)
+            return
+
         # Before anything reads the record: a manual edit since the last run
         # invalidated it. No-op on a fresh story (nothing written yet).
         _update_story(pid, status="writing", phase="writing")
@@ -1261,6 +1976,13 @@ def _run_story(pid: str, job: dict) -> None:
             _update_story(pid, status="planning", phase="planning",
                           progress=_progress(0, 1, "Planning new chapters..."))
             _pass_extend_outline(pid, int(job.get("count") or 1))
+            _save_story_state(pid)
+        elif kind == "write_at":
+            # Make room first: the chapter has to exist before it can be
+            # written, and the pass needs its neighbours in place.
+            at = _insert_chapter_live(pid, int(job.get("at_index") or 0))
+            job = dict(job, indices=[at],
+                       instruction=(job.get("brief") or "").strip() or None)
             _save_story_state(pid)
         elif not ((_snapshot(pid) or {}).get("outline") or {}).get("chapters"):
             _update_story(pid, status="planning", phase="planning",
@@ -1276,15 +1998,17 @@ def _run_story(pid: str, job: dict) -> None:
         for index in indices:
             if _is_cancelled(pid):
                 return
-            _pass_chapter(pid, index, job.get("instruction"))
+            _pass_chapter(pid, index, job.get("instruction"),
+                          bridge=(kind == "write_at"))
             if _is_cancelled(pid):
                 return
             _pass_continuity(pid, index)
             _save_story_state(pid)
 
-        # A regenerated middle chapter invalidates the record built from its
-        # old text; replay continuity over the chapters that follow it.
-        if kind == "regenerate" and indices:
+        # A regenerated middle chapter — or a freshly inserted one —
+        # invalidates the record built without it; replay continuity over the
+        # chapters that follow it.
+        if kind in ("regenerate", "write_at") and indices:
             for index in range(max(indices) + 1, len(
                 (_snapshot(pid) or {}).get("chapters") or [],
             )):
@@ -1356,6 +2080,9 @@ def _normalized_params(raw: dict) -> dict:
         chapter_count = None if chapter_count.strip().lower() in ("", "auto") \
             else int(chapter_count)
     return {
+        # Original language of the story; every pass writes in it unless it
+        # is a translation pass. Never changes after the story is created.
+        "language": _lang_code(raw.get("language")) or DEFAULT_LANGUAGE,
         "genre": raw.get("genre") or "",
         "tone": raw.get("tone") or "",
         "pov": raw.get("pov") or "third person limited",
@@ -1505,8 +2232,14 @@ def delete_story(out_dir: str, pid: str) -> dict:
 
 
 def _rehydrate(pid: str, out_dir: str,
-               ensure_model: Optional[Callable[[str], None]]) -> tuple[bool, str]:
-    """Put a saved story back in memory so a worker can continue it."""
+               ensure_model: Optional[Callable[[str], None]],
+               *, reset_run_state: bool = True) -> tuple[bool, str]:
+    """Put a saved story back in memory so a worker can continue it.
+
+    `reset_run_state=False` is for the synchronous operations (analyse,
+    rewrite): they need the story in memory for the LLM helpers but must not
+    erase the completion it already reported.
+    """
     saved = load_story(out_dir, pid)
     if not saved:
         return False, "No saved state found for this story."
@@ -1524,10 +2257,34 @@ def _rehydrate(pid: str, out_dir: str,
         state["out_dir"] = os.path.dirname(filepath) if filepath else out_dir
         state["_ensure_model"] = ensure_model or existing.get("_ensure_model")
         state["_active_stream_id"] = None
-        state["error"] = None
-        state["completed_at"] = None
+        if reset_run_state:
+            state["error"] = None
+            state["completed_at"] = None
         _stories[pid] = state
     return True, "ok"
+
+
+def _for_synchronous_pass(pid: str, out_dir: Optional[str],
+                          ensure_model: Optional[Callable[[str], None]],
+                          ) -> tuple[bool, str]:
+    """Claim a terminal story and load it, for a pass that runs in-thread.
+
+    Caller MUST call _release_story_operation(pid) when done. Used by
+    analyze_story and rewrite_passage: both need the story in `_stories` so
+    the shared LLM helpers can reach params and the ensure_model callback,
+    but neither starts a worker.
+    """
+    with _story_lock:
+        resolved = out_dir or (_stories.get(pid) or {}).get("out_dir")
+    if not resolved:
+        return False, "No output directory for this story."
+    if not _claim_story_operation(pid):
+        return False, "Story is still active; try again shortly."
+    ok, why = _rehydrate(pid, resolved, ensure_model, reset_run_state=False)
+    if not ok:
+        _release_story_operation(pid)
+        return False, why
+    return True, resolved
 
 
 def _start_continuation(pid: str, job: dict, out_dir: Optional[str],
@@ -1597,44 +2354,417 @@ def extend_story(pid: str, additional_chapters: int,
     )
 
 
-@_exclusive_story_operation
-def update_chapter_text(out_dir: str, pid: str, index: int, text: str) -> bool:
-    """Save a manual edit and mark the synopsis stale.
+def _sync_live_from_saved(pid: str, saved: dict) -> None:
+    """Push a saved-state mutation into the in-memory copy, if there is one."""
+    with _story_lock:
+        live = _stories.get(pid)
+        if live is None:
+            return
+        live["chapters"] = [dict(c) for c in (saved.get("chapters") or [])]
+        live["outline"] = saved.get("outline") or live.get("outline") or {}
+        live["synopsis_stale"] = bool(saved.get("synopsis_stale"))
 
-    It's the user's text, so it replaces the generated prose — the model's
-    version is kept in `text_pre_edit` (first edit only). The stale flag
-    makes the next run rebuild the running synopsis from what is actually
-    on the page (`_refresh_synopsis_if_stale`).
+
+def _apply_chapter_text(out_dir: str, pid: str, index: int, text: str,
+                        lang: Optional[str] = None,
+                        title: Optional[str] = None) -> bool:
+    """Write one chapter's text in one language. No operation claim of its own.
+
+    Original language: replaces the prose, keeps the model's version in
+    `text_pre_edit` (first edit only), marks the synopsis stale and marks
+    every translation of the chapter stale.
+    Any other language: replaces that translation only; the original prose
+    and the synopsis are untouched.
     """
     def updater(state: dict) -> None:
         chapters = state.get("chapters") or []
         if not 0 <= index < len(chapters):
             raise IndexError(f"Chapter {index} does not exist")
         chapter = chapters[index]
+        original = _story_language(state)
+        code = _lang_code(lang)
+        if code and code != original:
+            translations = chapter.setdefault("translations", {})
+            entry = translations.setdefault(code, {})
+            entry.update({
+                "title": title if title is not None
+                else (entry.get("title") or chapter.get("title") or ""),
+                "text": text or "",
+                "translated_at": time.time(),
+                # The user has taken ownership of this translation, so it is
+                # no longer "behind the original" as far as the UI goes.
+                "stale": False,
+            })
+            return
         if chapter.get("text_pre_edit") is None:
             chapter["text_pre_edit"] = chapter.get("text") or ""
         chapter["text"] = text or ""
         chapter["word_count"] = _word_count(text)
         chapter["edited"] = True
         chapter["status"] = "done" if (text or "").strip() else "pending"
+        if title is not None:
+            chapter["title"] = title
         state["synopsis_stale"] = True
+        _mark_translations_stale(chapter)
 
     saved = _update_saved_story(out_dir, pid, updater)
     if saved is None:
         return False
-    with _story_lock:
-        live = _stories.get(pid)
-        if live is not None:
-            live["chapters"] = [dict(c) for c in (saved.get("chapters") or [])]
-            live["synopsis_stale"] = True
+    _sync_live_from_saved(pid, saved)
     return True
 
 
-def export_story(out_dir: str, pid: str, fmt: str = "md") -> str:
+@_exclusive_story_operation
+def update_chapter_text(out_dir: str, pid: str, index: int, text: str,
+                        lang: Optional[str] = None) -> bool:
+    """Save a manual edit of one chapter, in the original or a translation.
+
+    Original language (`lang` None or the story's own language): the user's
+    text replaces the generated prose, the model's version is kept in
+    `text_pre_edit` (first edit only), the synopsis is marked stale so the
+    next run rebuilds it from what is actually on the page
+    (`_refresh_synopsis_if_stale`), and every translation of this chapter is
+    marked `stale` — a hint for the UI, nothing is deleted.
+
+    Any other language: only `translations[lang]` changes.
+    """
+    return _apply_chapter_text(out_dir, pid, index, text, lang)
+
+
+@_exclusive_story_operation
+def insert_chapter(out_dir: str, pid: str, at_index: int, title: str = "",
+                   text: str = "") -> bool:
+    """Insert an empty (or given) chapter at `at_index` and renumber the rest.
+
+    `at_index` is clamped to 0..len(chapters), so len() appends. The outline's
+    plan list is kept aligned and the new chapter gets no beats.
+    """
+    def updater(state: dict) -> None:
+        _insert_into_state(state, at_index, title, text)
+
+    saved = _update_saved_story(out_dir, pid, updater)
+    if saved is None:
+        return False
+    _sync_live_from_saved(pid, saved)
+    return True
+
+
+@_exclusive_story_operation
+def delete_chapter(out_dir: str, pid: str, index: int) -> bool:
+    """Delete one chapter and renumber the rest. False if it does not exist."""
+    removed = []
+
+    def updater(state: dict) -> None:
+        removed.append(_delete_from_state(state, index))
+
+    saved = _update_saved_story(out_dir, pid, updater)
+    if saved is None or not removed or not removed[0]:
+        return False
+    _sync_live_from_saved(pid, saved)
+    return True
+
+
+def write_chapter_at(pid: str, at_index: int, brief: str = "",
+                     out_dir: Optional[str] = None,
+                     ensure_model: Optional[Callable[[str], None]] = None,
+                     ) -> tuple[bool, str]:
+    """Insert a chapter at `at_index` and have the model write it.
+
+    The pass sees the outline, the story as it stood at that point, the end
+    of the previous chapter AND the beginning of the following one, so the
+    new chapter fits the seam instead of restarting the story
+    (`build_chapter_context(..., bridge=True)`). Afterwards the continuity
+    record is replayed over the chapters that follow, reusing the same
+    replay a mid-story regeneration triggers.
+    """
+    at_index = int(at_index)
+    known = get_story(pid) or load_story(out_dir or "", pid) or {}
+    if known and not 0 <= at_index <= len(known.get("chapters") or []):
+        return False, f"Cannot insert a chapter at position {at_index + 1}."
+    return _start_continuation(
+        pid,
+        {"kind": "write_at", "at_index": at_index, "brief": brief or ""},
+        out_dir, ensure_model, f"Writing a new chapter {at_index + 1}...",
+    )
+
+
+def translate_story(pid: str, target_lang: str, out_dir: Optional[str] = None,
+                    ensure_model: Optional[Callable[[str], None]] = None,
+                    ) -> tuple[bool, str]:
+    """Translate every written chapter into `target_lang` in a worker thread.
+
+    One pass per chapter, stored under `chapter["translations"][lang]`; the
+    original prose is never touched. Cancellable between chapters like any
+    other story run.
+    """
+    code = _lang_code(target_lang)
+    if not code:
+        return False, f"'{target_lang}' is not a usable language code."
+    known = get_story(pid) or load_story(out_dir or "", pid) or {}
+    if known and code == _story_language(known):
+        return False, f"The story is already written in {language_name(code)}."
+    return _start_continuation(
+        pid, {"kind": "translate", "lang": code}, out_dir, ensure_model,
+        f"Translating the story into {language_name(code)}...",
+    )
+
+
+def retranslate_chapter(pid: str, index: int, target_lang: str,
+                        out_dir: Optional[str] = None,
+                        ensure_model: Optional[Callable[[str], None]] = None,
+                        ) -> tuple[bool, str]:
+    """Translate one chapter again (e.g. after the original was edited)."""
+    index = int(index)
+    code = _lang_code(target_lang)
+    if not code:
+        return False, f"'{target_lang}' is not a usable language code."
+    known = get_story(pid) or load_story(out_dir or "", pid) or {}
+    if known and not 0 <= index < len(known.get("chapters") or []):
+        return False, f"Chapter {index + 1} does not exist."
+    if known and code == _story_language(known):
+        return False, f"The story is already written in {language_name(code)}."
+    return _start_continuation(
+        pid, {"kind": "translate", "lang": code, "indices": [index]},
+        out_dir, ensure_model,
+        f"Translating chapter {index + 1} into {language_name(code)}...",
+    )
+
+
+def rewrite_passage(pid: str, index: int, selected_text: str, instruction: str,
+                    lang: Optional[str] = None, out_dir: Optional[str] = None,
+                    ensure_model: Optional[Callable[[str], None]] = None,
+                    ) -> dict:
+    """Rewrite one marked passage of a chapter. Returns the replacement only.
+
+    Returns {"ok", "replacement", "before", "after"} — `before`/`after` are
+    the ~REWRITE_CONTEXT_CHARS of prose on either side that the model was
+    given, so the caller can show the seam. Nothing is written: applying it
+    is a separate call (`apply_passage_rewrite`).
+
+    The passage is located by EXACT match in the chapter text of the given
+    language. Not found, or found more than once, is an error with a clear
+    reason — never a guess at which occurrence was meant.
+    """
+    def fail(reason: str, **extra) -> dict:
+        return {"ok": False, "error": reason, "replacement": "",
+                "before": "", "after": "", **extra}
+
+    index = int(index)
+    selected_text = selected_text or ""
+    if not selected_text.strip():
+        return fail("No passage was selected.")
+    if not (instruction or "").strip():
+        return fail("No rewrite instruction was given.")
+
+    ok, resolved = _for_synchronous_pass(pid, out_dir, ensure_model)
+    if not ok:
+        return fail(resolved)
+    try:
+        state = _snapshot(pid) or {}
+        chapters = state.get("chapters") or []
+        if not 0 <= index < len(chapters):
+            return fail(f"Chapter {index + 1} does not exist.")
+        original = _story_language(state)
+        code = _lang_code(lang) or original
+        title, text = _chapter_view(chapters[index], code, original)
+        if not text.strip():
+            return fail(
+                f"Chapter {index + 1} has no text in {language_name(code)}."
+                if code != original else f"Chapter {index + 1} is empty."
+            )
+        occurrences = text.count(selected_text)
+        if occurrences == 0:
+            return fail(
+                "The selected passage was not found in chapter "
+                f"{index + 1} ({language_name(code)}). It may have been edited "
+                "since — reload the chapter and select it again.",
+                occurrences=0,
+            )
+        if occurrences > 1:
+            return fail(
+                f"The selected passage appears {occurrences} times in chapter "
+                f"{index + 1}. Extend the selection so it is unique.",
+                occurrences=occurrences,
+            )
+
+        start = text.index(selected_text)
+        end = start + len(selected_text)
+        before = text[max(0, start - REWRITE_CONTEXT_CHARS):start]
+        after = text[end:end + REWRITE_CONTEXT_CHARS]
+
+        params = state.get("params") or {}
+        user_prompt = "\n".join([
+            f'Story: {state.get("title") or "(untitled)"} — chapter '
+            f'{index + 1} of {len(chapters)}: {title}',
+            f"Language: {language_name(code)} ({code})",
+            f"Genre: {params.get('genre') or 'unspecified'}",
+            f"Tone: {params.get('tone') or 'unspecified'}",
+            f"Point of view: {params.get('pov') or 'third person limited'}",
+            f"Tense: {params.get('tense') or 'past'}",
+            f"Target audience: {params.get('audience') or 'adult general readership'}",
+            "",
+            "=== CONTEXT BEFORE THE PASSAGE (do not rewrite, do not repeat) ===",
+            before or "(the passage starts the chapter)",
+            "",
+            "=== THE MARKED PASSAGE (rewrite exactly this) ===",
+            selected_text,
+            "",
+            "=== CONTEXT AFTER THE PASSAGE (do not rewrite, do not repeat) ===",
+            after or "(the passage ends the chapter)",
+            "",
+            "=== THE AUTHOR'S INSTRUCTION ===",
+            instruction.strip(),
+            "",
+            f"The marked passage is {_word_count(selected_text)} words long. "
+            "Output only the replacement for it.",
+        ])
+        model_id = _pick_model("story_prose", params.get("prose_model"))
+        raw = _run_llm(
+            pid, f"rewrite-{index + 1}",
+            model_id=model_id,
+            system_prompt=_system_prompt("rewrite", "chapter_explicit", params,
+                                         language=code),
+            user_prompt=user_prompt,
+            stream_id=f"story-{pid}-rw{index}",
+            # "make it longer" needs real headroom over the selection.
+            max_new_tokens=chapter_token_budget(
+                max(MIN_CHAPTER_WORDS, _word_count(selected_text) * 3)),
+            temperature=float(params.get("temperature") or DEFAULT_PROSE_TEMPERATURE),
+        )
+        replacement = _clean_prose(raw)
+        if not replacement:
+            return fail("The rewrite pass came back empty.")
+        if _HAVE_SAFETY_SCAN:
+            try:
+                assert_no_minor_content(replacement, "story passage rewrite")
+            except SafetyViolationError as exc:
+                return fail(f"Blocked by the content safety scan: {exc}")
+        return {"ok": True, "replacement": replacement,
+                "before": before, "after": after}
+    except Exception as exc:  # noqa: BLE001 - reported, never raised at the endpoint
+        traceback.print_exc()
+        return fail(f"Rewrite failed: {exc}")
+    finally:
+        _update_story(pid, _active_stream_id=None)
+        _release_story_operation(pid)
+
+
+@_exclusive_story_operation
+def apply_passage_rewrite(out_dir: str, pid: str, index: int, selected_text: str,
+                          replacement: str, lang: Optional[str] = None) -> bool:
+    """Splice a rewrite into the chapter. False unless the match is unique.
+
+    Re-checks the match against what is on disk NOW: the text may have been
+    edited between rewrite_passage() and this call, and replacing the wrong
+    occurrence would silently corrupt the chapter.
+    """
+    index = int(index)
+    state = load_story(out_dir, pid)
+    if not state:
+        return False
+    chapters = state.get("chapters") or []
+    if not 0 <= index < len(chapters) or not (selected_text or ""):
+        return False
+    original = _story_language(state)
+    code = _lang_code(lang) or original
+    _, text = _chapter_view(chapters[index], code, original)
+    if text.count(selected_text) != 1:
+        return False
+    return _apply_chapter_text(
+        out_dir, pid, index,
+        text.replace(selected_text, replacement or "", 1),
+        None if code == original else code,
+    )
+
+
+def analyze_story(pid: str, out_dir: Optional[str] = None,
+                  ensure_model: Optional[Callable[[str], None]] = None,
+                  lang: Optional[str] = None) -> dict:
+    """Audit the whole story: characters, dialogue map, issues, timeline.
+
+    Runs ONE schema-constrained pass per written chapter — a full novel never
+    fits in one context — plus one short verdict pass at the end, and merges
+    the results server-side (`_merge_chapter_analyses`, which documents every
+    merge rule). Characters are merged by case-folded name with their chapter
+    lists unioned; every chapter number the model chose is validated against
+    the real chapter count and dropped and counted (`dropped_refs`) when it
+    names a chapter that does not exist.
+
+    Every `chapter` field in the result is a 0-based state index. The result
+    is also persisted in the story state under `analysis`, with `analyzed_at`.
+
+    Runs in the calling thread (minutes for a long book) and holds the story's
+    exclusive-operation claim while it does.
+    # ponytail: not cancellable — stop_story only reaches active workers. Make
+    # it a worker job if users start aborting analyses of 40-chapter books.
+    """
+    ok, resolved = _for_synchronous_pass(pid, out_dir, ensure_model)
+    if not ok:
+        return {"ok": False, "error": resolved}
+    prior_progress = (_snapshot(pid) or {}).get("progress")
+    try:
+        state = _snapshot(pid) or {}
+        original = _story_language(state)
+        code = _lang_code(lang) or original
+        chapters = state.get("chapters") or []
+        indices = [
+            i for i, chapter in enumerate(chapters)
+            if (_chapter_view(chapter, code, original)[1] or "").strip()
+        ]
+        if not indices:
+            return {"ok": False, "error": (
+                f"Nothing to analyse in {language_name(code)}."
+                if code != original else "This story has no written chapters."
+            )}
+
+        entries = []
+        for position, index in enumerate(indices):
+            _update_story(pid, progress=_progress(
+                position, len(indices),
+                f"Analysing chapter {index + 1} of {len(chapters)}...",
+                step=position, total_steps=len(indices) + 1,
+            ))
+            entries.append((index, _pass_analyze_chapter(pid, index, code)))
+
+        analysis = _merge_chapter_analyses(entries, len(chapters))
+        _update_story(pid, progress=_progress(
+            len(indices), len(indices), "Writing the overall assessment...",
+            step=len(indices), total_steps=len(indices) + 1,
+        ))
+        analysis["summary"] = _pass_analyze_summary(
+            pid, analysis["timeline"], analysis["issues"], code,
+        ) or " ".join(e["summary"] for e in analysis["timeline"] if e["summary"])
+        analysis.update({
+            "ok": True,
+            "language": code,
+            "chapters_analyzed": len(indices),
+            "analyzed_at": time.time(),
+        })
+        _update_story(pid, analysis=analysis)
+        # Put the story's own progress back before it is persisted — the
+        # analysis is not a run and must not leave "Analysing chapter 3" in
+        # the state file.
+        if prior_progress:
+            _update_story(pid, progress=prior_progress)
+        _save_story_state(pid)
+        return analysis
+    except Exception as exc:  # noqa: BLE001 - reported, never raised at the endpoint
+        traceback.print_exc()
+        return {"ok": False, "error": f"Analysis failed: {exc}"}
+    finally:
+        _update_story(pid, _active_stream_id=None)
+        if prior_progress:
+            _update_story(pid, progress=prior_progress)
+        _release_story_operation(pid)
+
+
+def export_story(out_dir: str, pid: str, fmt: str = "md",
+                 lang: Optional[str] = None) -> str:
     """Write the story as .md or .txt into the workspace, return the path.
 
     Writing it into out_dir is what makes it show up as a text output
-    (§1.3) and what "Create audiobook" later reads.
+    (§1.3) and what "Create audiobook" later reads. A translation exports to
+    its own file (`..._de.md`) so it never overwrites the original.
     """
     fmt = (fmt or "md").lower().lstrip(".")
     if fmt not in ("md", "txt"):
@@ -1642,8 +2772,10 @@ def export_story(out_dir: str, pid: str, fmt: str = "md") -> str:
     state = load_story(out_dir, pid) or get_story(pid)
     if not state:
         raise FileNotFoundError(f"No story {pid}")
-    content = format_story(state, fmt)
-    filename = f"story_{_safe_slug(state.get('title') or '')}_{pid}.{fmt}"
+    content = format_story(state, fmt, lang)
+    code = _lang_code(lang)
+    suffix = f"_{code}" if code and code != _story_language(state) else ""
+    filename = f"story_{_safe_slug(state.get('title') or '')}_{pid}{suffix}.{fmt}"
     filepath = _find_story_file(out_dir, pid)
     story_dir = os.path.dirname(filepath) if filepath else out_dir
     os.makedirs(story_dir, exist_ok=True)
@@ -1732,6 +2864,144 @@ def _self_check() -> None:
     assert abs(_word_count(build_chapter_context(grown, 2)) - _word_count(
         build_chapter_context(state, 2))) < 50, "context is length-independent"
 
+    # 2b. Language helpers.
+    assert _lang_code("DE") == "de" and _lang_code("de_DE") == "de-de"
+    assert _lang_code(None) == "" and _lang_code("not a code") == ""
+    assert language_name("de") == "German" and language_name("de-DE") == "German"
+    assert language_name("xx") == "xx", "unknown codes pass through"
+    assert _story_language({"params": {}}) == DEFAULT_LANGUAGE, "old stories are 'en'"
+    assert _story_language({"params": {"language": "FR"}}) == "fr"
+    assert story_languages({
+        "params": {"language": "de"},
+        "chapters": [{"translations": {"en": {"text": "x"}}},
+                     {"translations": {"en": {"text": "y"}, "fr": {"text": "z"}}},
+                     {"translations": {"de": {"text": "ignored"}}}],
+    }) == ["de", "en", "fr"], "original first, translations sorted, self excluded"
+    assert story_languages({}) == [DEFAULT_LANGUAGE]
+
+    # 2c. Translation reply splitting.
+    assert _split_translated("Kapitel Eins\n\nEr ging.", "old") == ("Kapitel Eins", "Er ging.")
+    assert _split_translated("Titel: Salz\n\nSie tauchte.", "old")[0] == "Salz"
+    # A first line that reads like prose is prose — the title is not eaten.
+    assert _split_translated("Er ging fort.\n\nDann kam sie.", "old") == \
+        ("old", "Er ging fort.\n\nDann kam sie.")
+    assert _split_translated("", "old") == ("old", "")
+
+    # 2d. Chapter views and stale marking.
+    chapter = {"index": 0, "title": "One", "text": "English prose.",
+               "translations": {"de": {"title": "Eins", "text": "Deutsche Prosa.",
+                                       "stale": False}}}
+    assert _chapter_view(chapter, None, "en") == ("One", "English prose.")
+    assert _chapter_view(chapter, "en", "en") == ("One", "English prose.")
+    assert _chapter_view(chapter, "de", "en") == ("Eins", "Deutsche Prosa.")
+    assert _chapter_view(chapter, "fr", "en") == ("One", ""), "missing translation is empty"
+    _mark_translations_stale(chapter)
+    assert chapter["translations"]["de"]["stale"] is True
+    assert chapter["text"] == "English prose.", "marking stale changes no text"
+
+    # 2e. Insert / delete renumber everything that carries a chapter index.
+    doc = {
+        "chapters": [
+            {"index": 0, "title": "A", "text": "a"},
+            {"index": 1, "title": "B", "text": "b"},
+            {"index": 2, "title": "C", "text": "c"},
+        ],
+        "outline": {"chapters": [{"title": "A"}, {"title": "B"}, {"title": "C"}]},
+    }
+    assert _insert_into_state(doc, 1, title="NEW") == 1
+    assert [c["index"] for c in doc["chapters"]] == [0, 1, 2, 3]
+    assert [c["title"] for c in doc["chapters"]] == ["A", "NEW", "B", "C"]
+    assert doc["chapters"][1]["text"] == "" and doc["chapters"][1]["beats"] == []
+    assert doc["chapters"][1]["status"] == "pending"
+    assert doc["chapters"][1]["translations"] == {}
+    assert [c["title"] for c in doc["outline"]["chapters"]] == ["A", "NEW", "B", "C"]
+    assert not doc.get("synopsis_stale"), "an empty insert changes no prose"
+    assert _insert_into_state(doc, 99, title="TAIL", text="tail prose") == 4, "clamped -> append"
+    assert doc["chapters"][4]["index"] == 4 and doc["chapters"][4]["status"] == "done"
+    assert doc["chapters"][4]["word_count"] == 2 and doc["synopsis_stale"] is True
+    doc["synopsis_stale"] = False
+    assert _delete_from_state(doc, 4) is True and _delete_from_state(doc, 1) is True
+    assert [c["title"] for c in doc["chapters"]] == ["A", "B", "C"]
+    assert [c["index"] for c in doc["chapters"]] == [0, 1, 2]
+    assert [c["title"] for c in doc["outline"]["chapters"]] == ["A", "B", "C"]
+    assert doc["synopsis_stale"] is True, "deleting written prose invalidates the record"
+    assert _delete_from_state(doc, 9) is False
+    # Renumbering keeps format_story's chapter numbers contiguous.
+    assert "## 3. C" in format_story(dict(doc, title="T"), "md")
+
+    # 2f. Seam context for an inserted chapter (bridge=True).
+    seam = {
+        "params": {"min_pages": 12, "language": "de"},
+        "outline": {"title": "Der Salzweg", "logline": "L",
+                    "chapters": [{"title": "A"}, {"title": ""}, {"title": "C"}]},
+        "synopsis_running": "SYNOPSIS AFTER THE WHOLE STORY",
+        "chapters": [
+            {"index": 0, "title": "A", "text": "vorher " * 20 + "PREVEND",
+             "status": "done"},
+            {"index": 1, "title": "", "beats": [], "text": "", "status": "pending"},
+            {"index": 2, "title": "C", "text": "NEXTHEAD " + "spaeter " * 900,
+             "status": "done", "synopsis_at_start": "SYNOPSIS BEFORE C"},
+        ],
+    }
+    seam_ctx = build_chapter_context(seam, 1, instruction="ein ruhiges Zwischenspiel",
+                                     bridge=True)
+    assert "PREVEND" in seam_ctx, "end of the previous chapter"
+    assert "NEXTHEAD" in seam_ctx, "beginning of the following chapter"
+    assert "SYNOPSIS BEFORE C" in seam_ctx, "the story as it stood at the seam"
+    assert "SYNOPSIS AFTER THE WHOLE STORY" not in seam_ctx, "not the ending"
+    assert "ein ruhiges Zwischenspiel" in seam_ctx, "the brief is the instruction"
+    assert "German (de)" in seam_ctx, "the story's language reaches the pass"
+    assert "NEXTHEAD" not in build_chapter_context(seam, 1), "only in bridge mode"
+    assert _word_count(_head_words("w " * 5000)) == CONTEXT_HEAD_WORDS
+    assert _word_count(seam_ctx) < 2600, "the seam context stays flat too"
+
+    # 2g. Analysis merge: characters unioned, invented chapter indices dropped.
+    merged = _merge_chapter_analyses([
+        (0, {"characters": [{"name": "Ada", "role": "protagonist",
+                             "description": "A tester.", "traits": ["dry"]},
+                            {"name": "Bo", "traits": ["loud"]}],
+             "dialogue": [{"speaker": "Ada", "line_excerpt": "It compiles."}],
+             "issues": [
+                 {"kind": "plot_hole", "severity": "high", "chapter": 1,
+                  "description": "Fixes itself.", "suggestion": "Show it."},
+                 {"kind": "vibes", "severity": "catastrophic", "chapter": 2,
+                  "description": "Unknown vocabulary."},
+                 {"kind": "timeline", "severity": "low", "chapter": 99,
+                  "description": "Invented chapter."},
+                 {"kind": "pacing", "severity": "low", "chapter": "nonsense",
+                  "description": "Unparseable chapter."},
+                 {"kind": "character", "severity": "low",
+                  "description": "No chapter given."},
+             ],
+             "when": "day one", "where": "the lab", "summary": "Ada tested."}),
+        (1, {"characters": [{"name": "ada", "traits": ["dry", "stubborn"]}],
+             "dialogue": [{"speaker": "Bo", "line_excerpt": ""}],
+             "issues": [], "summary": "Bo shouted."}),
+    ], total_chapters=2)
+    assert [c["name"] for c in merged["characters"]] == ["Ada", "Bo"], merged["characters"]
+    ada = merged["characters"][0]
+    assert ada["chapters"] == [0, 1] and ada["first_chapter"] == 0 and ada["last_chapter"] == 1
+    assert ada["role"] == "protagonist" and ada["description"] == "A tester."
+    assert ada["traits"] == ["dry", "stubborn"], "traits unioned, no duplicates"
+    assert merged["dropped_refs"] == 2, "invented and unparseable chapter refs"
+    assert [(i["kind"], i["severity"], i["chapter"]) for i in merged["issues"]] == [
+        ("plot_hole", "high", 0), ("character", "low", 0), ("continuity", "medium", 1),
+    ], merged["issues"]
+    assert [d["speaker"] for d in merged["dialogue_map"]] == ["Ada"], "empty lines dropped"
+    assert merged["dialogue_map"][0]["chapter"] == 0
+    assert [t["chapter"] for t in merged["timeline"]] == [0, 1]
+    assert merged["timeline"][1]["when"] == "unclear", "missing when is not invented"
+    assert merged["truncated"] is False
+    # The dialogue map is bounded, and says so.
+    flood = _merge_chapter_analyses([
+        (i, {"dialogue": [{"speaker": "A", "line_excerpt": f"line {j}"}
+                          for j in range(ANALYZE_DIALOGUE_PER_CHAPTER + 10)],
+             "characters": [], "issues": []})
+        for i in range(8)
+    ], total_chapters=8)
+    assert len(flood["dialogue_map"]) == MAX_DIALOGUE_ENTRIES
+    assert flood["truncated"] is True
+
     # 3. Absorbing cancel semantics.
     pid = "selftest1"
     with _story_lock:
@@ -1809,8 +3079,45 @@ def _self_check() -> None:
             out = {"synopsis": "Ada tested things.",
                    "characters": [{"name": "Ada", "state": "in the lab"}],
                    "open_threads": ["the build is red"]}
+        elif "dialogue" in props:
+            # One pass per chapter. The first chapter also names a chapter
+            # that does not exist and uses vocabulary outside the schema —
+            # both must be handled server-side, not stored.
+            first = (kwargs.get("stream_id") or "").endswith("ch0")
+            out = {
+                "characters": [
+                    {"name": "Ada", "role": "protagonist",
+                     "description": "A tester.", "traits": ["dry", "stubborn"]},
+                    {"name": "Bo", "description": "A colleague.",
+                     "traits": ["loud"]},
+                ] if first else [
+                    {"name": "ada", "role": "", "description": "",
+                     "traits": ["stubborn", "tired"]},
+                ],
+                "dialogue": [{"speaker": "Ada", "line_excerpt": "It compiles.",
+                              "context": "reporting the build"}],
+                "issues": [
+                    {"kind": "plot_hole", "severity": "high", "chapter": 1,
+                     "description": "The build fixes itself.",
+                     "suggestion": "Show the fix."},
+                    {"kind": "vibes", "severity": "catastrophic", "chapter": 2,
+                     "description": "Unknown vocabulary."},
+                    {"kind": "timeline", "severity": "low", "chapter": 99,
+                     "description": "A chapter that does not exist."},
+                ] if first else [],
+                "when": "day one", "where": "the lab",
+                "summary": "Ada tested things.",
+            }
+        elif "summary" in props:
+            out = {"summary": "A tidy little test story."}
         else:
-            fake._stream_buffer = "## Chapter\n\n" + "word " * 120
+            stream_id = kwargs.get("stream_id") or ""
+            if "-tr-" in stream_id:
+                fake._stream_buffer = "Kapitel Eins\n\n[de] " + "wort " * 50
+            elif "-rw" in stream_id:
+                fake._stream_buffer = "REWRITTEN."
+            else:
+                fake._stream_buffer = "## Chapter\n\n" + "word " * 120
             return fake._stream_buffer
         fake._stream_buffer = json.dumps(out)
         return fake._stream_buffer
@@ -1941,6 +3248,195 @@ def _self_check() -> None:
         assert set(regenerated["progress"]) == {
             "current", "total", "message", "step", "total_steps"}
 
+        # 6b. Translation roundtrip: originals untouched, own stream ids.
+        chapter_total = len(regenerated["chapters"])
+        ok, why = translate_story(story_id, "DE", out_dir=workdir,
+                                  ensure_model=loaded_models.append)
+        assert ok, why
+        thread = _story_threads.get(story_id)
+        if thread:
+            thread.join(timeout=30)
+        translated = get_story(story_id)
+        assert translated["status"] == "completed", translated.get("error")
+        assert translated["languages"] == ["en", "de"], translated["languages"]
+        for chapter in translated["chapters"]:
+            entry = chapter["translations"]["de"]
+            assert entry["title"] == "Kapitel Eins"
+            assert entry["text"].startswith("[de] ") and entry["stale"] is False
+            assert entry["translated_at"] > 0
+        assert translated["chapters"][0]["text"] == "My own words.", "original kept"
+        tr_calls = [c for c in fake.calls if "-tr-de-" in (c.get("stream_id") or "")]
+        assert len(tr_calls) == chapter_total, tr_calls
+        assert tr_calls[0]["stream_id"] == f"story-{story_id}-tr-de-ch0"
+        assert all(c["temperature"] == TRANSLATE_TEMPERATURE for c in tr_calls)
+        assert all(c.get("json_schema") is None for c in tr_calls)
+        assert "German (de)" in tr_calls[0]["system_prompt"], "target language, not source"
+        assert load_story(workdir, story_id)["languages"] == ["en", "de"]
+        # A translation exports to its own file and carries the translated prose.
+        de_path = export_story(workdir, story_id, "md", lang="de")
+        assert de_path.endswith("_de.md")
+        with open(de_path, encoding="utf-8") as handle:
+            de_text = handle.read()
+        assert "[de] wort" in de_text and "My own words." not in de_text
+
+        # 6c. Editing the original marks its translations stale; editing a
+        #     translation touches nothing else.
+        assert update_chapter_text(workdir, story_id, 1,
+                                   "Alpha one. Beta two. Alpha one.") is True
+        edited = load_story(workdir, story_id)
+        assert edited["chapters"][1]["translations"]["de"]["stale"] is True
+        assert edited["chapters"][0]["translations"]["de"]["stale"] is False, \
+            "only the edited chapter goes stale"
+        assert edited["synopsis_stale"] is True
+        assert update_chapter_text(workdir, story_id, 1, "Meine Worte.",
+                                   lang="de") is True
+        tr_edited = load_story(workdir, story_id)
+        assert tr_edited["chapters"][1]["translations"]["de"]["text"] == "Meine Worte."
+        assert tr_edited["chapters"][1]["translations"]["de"]["stale"] is False
+        assert tr_edited["chapters"][1]["text"] == "Alpha one. Beta two. Alpha one.", \
+            "the original is not touched by a translation edit"
+
+        # 6d. Re-translating one chapter refreshes only that chapter.
+        ok, why = retranslate_chapter(story_id, 0, "de", out_dir=workdir,
+                                      ensure_model=loaded_models.append)
+        assert ok, why
+        thread = _story_threads.get(story_id)
+        if thread:
+            thread.join(timeout=30)
+        retranslated = get_story(story_id)
+        assert retranslated["status"] == "completed", retranslated.get("error")
+        assert retranslated["chapters"][0]["translations"]["de"]["stale"] is False
+        assert retranslated["chapters"][1]["translations"]["de"]["text"] == "Meine Worte."
+        assert retranslated["synopsis_stale"] is True, "translating rebuilds nothing"
+        assert retranslate_chapter(story_id, 0, "en", out_dir=workdir)[0] is False
+        assert retranslate_chapter(story_id, 99, "de", out_dir=workdir)[1] \
+            .endswith("does not exist.")
+        assert translate_story(story_id, "en", out_dir=workdir)[0] is False, \
+            "the original language is not a translation target"
+        assert translate_story(story_id, "!!", out_dir=workdir)[0] is False
+        assert not any_story_active(), "a rejected translation leaves no worker"
+
+        # 6e. Passage rewrite: unique match only, and applying it is separate.
+        good = rewrite_passage(story_id, 1, "Beta two.", "make it darker",
+                               out_dir=workdir, ensure_model=loaded_models.append)
+        assert good["ok"] is True, good.get("error")
+        assert good["replacement"] == "REWRITTEN."
+        assert good["before"] == "Alpha one. " and good["after"] == " Alpha one."
+        rewrite_call = [c for c in fake.calls
+                        if (c.get("stream_id") or "").endswith("-rw1")][-1]
+        assert "Beta two." in rewrite_call["prompt"]
+        assert "make it darker" in rewrite_call["prompt"]
+        assert "Point of view" in rewrite_call["prompt"], "style params reach the pass"
+        missing = rewrite_passage(story_id, 1, "Gamma three.", "x", out_dir=workdir)
+        assert missing["ok"] is False and "not found" in missing["error"]
+        ambiguous = rewrite_passage(story_id, 1, "Alpha one.", "x", out_dir=workdir)
+        assert ambiguous["ok"] is False and ambiguous["occurrences"] == 2
+        assert "appears 2 times" in ambiguous["error"], ambiguous["error"]
+        assert rewrite_passage(story_id, 1, "Beta two.", "  ", out_dir=workdir)["ok"] \
+            is False, "an empty instruction is rejected before the model runs"
+        assert rewrite_passage(story_id, 1, "", "x", out_dir=workdir)["ok"] is False
+        assert rewrite_passage(story_id, 99, "x", "y", out_dir=workdir)["ok"] is False
+        assert rewrite_passage(story_id, 1, "Meine Worte.", "kürzer", lang="de",
+                               out_dir=workdir)["ok"] is True, "translations too"
+        assert not any_story_active(), "a rewrite releases its claim"
+
+        assert apply_passage_rewrite(workdir, story_id, 1, "Beta two.",
+                                     "REWRITTEN.") is True
+        applied = load_story(workdir, story_id)
+        assert applied["chapters"][1]["text"] == "Alpha one. REWRITTEN. Alpha one."
+        assert applied["chapters"][1]["translations"]["de"]["stale"] is True, \
+            "the original changed under the translation"
+        assert apply_passage_rewrite(workdir, story_id, 1, "Alpha one.", "X") is False, \
+            "ambiguous match is never guessed at"
+        assert apply_passage_rewrite(workdir, story_id, 1, "Nope.", "X") is False
+        assert load_story(workdir, story_id)["chapters"][1]["text"] == \
+            "Alpha one. REWRITTEN. Alpha one.", "a refused apply changes nothing"
+
+        # 6f. Insert / delete renumber the saved state and the plan list.
+        assert insert_chapter(workdir, story_id, 1, title="Inserted") is True
+        inserted = load_story(workdir, story_id)
+        assert [c["index"] for c in inserted["chapters"]] == \
+            list(range(chapter_total + 1))
+        assert inserted["chapters"][1]["title"] == "Inserted"
+        assert inserted["chapters"][1]["text"] == ""
+        assert inserted["chapters"][1]["beats"] == []
+        assert inserted["chapters"][2]["text"].startswith("Alpha one."), "moved down"
+        assert len(inserted["outline"]["chapters"]) == len(inserted["chapters"])
+        assert insert_chapter(workdir, story_id, 999, title="Tail",
+                              text="Tail prose.") is True
+        appended = load_story(workdir, story_id)
+        assert appended["chapters"][-1]["title"] == "Tail"
+        assert appended["chapters"][-1]["index"] == len(appended["chapters"]) - 1
+        assert appended["chapters"][-1]["status"] == "done"
+        assert delete_chapter(workdir, story_id, len(appended["chapters"]) - 1) is True
+        assert delete_chapter(workdir, story_id, 1) is True
+        assert delete_chapter(workdir, story_id, 99) is False
+        restored = load_story(workdir, story_id)
+        assert [c["index"] for c in restored["chapters"]] == list(range(chapter_total))
+        assert [c["title"] for c in restored["chapters"]] == \
+            [c["title"] for c in translated["chapters"]], "back to the original set"
+        assert len(restored["outline"]["chapters"]) == chapter_total
+
+        # 6g. write_chapter_at: inserts, writes to fit the seam, renumbers.
+        ok, why = write_chapter_at(story_id, 1, brief="a quiet interlude",
+                                   out_dir=workdir,
+                                   ensure_model=loaded_models.append)
+        assert ok, why
+        thread = _story_threads.get(story_id)
+        if thread:
+            thread.join(timeout=30)
+        bridged = get_story(story_id)
+        assert bridged["status"] == "completed", bridged.get("error")
+        assert len(bridged["chapters"]) == chapter_total + 1
+        assert [c["index"] for c in bridged["chapters"]] == \
+            list(range(chapter_total + 1))
+        assert bridged["chapters"][1]["status"] == "done"
+        assert bridged["chapters"][1]["word_count"] == 120
+        assert bridged["chapters"][1]["instruction"] == "a quiet interlude"
+        assert bridged["chapters"][2]["text"] == "Alpha one. REWRITTEN. Alpha one."
+        seam_prompt = [c for c in fake.calls
+                       if c.get("stream_id") == f"story-{story_id}-ch1"][-1]["prompt"]
+        assert "BEGINNING OF THE FOLLOWING CHAPTER" in seam_prompt
+        assert "Alpha one." in seam_prompt, "the following chapter is in the context"
+        assert "a quiet interlude" in seam_prompt
+        assert write_chapter_at(story_id, 999, out_dir=workdir)[0] is False
+        assert not any_story_active()
+
+        # 6h. Analysis: per-chapter passes merged, invented indices discarded.
+        analysis = analyze_story(story_id, out_dir=workdir,
+                                 ensure_model=loaded_models.append)
+        assert analysis["ok"] is True, analysis.get("error")
+        total_now = len(bridged["chapters"])
+        assert analysis["chapters_analyzed"] == total_now
+        an_calls = [c for c in fake.calls if "-an-ch" in (c.get("stream_id") or "")]
+        assert len(an_calls) == total_now, "one pass per chapter, never one big one"
+        assert all(c["temperature"] == ANALYZE_TEMPERATURE for c in an_calls)
+        assert all(c.get("json_schema") for c in an_calls), "schema-constrained"
+        names = [c["name"] for c in analysis["characters"]]
+        assert names == ["Ada", "Bo"], names
+        ada = analysis["characters"][0]
+        assert ada["chapters"] == list(range(total_now)), ada
+        assert ada["first_chapter"] == 0 and ada["last_chapter"] == total_now - 1
+        assert ada["role"] == "protagonist" and ada["description"] == "A tester."
+        assert ada["traits"] == ["dry", "stubborn", "tired"]
+        assert analysis["dropped_refs"] == 1, "the invented chapter index is counted"
+        assert all(0 <= i["chapter"] < total_now for i in analysis["issues"])
+        assert ("plot_hole", "high", 0) in {
+            (i["kind"], i["severity"], i["chapter"]) for i in analysis["issues"]}
+        assert ("continuity", "medium", 1) in {
+            (i["kind"], i["severity"], i["chapter"]) for i in analysis["issues"]}, \
+            "unknown kind and severity are snapped, not stored"
+        assert [t["chapter"] for t in analysis["timeline"]] == list(range(total_now))
+        assert analysis["dialogue_map"][0]["speaker"] == "Ada"
+        assert analysis["truncated"] is False
+        assert analysis["summary"] == "A tidy little test story."
+        stored = load_story(workdir, story_id)
+        assert stored["analysis"]["analyzed_at"] > 0
+        assert stored["analysis"]["summary"] == analysis["summary"]
+        assert stored["status"] == "completed", "analysing is not a run"
+        assert "Analysing" not in stored["progress"]["message"], "progress restored"
+        assert not any_story_active(), "analysis releases its claim"
+
         # Delete removes the state file and the exports.
         assert delete_story(workdir, story_id)["ok"] is True
         assert load_story(workdir, story_id) is None
@@ -1957,7 +3453,7 @@ def _self_check() -> None:
 
     # 7. Guides exist and are real content, not placeholders.
     for name in ("outline", "chapter", "continuity", "outline_explicit",
-                 "chapter_explicit"):
+                 "chapter_explicit", "translate", "rewrite", "analyze"):
         text = _guide(name)
         assert len(text) > 500, f"guide {name} is missing or too short"
     assert "ADULT" in _guide("chapter_explicit")
@@ -1965,6 +3461,15 @@ def _self_check() -> None:
         _system_prompt("chapter", "chapter_explicit", {"nsfw": False})
     assert "ADULT CONTENT" in _system_prompt(
         "chapter", "chapter_explicit", {"nsfw": True})
+    # Every pass is told which language to write in; the analysis pass gets no
+    # content block (it writes no prose), the translation pass gets the target.
+    assert "English (en)" in _system_prompt("chapter", "chapter_explicit", {})
+    assert "German (de)" in _system_prompt("chapter", "chapter_explicit",
+                                           {"language": "de"})
+    assert "French (fr)" in _system_prompt("translate", "chapter_explicit",
+                                           {"language": "de"}, language="fr")
+    assert "ADULT CONTENT" not in _system_prompt(
+        "analyze", None, {"nsfw": True}), "the audit pass writes no prose"
 
     print("story_pipeline self-check: OK")
 
