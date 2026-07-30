@@ -1,0 +1,18 @@
+{
+  "recipe_version": 1,
+  "name": "Princesses: Sunset Jetty",
+  "description": "Elsa, Anna and Moana together at golden hour, laughing in the wind. 5 s on the 4-step Wan model, so it renders in about a minute. Likeness depends on the base model — see the prompt for the visual anchors that do the work.",
+  "kind": "generation",
+  "mode": "video",
+  "model_type": "t2v_sf",
+  "loras": [],
+  "params": {
+    "resolution": "832x480",
+    "video_length": 81,
+    "num_inference_steps": 4,
+    "guidance_scale": 1,
+    "flow_shift": 3,
+    "negative_prompt": "still image, frozen frame, distorted faces, extra limbs, text, watermark"
+  },
+  "prompt_example": "three animated-film princesses standing together at the end of a wooden jetty at golden hour, laughing and talking: Elsa with a long platinum braid in a pale ice-blue gown, Anna with auburn twin braids in a green and black travelling dress, Moana with long dark curly hair in a red-orange sarong with a shell necklace. Warm low sunlight, wind moving their hair and skirts, gentle ocean swell behind them, slow camera push-in, 3D animated feature film look, soft subsurface skin, cinematic depth of field"
+}
