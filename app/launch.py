@@ -14492,6 +14492,11 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     "image_start", "image_end", "video_guide", "audio_guide",
                     "audio_guide2", "audio_guide3", "audio_guide4",
                     "audio_guide5", "audio_guide6",
+                    # video_source was missing, which is what broke the trail
+                    # back to an extended clip's origin: the source is copied
+                    # to uploads/ under a random name, so without recording it
+                    # the link to the original prompt is simply gone.
+                    "video_source",
                 ]:
                     val = job["params"].get(key)
                     if val and isinstance(val, str):
@@ -15847,6 +15852,94 @@ def get_group_clips(group_id: str):
             continue
     clips.sort(key=lambda c: c["index"])
     return {"group_id": group_id, "clips": clips}
+
+
+@api.get("/api/v1/outputs/{name:path}/prompts")
+def get_output_prompt_chain(name: str, workspace: str = None):
+    """Every prompt behind this output, oldest first.
+
+    An extended or multi-clip video has more than one: copying "the prompt"
+    gave the last clip's, with no way to get back to the one that started it.
+    Two trails are followed:
+
+      * multi_clip_info.group_id — the clips of one run, in order.
+      * upload_filenames.video_source — the clip this one was extended from,
+        walked back while each source is itself an output in this workspace.
+
+    Older outputs may yield only their own prompt: the source link was not
+    recorded before this existed, and nothing can reconstruct it after the fact.
+    """
+    out_dir = _workspace_dir(workspace)
+
+    def _sidecar(media_name: str) -> dict | None:
+        base = os.path.splitext(os.path.basename(media_name))[0]
+        path = _safe_join(out_dir, f"{base}.meta.json")
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return None
+
+    meta = _sidecar(name)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"No metadata for {name}")
+
+    def _prompt_of(one: dict) -> str:
+        params = one.get("params") or {}
+        return str(params.get("_tts_original_prompt") or params.get("prompt") or "")
+
+    chain: list[dict] = []
+    params = meta.get("params") or {}
+    mci = params.get("multi_clip_info")
+    if mci and mci.get("group_id"):
+        # The whole run, in clip order. This output is one of them.
+        for clip in get_group_clips(mci["group_id"])["clips"]:
+            chain.append({
+                "prompt": clip["prompt"],
+                "filename": clip["filename"],
+                "label": f"Clip {clip['index'] + 1} of {clip['total']}",
+                "origin": "clip",
+            })
+    if not chain:
+        chain.append({"prompt": _prompt_of(meta),
+                      "filename": os.path.basename(name),
+                      "label": "This clip", "origin": "self"})
+
+    # Walk back the extend chain, newest to oldest, then reverse.
+    earlier: list[dict] = []
+    seen = {os.path.basename(name)}
+    current = meta
+    for _ in range(12):  # bounded: a cycle in the sidecars must not hang this
+        source = (current.get("upload_filenames") or {}).get("video_source")
+        if not source or isinstance(source, list):
+            break
+        source = os.path.basename(str(source))
+        if source in seen:
+            break
+        seen.add(source)
+        parent = _sidecar(source)
+        if parent is None:
+            break
+        earlier.append({"prompt": _prompt_of(parent), "filename": source,
+                        "label": "Extended from", "origin": "source"})
+        current = parent
+    chain = list(reversed(earlier)) + chain
+
+    # Drop empties and consecutive repeats — every clip of a run often shares
+    # one prompt, and offering it five times is not a choice.
+    cleaned: list[dict] = []
+    for one in chain:
+        if not one["prompt"].strip():
+            continue
+        if cleaned and cleaned[-1]["prompt"] == one["prompt"]:
+            continue
+        cleaned.append(one)
+    if cleaned:
+        cleaned[0]["label"] = f"Initial prompt ({cleaned[0]['label'].lower()})" \
+            if len(cleaned) > 1 else cleaned[0]["label"]
+    return {"prompts": cleaned, "count": len(cleaned)}
 
 
 @api.post("/api/v1/outputs/{name:path}/move")

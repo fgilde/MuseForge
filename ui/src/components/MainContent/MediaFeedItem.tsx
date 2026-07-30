@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback, type CSSProperties } from 're
 import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked } from 'lucide-react'
 import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
 import { useStore } from '../../stores/useStore'
-import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
+import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage, fetchOutputPrompts } from '../../api/client'
 import type { OutputFile, OutputMetadata } from '../../types'
 import { modelDisplayName } from '../../lib/modelDisplay'
 
@@ -108,6 +108,12 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
   const confirmRef = useRef(false)
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const [copied, setCopied] = useState(false)
+  // More than one prompt exists for an extended or multi-clip video. Fetched
+  // on demand: the chain walk reads sidecars, and no feed item needs it until
+  // its copy button is pressed.
+  const [promptChain, setPromptChain] = useState<
+    { prompt: string; filename: string; label: string }[] | null
+  >(null)
   const [rejoining, setRejoining] = useState(false)
   const [sentToInput, setSentToInput] = useState(false)
   const [showMoveMenu, setShowMoveMenu] = useState(false)
@@ -205,29 +211,11 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
     setTimeout(() => rerollGeneration(), 50)
   }, [index, setSelectedOutput, rerollGeneration])
 
-  const handleCopyPrompt = () => {
-    if (!prompt) return
-    // navigator.clipboard requires secure context; fallback to execCommand
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(prompt).then(() => {
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      }).catch(() => {
-        // Fallback
-        const ta = document.createElement('textarea')
-        ta.value = prompt
-        ta.style.position = 'fixed'
-        ta.style.opacity = '0'
-        document.body.appendChild(ta)
-        ta.select()
-        document.execCommand('copy')
-        document.body.removeChild(ta)
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      })
-    } else {
+  const copyText = (text: string) => {
+    if (!text) return
+    const fallback = () => {
       const ta = document.createElement('textarea')
-      ta.value = prompt
+      ta.value = text
       ta.style.position = 'fixed'
       ta.style.opacity = '0'
       document.body.appendChild(ta)
@@ -237,7 +225,24 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     }
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) })
+        .catch(fallback)
+    } else {
+      fallback()
+    }
   }
+
+  /** Copy straight away when there is one prompt; otherwise offer the list,
+   *  oldest first, so the prompt that started an extended clip is reachable. */
+  const handleCopyPrompt = async () => {
+    if (promptChain) { setPromptChain(null); return }
+    const { prompts } = await fetchOutputPrompts(file.name)
+    if (prompts.length > 1) { setPromptChain(prompts); return }
+    copyText(prompts[0]?.prompt || prompt)
+  }
+
 
   const handleDelete = async () => {
     if (!confirmRef.current) {
@@ -529,13 +534,46 @@ export function MediaFeedItem({ file, index, isActive, onVisible, onMeasured, st
                   {rejoining ? <Loader2 size={13} className="animate-spin" /> : <Combine size={13} />}
                 </button>
               )}
-              <button
-                onClick={handleCopyPrompt}
-                className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-                title="Copy prompt"
-              >
-                {copied ? <Check size={13} className="text-accent-green" /> : <Copy size={13} />}
-              </button>
+              <div className="relative">
+                <button
+                  onClick={handleCopyPrompt}
+                  className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
+                  title="Copy prompt — an extended clip offers each one, oldest first"
+                >
+                  {copied ? <Check size={13} className="text-accent-green" /> : <Copy size={13} />}
+                </button>
+                {/* Only appears when there IS more than one prompt, so a plain
+                    clip still copies on the first click. */}
+                {promptChain && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setPromptChain(null)} />
+                    <div className="glass-panel absolute right-0 top-full z-50 mt-1 w-72 rounded-xl p-1.5 shadow-2xl">
+                      {promptChain.map((one, i) => (
+                        <button
+                          key={`${one.filename}-${i}`}
+                          onClick={() => { copyText(one.prompt); setPromptChain(null) }}
+                          className="block w-full rounded-md px-2 py-1.5 text-left hover:bg-bg-hover"
+                          title={one.prompt}
+                        >
+                          <span className="block text-[10px] text-accent-blue">{one.label}</span>
+                          <span className="block truncate text-[11px] text-text-secondary">
+                            {one.prompt}
+                          </span>
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => {
+                          copyText(promptChain.map(o => o.prompt).join(`${'\n'}${'\n'}`))
+                          setPromptChain(null)
+                        }}
+                        className="mt-1 block w-full rounded-md border-t border-border px-2 py-1.5 text-left text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                      >
+                        Copy all {promptChain.length}, in order
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
             </>
           )}
           {file.type === 'image' && (

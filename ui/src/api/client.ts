@@ -2736,6 +2736,16 @@ export async function fetchLoraDirectoryModels(): Promise<{
   return { models: json.directory_models ?? {}, bases: json.directory_bases ?? {} }
 }
 
+/** Every prompt behind an output, oldest first. An extended or multi-clip
+ *  video has more than one, and copying "the prompt" only ever gave the last. */
+export async function fetchOutputPrompts(name: string): Promise<{
+  prompts: { prompt: string; filename: string; label: string; origin: string }[]
+}> {
+  const res = await fetch(`${BASE}/api/v1/outputs/${encodeURIComponent(name)}/prompts`)
+  if (!res.ok) return { prompts: [] }
+  return res.json()
+}
+
 export interface InstalledLora {
   filename: string
   directory: string

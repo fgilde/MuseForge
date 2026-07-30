@@ -165,6 +165,7 @@ section for why.
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /outputs/{name}/prompts` | Every prompt behind an output, oldest first: the clips of a multi-clip run and the chain it was extended from |
 | `GET /loras/{model_type}` | LoRAs this model can load — per architecture, so it is not the full set |
 | `GET /loras/installed` | Every installed LoRA with its directory and CivitAI metadata |
 | `GET /loras/directory-models` | `{directory: [model_type, …]}` — which models load from each LoRA directory. A directory mapping to `[]` is a dead end |

@@ -174,6 +174,13 @@ export function LoraBrowser() {
    *  models look there; the LoRA's own base_model says whether it belongs in
    *  that directory at all. Both have to hold. */
   const loraVerdict = (lora: InstalledLora) => {
+    if (lora.directory === '.' || !lora.directory) {
+      return {
+        usable: false,
+        reason: 'Sits directly in loras/ rather than an architecture folder, '
+                + 'so no model looks for it. Move it into the folder for its base model.',
+      }
+    }
     const owners = dirModels[lora.directory]
     const expected = dirBases[lora.directory]
     const wrongBase = Boolean(
@@ -226,9 +233,14 @@ export function LoraBrowser() {
 
   // Load what is installed as soon as the browser opens, not only when its
   // own tab is picked: the search results mark the ones already downloaded.
+  // And open ON that view when there is something there — "Use now" lives on
+  // those cards, and starting in a CivitAI search hid it behind a toggle.
   useEffect(() => {
     if (!open) return
-    fetchInstalledLoras().then(r => setInstalledLoras(r.loras)).catch(() => {})
+    fetchInstalledLoras().then(r => {
+      setInstalledLoras(r.loras)
+      if (r.loras.length > 0 && browseKind === 'lora') setShowInstalled(true)
+    }).catch(() => {})
     fetchLoraDirectoryModels()
       .then(map => { setDirModels(map.models); setDirBases(map.bases) })
       .catch(() => {})
@@ -782,7 +794,7 @@ export function LoraBrowser() {
                         : 'border-border/50 opacity-75'
                     }`}
                   >
-                    <div className="aspect-[3/4] bg-bg-active overflow-hidden">
+                    <div className="relative aspect-[3/4] bg-bg-active overflow-hidden">
                       {lora.preview_url ? (
                         lora.preview_url.endsWith('.mp4') || lora.preview_url.endsWith('.webm') ? (
                           <video src={lora.preview_url} className={`w-full h-full object-cover transition-transform duration-300 ${clickable ? 'group-hover:scale-105' : ''}`} muted loop autoPlay playsInline />
@@ -795,7 +807,6 @@ export function LoraBrowser() {
                           <span className="text-[9px] opacity-40">No metadata</span>
                         </div>
                       )}
-                    </div>
                     <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/50 to-transparent p-2 pt-6">
                       <div className="text-xs font-medium text-white truncate">{lora.name || lora.filename.replace(/\.(safetensors|sft)$/i, '')}</div>
                       <div className="flex items-center gap-1.5 mt-0.5">
@@ -826,39 +837,6 @@ export function LoraBrowser() {
                               : `released ${new Date(lora.released_at as string).toLocaleDateString()}`}
                         </div>
                       )}
-                      {(() => {
-                        // Usable here = this model loads from that directory.
-                        // Anything else is not a failure to report but a fact
-                        // to explain: LoRAs are stored per architecture.
-                        const verdict = loraVerdict(lora)
-                        const usable = verdict.usable
-                        const wrongBase = !usable && verdict.reason.startsWith('Built for')
-                        const on = activatedLoras?.includes(lora.filename)
-                        return (
-                          <button
-                            onClick={async e => {
-                              e.stopPropagation()
-                              if (!usable) return
-                              await applyOwnedLora(lora, cardKey)
-                            }}
-                            disabled={!usable}
-                            title={usable && on ? 'Already active for this model' : verdict.reason}
-                            className={`mt-1.5 w-full rounded px-1.5 py-1 text-[9px] font-medium transition-colors ${
-                              !usable
-                                ? 'bg-white/10 text-white/40 cursor-not-allowed'
-                                : used === cardKey || on
-                                  ? 'bg-indicator-success/80 text-white'
-                                  : 'bg-cta text-white hover:opacity-90'
-                            }`}
-                          >
-                            {wrongBase
-                              ? `${lora.base_model} — wrong folder`
-                              : !usable
-                                ? `for ${lora.directory} models`
-                                : used === cardKey ? 'Added' : on ? 'Active' : 'Use now'}
-                          </button>
-                        )
-                      })()}
                       {lora.trained_words.length > 0 && (
                         <div className="flex items-center gap-0.5 mt-1 overflow-hidden">
                           <Tag size={8} className="text-white/50 shrink-0" />
@@ -866,6 +844,38 @@ export function LoraBrowser() {
                         </div>
                       )}
                     </div>
+                    </div>
+
+                    {/* The action, in its own row UNDER the thumbnail. It used
+                        to be 9px text inside the dark gradient over the image,
+                        which is why it could not be found. */}
+                    {(() => {
+                      const verdict = loraVerdict(lora)
+                      const on = activatedLoras?.includes(lora.filename)
+                      const done = used === cardKey
+                      return (
+                        <button
+                          onClick={async e => {
+                            e.stopPropagation()
+                            if (!verdict.usable) return
+                            await applyOwnedLora(lora, cardKey)
+                          }}
+                          disabled={!verdict.usable}
+                          title={verdict.usable && on ? 'Already active for this model' : verdict.reason}
+                          className={`w-full border-t border-border/60 px-2 py-1.5 text-[11px] font-medium transition-colors ${
+                            !verdict.usable
+                              ? 'bg-bg-active text-text-muted cursor-not-allowed'
+                              : done || on
+                                ? 'bg-indicator-success/20 text-indicator-success'
+                                : 'bg-cta text-white hover:opacity-90'
+                          }`}
+                        >
+                          {!verdict.usable
+                            ? (lora.directory === '.' ? 'Wrong folder' : `For ${lora.directory} models`)
+                            : done ? 'Added' : on ? 'Active' : 'Use now'}
+                        </button>
+                      )
+                    })()}
                     {!lora.civitai_model_id && (
                       <div className="absolute top-1.5 right-1.5">
                         <span className={`text-[8px] px-1 py-0.5 rounded bg-black/60 ${(lora as any).hf_repo_id ? 'text-amber-300/80' : 'text-white/50'}`}>
