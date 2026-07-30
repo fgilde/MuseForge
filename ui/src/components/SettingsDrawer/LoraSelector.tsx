@@ -119,8 +119,19 @@ export function LoraSelector() {
   const [search, setSearch] = useState('')
   // Sticky across sessions (localStorage) — gated by nsfw_mode below, so a
   // persisted "on" is inert until Mature Mode is enabled.
+  //
+  // With no stored choice this follows the master gate instead of defaulting
+  // to "hide". Two independently-defaulted filters is what produced the
+  // reported confusion: the LoRA browser applies only the master gate, so it
+  // showed a LoRA as usable while this panel silently left it out of the list
+  // for the same model. Enabling Mature Mode in Settings IS the opt-in;
+  // hiding the user's own library behind a second switch only hides it from
+  // them. The checkbox still works for anyone who wants them out of the way.
   const [showNsfw, setShowNsfw] = useState(() => {
-    try { return localStorage.getItem('museforge_loras_show_nsfw') === '1' } catch { return false }
+    try {
+      const stored = localStorage.getItem('museforge_loras_show_nsfw')
+      return stored === null ? true : stored === '1'
+    } catch { return true }
   })
   const setShowNsfwSticky = (v: boolean) => {
     setShowNsfw(v)
