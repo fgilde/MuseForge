@@ -7703,6 +7703,200 @@ VOICE_PRESETS = [
 ]
 
 
+# ══ Voice library — workspace-wide, shared by Speech and audiobooks ═══
+
+
+def _voice_dir(workspace: str = None) -> str:
+    return _workspace_dir(workspace)
+
+
+@api.get("/api/v1/voices")
+def list_voices(workspace: str = None):
+    """Named voices in this workspace, with what each engine can do."""
+    from services import voice_library
+    return {
+        "voices": voice_library.load_library(_voice_dir(workspace)),
+        "engines": voice_library.ENGINES,
+    }
+
+
+@api.post("/api/v1/voices")
+async def create_voice(request: Request):
+    """Create a named voice.
+
+    Body: {name, model_type?, reference_path?, emotion_reference_path?,
+    default_emotion?, language?, description?, params?, color?, workspace?}.
+
+    reference_path is a file already on the server — upload a recording via
+    /api/v1/upload-audio first (it accepts mp3/ogg/m4a/wav and video, and
+    transcodes to wav). Nothing is copied: the entry points at the upload, so
+    the same recording can back several voices.
+    """
+    from services import voice_library
+
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    ref = body.get("reference_path")
+    if ref and not os.path.isfile(ref):
+        candidate = _safe_join(_workspace_dir(body.get("workspace")),
+                               os.path.basename(ref))
+        if not candidate or not os.path.isfile(candidate):
+            raise HTTPException(status_code=404,
+                                detail=f"Reference audio not found: {ref}")
+        ref = candidate
+
+    voice = voice_library.add_voice(
+        _voice_dir(body.get("workspace")),
+        name=name,
+        model_type=body.get("model_type") or "index_tts2",
+        color=body.get("color") or "",
+        reference_path=ref,
+        emotion_reference_path=body.get("emotion_reference_path"),
+        default_emotion=body.get("default_emotion"),
+        language=body.get("language"),
+        description=body.get("description") or "",
+        params=body.get("params") or {},
+    )
+    return voice
+
+
+@api.put("/api/v1/voices/{voice_id}")
+async def update_voice_entry(voice_id: str, request: Request):
+    """Patch a voice. Only the fields you send change."""
+    from services import voice_library
+
+    body = await request.json()
+    patch = {k: v for k, v in body.items() if k != "workspace"}
+    voice = voice_library.update_voice(_voice_dir(body.get("workspace")),
+                                      voice_id, patch)
+    if voice is None:
+        raise HTTPException(status_code=404, detail=f"Voice {voice_id} not found")
+    return voice
+
+
+@api.delete("/api/v1/voices/{voice_id}")
+def delete_voice_entry(voice_id: str, workspace: str = None):
+    """Remove a voice from the library.
+
+    The referenced audio file stays — it is a normal workspace output and
+    may back other voices.
+    """
+    from services import voice_library
+    if not voice_library.delete_voice(_voice_dir(workspace), voice_id):
+        raise HTTPException(status_code=404, detail=f"Voice {voice_id} not found")
+    return {"status": "deleted", "id": voice_id}
+
+
+@api.post("/api/v1/voices/{voice_id}/preview")
+async def preview_library_voice(voice_id: str, request: Request):
+    """Audition a library voice. Returns a job_id.
+
+    Body: {text?, language?, workspace?}. Goes through the same TTS mapping
+    an audiobook render uses, so a voice that previews cleanly will also
+    render — and one that cannot preview says why instead of failing later.
+    """
+    from services import voice_library
+    from services.audiobook import model as ab_model, tts as ab_tts
+
+    body = await request.json() if await request.body() else {}
+    workspace = body.get("workspace") or _get_active_workspace()
+    out_dir = _voice_dir(workspace)
+    voice = voice_library.get_voice(out_dir, voice_id)
+    if voice is None:
+        raise HTTPException(status_code=404, detail=f"Voice {voice_id} not found")
+    if voice.get("reference_missing"):
+        raise HTTPException(
+            status_code=400,
+            detail="This voice's reference recording is gone — upload it again.")
+
+    lang = (body.get("language") or voice.get("language") or "en").lower()[:2]
+    text = (body.get("text") or "").strip() or _VOICE_SAMPLE_TEXTS.get(
+        lang, _VOICE_SAMPLE_TEXTS["en"])
+
+    # Build a throwaway one-run project so the real planner decides whether
+    # this voice can speak, rather than duplicating its rules here.
+    profile = ab_model.VoiceProfile.from_dict(
+        voice_library.to_audiobook_profile(voice))
+    run = ab_model.Run(id=f"voice-{voice_id}", text=text, profile_id=profile.id)
+    chapter = ab_model.Chapter(id="preview", title="Preview",
+                               blocks=[ab_model.Block(id="p", type="paragraph",
+                                                      runs=[run])])
+    probe = ab_model.Project(id="preview", title="Voice preview",
+                             language=lang, chapters=[chapter],
+                             voice_profiles=[profile],
+                             default_profile_id=profile.id)
+    plans, errors = ab_tts.plan_chapter(probe, chapter, workspace=workspace)
+    if errors or not plans:
+        raise HTTPException(status_code=400,
+                            detail="; ".join(errors) or "This voice cannot be previewed yet")
+
+    params = dict(plans[0].params)
+    params["workspace"] = workspace
+    job_id = uuid.uuid4().hex[:8]
+    _jobs[job_id] = {
+        "id": job_id, "status": "queued", "progress": 0, "step": 0,
+        "total_steps": 0, "phase": "",
+        "message": f"Queued (voice preview: {voice['name']})",
+        "created_at": time.time(), "params": params,
+        "output_files": [], "error": None,
+        "workspace": workspace, "out_dir": out_dir,
+    }
+
+    def _worker():
+        try:
+            _run_generation(job_id)
+        finally:
+            produced = (_jobs.get(job_id) or {}).get("output_files") or []
+            if produced:
+                # Remember the audition so replaying it costs nothing.
+                try:
+                    voice_library.update_voice(
+                        out_dir, voice_id,
+                        {"sample_path": os.path.join(out_dir, produced[0])})
+                except Exception as e:  # noqa: BLE001
+                    print(f"[voices] Could not record sample path: {e}")
+
+    threading.Thread(target=_worker, daemon=False).start()
+    return {"job_id": job_id, "voice_id": voice_id, "text": text,
+            "warnings": plans[0].warnings}
+
+
+@api.post("/api/v1/audiobook/projects/{pid}/voices/import")
+async def ab_import_library_voice(pid: str, request: Request):
+    """Copy a library voice into an audiobook project.
+
+    Body: {voice_id, workspace?}. A copy on purpose: editing the voice
+    inside the book must not rewrite the shared library entry.
+    """
+    from services import voice_library
+    from services.audiobook import model as ab_model, store as ab_store
+
+    body = await request.json()
+    workspace = body.get("workspace") or _get_active_workspace()
+    voice = voice_library.get_voice(_voice_dir(workspace), body.get("voice_id") or "")
+    if voice is None:
+        raise HTTPException(status_code=404, detail="Voice not found in the library")
+
+    created = {}
+
+    def _add(project):
+        profile_dict = voice_library.to_audiobook_profile(
+            voice, index=len(project.voice_profiles))
+        profile = ab_model.VoiceProfile.from_dict(profile_dict)
+        project.voice_profiles = list(project.voice_profiles) + [profile]
+        if not project.default_profile_id:
+            project.default_profile_id = profile.id
+        created["id"] = profile.id
+
+    project = ab_store.update_project(_ab_dir(workspace), pid, _add)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Audiobook project {pid} not found")
+    return {"project": project.to_dict(), "profile_id": created.get("id")}
+
+
 @api.get("/api/v1/audiobook/voice-presets")
 def ab_voice_presets():
     """Voice starting points, and the sample lines used for auditions."""
@@ -9762,6 +9956,32 @@ async def generate(request: Request):
     is_sfx = body.get("sfx_mode")
     if not body.get("model_type"):
         raise HTTPException(status_code=400, detail="model_type is required")
+
+    # MMAudio is post-processing on a video carrier, so "mmaudio_*" is a
+    # frontend-only placeholder rather than a loadable model. Normalising it
+    # here means every caller works — the UI whichever sub-mode it is in, and
+    # an MCP client that simply picked the id it saw in list_models. It used
+    # to be swapped only while the SFX sub-mode was active, so the same id
+    # selected from anywhere else came back as "Unknown model: mmaudio_v2".
+    _requested_model = str(body.get("model_type") or "")
+    if _requested_model.startswith("mmaudio_"):
+        body["_sfx_virtual_model"] = _requested_model
+        body["model_type"] = "ltx2_22B_distilled_1_1"
+        body["MMAudio_setting"] = 1
+        body["_mmaudio_variant"] = "nsfw" if _requested_model == "mmaudio_nsfw" else "v2"
+        body["sfx_mode"] = True
+        is_sfx = True
+        if not body.get("prompt") and body.get("MMAudio_prompt"):
+            body["prompt"] = body["MMAudio_prompt"]
+        # Without a driving video MMAudio still needs one; a one-second
+        # carrier is the cheapest thing that satisfies it.
+        if not body.get("video_guide"):
+            body.setdefault("video_length", 17)
+            body.setdefault("num_inference_steps", 4)
+        else:
+            body.setdefault("video_length", 0)
+        print(f"[generate] Virtual SFX model {_requested_model} -> carrier "
+              f"{body['model_type']}")
     if not is_sfx and not body.get("prompt"):
         raise HTTPException(status_code=400, detail="prompt is required")
     # SFX virtual models (mmaudio_*) are frontend-only; skip backend model validation
