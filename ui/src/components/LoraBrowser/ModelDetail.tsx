@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { ArrowLeft, Download, Tag, Loader2, Check, ExternalLink, KeyRound, Boxes } from 'lucide-react'
 import DOMPurify from 'dompurify'
 import { useStore } from '../../stores/useStore'
-import { fetchLoraDirectories, fetchCheckpointArchitectures, reloadModels } from '../../api/client'
+import { fetchLoraDirectories, fetchCheckpointArchitectures, reloadModels, fetchLoraDirectoryModels } from '../../api/client'
 import type { CheckpointArchitecture } from '../../api/client'
 import type { CivitAIModel, CivitAIModelVersion, CivitAIFile, CivitAIDownload } from '../../types'
 import { formatBytes } from '../../lib/format'
@@ -49,6 +49,18 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   )
   const trainedWords = version?.trainedWords || []
   const localArch = version?.localArch
+  // Does any model here load LoRAs for this base at all? Downloading one that
+  // nothing can use is pure waste — three versions of the same SDXL LoRA were
+  // fetched before anything said so, and only the card afterwards admitted it.
+  const [baseHome, setBaseHome] = useState<Record<string, string>>({})
+  useEffect(() => {
+    fetchLoraDirectoryModels().then(m => setBaseHome(m.baseHome)).catch(() => {})
+  }, [])
+  const knownBases = Object.keys(baseHome)
+  const unsupportedBase = Boolean(
+    !isCheckpoint && version?.baseModel && knownBases.length
+    && !baseHome[version.baseModel],
+  )
 
   // Load available LoRA directories for target selection
   const browserDefaultDir = useStore(s => s.loraBrowserDefaultDir)
@@ -254,9 +266,14 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                 Target: {localArch}
               </span>
             )}
-            {!isCheckpoint && !localArch && version && (
+            {!isCheckpoint && !localArch && version && !unsupportedBase && (
               <span className="text-[10px] px-2 py-1 rounded bg-amber-500/10 text-indicator-warning">
                 Unknown architecture
+              </span>
+            )}
+            {unsupportedBase && (
+              <span className="text-[10px] px-2 py-1 rounded bg-red-500/15 text-red-400">
+                No model here uses {version?.baseModel}
               </span>
             )}
             {file && (
@@ -436,9 +453,26 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                     </div>
                   </div>
                 )}
+                {unsupportedBase && (
+                  <div className="mb-2 rounded-lg border border-red-500/30 bg-red-500/10 p-2.5 text-[11px] leading-snug text-red-300">
+                    <p className="font-medium">
+                      This LoRA is for {version?.baseModel}, which MuseForge has no
+                      model for — it cannot be used here.
+                    </p>
+                    <p className="mt-1 text-red-300/80">
+                      SD 1.5, SDXL, Pony and Illustrious are all the same family, so
+                      another version of the same LoRA will not help. Search with the
+                      base filter set to one of these instead:{' '}
+                      <span className="text-red-200">
+                        {knownBases.filter(b => /Flux|Qwen|ZImage|LTXV|Wan/i.test(b))
+                          .slice(0, 6).join(', ')}
+                      </span>.
+                    </p>
+                  </div>
+                )}
                 <button
                   onClick={handleDownload}
-                  disabled={!file || (isCheckpoint && !targetArchitecture)}
+                  disabled={!file || (isCheckpoint && !targetArchitecture) || unsupportedBase}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-blue text-white text-sm rounded-lg hover:bg-accent-blue-hover transition-colors disabled:opacity-50"
                 >
                   <Download size={14} />

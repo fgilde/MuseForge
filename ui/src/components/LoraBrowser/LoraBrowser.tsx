@@ -1011,6 +1011,13 @@ export function LoraBrowser() {
                     const local = ownedByCivitId.get(model.id)
                     if (local) applyOwnedLora(local, `civit/${model.id}`)
                   }}
+                  unsupportedBase={(() => {
+                    // Only claim it when the map is loaded, or every card would
+                    // read "unsupported" for a moment on open.
+                    const base = model.modelVersions?.[0]?.baseModel
+                    if (!base || !Object.keys(baseHome).length) return undefined
+                    return baseHome[base] ? undefined : base
+                  })()}
                 />
               ))}
             </div>

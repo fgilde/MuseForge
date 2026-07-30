@@ -10,6 +10,9 @@ interface Props {
   owned?: { label: string; usable: boolean; reason: string }
   /** Activate the owned copy and close, instead of opening the detail page. */
   onUseNow?: () => void
+  /** No model here loads LoRAs for this result's base. Shown on the card so a
+   *  wasted download is visible before the click, not after. */
+  unsupportedBase?: string
 }
 
 function formatCount(n: number): string {
@@ -18,7 +21,7 @@ function formatCount(n: number): string {
   return String(n)
 }
 
-export function ModelCard({ model, onClick, owned, onUseNow }: Props) {
+export function ModelCard({ model, onClick, owned, onUseNow, unsupportedBase }: Props) {
   // Get first image/video from first version
   const allMedia = model.modelVersions?.[0]?.images || []
   // Prefer a still image over video for the card thumbnail
@@ -86,6 +89,14 @@ export function ModelCard({ model, onClick, owned, onUseNow }: Props) {
         </span>
       </div>
 
+      {unsupportedBase && !owned && (
+        <span
+          className="absolute right-1.5 top-1.5 rounded bg-red-500/85 px-1.5 py-0.5 text-[9px] font-medium text-white"
+          title={`This is a ${unsupportedBase} LoRA. MuseForge has no model for that base, so it cannot be used — SD 1.5, SDXL, Pony and Illustrious are all the same family.`}
+        >
+          {unsupportedBase} — unsupported
+        </span>
+      )}
       {owned && (
         <>
           <span
