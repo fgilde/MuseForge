@@ -5,6 +5,11 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      with_sageattention:
+        description: "Also compile the SageAttention kernels (slow, needs a lot of disk)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -14,13 +19,26 @@ jobs:
   build-push:
     runs-on: ubuntu-latest
     steps:
-      # The image is large (CUDA + torch + model tooling). Stock runners
-      # only have ~14 GB free on / — reclaim the preinstalled toolchains.
+      # This image is genuinely large: CUDA runtime, torch/cu128 and the full
+      # model tooling. A stock runner has ~72 GB total with roughly 25 GB
+      # already used, and the build needs room for the base images, two
+      # parallel stages each installing torch, and the layer export. The
+      # earlier, gentler cleanup left 39 GB and the build still died with
+      # "No space left on device" — hence the bigger sweep.
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/lib/jvm
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /usr/local/lib/android \
+            /usr/local/share/powershell \
+            /usr/local/share/boost \
+            /usr/local/lib/node_modules \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/lib/jvm
           sudo docker image prune -af
+          sudo docker builder prune -af || true
           df -h /
 
       - uses: actions/checkout@v4
@@ -28,6 +46,23 @@ jobs:
       - name: Compute lowercase image name
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      # The default image is the runtime target — no SageAttention. It is
+      # fully functional (attention falls back to sdpa) and it is what gets
+      # tested locally. Compiling the sage kernels needs the CUDA *devel*
+      # image plus a second torch install in a parallel stage, which is what
+      # pushed the runner over its disk limit. Build the full variant on
+      # demand via workflow_dispatch when the extra speed is worth the wait.
+      - name: Pick build target
+        id: target
+        run: |
+          if [ "${{ inputs.with_sageattention }}" = "true" ]; then
+            echo "target=" >> "$GITHUB_OUTPUT"
+            echo "suffix=-sage" >> "$GITHUB_OUTPUT"
+          else
+            echo "target=runtime" >> "$GITHUB_OUTPUT"
+            echo "suffix=" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/setup-buildx-action@v3
 
@@ -41,6 +76,8 @@ jobs:
         id: meta
         with:
           images: ${{ steps.image.outputs.name }}
+          flavor: |
+            suffix=${{ steps.target.outputs.suffix }},onlatest=true
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
@@ -49,14 +86,22 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          target: ${{ steps.target.outputs.target }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Hosted runners have 16 GB RAM — one nvcc job (~8 GB) is all
-          # that fits while compiling the SageAttention kernels.
+          # 16 GB of runner RAM fits exactly one nvcc job (~8 GB) when the
+          # sage kernels are being compiled.
           build-args: |
             MAX_JOBS=1
-          # Layer cache lives in GHCR — the GitHub Actions cache (10 GB cap)
-          # is far too small for these layers.
+          # Layer cache in GHCR, because the GitHub Actions cache caps at
+          # 10 GB. mode=min on purpose: mode=max also exports every
+          # intermediate layer — including the multi-gigabyte torch ones —
+          # and buffers them on the runner's disk, which is precisely what
+          # ran it out of space.
           cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
-          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=max
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=min
+
+      - name: Report free disk space
+        if: always()
+        run: df -h /

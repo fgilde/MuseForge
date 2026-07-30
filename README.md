@@ -54,6 +54,12 @@ Build notes:
 - Compiling the bundled SageAttention kernels needs ~8 GB RAM per job
   (`MAX_JOBS=2` default). On RAM-limited builders skip them — the app falls back to
   sdpa attention: `docker build --target runtime -t museforge:latest . && docker compose up -d --no-build`
+- **The published GHCR image is the `runtime` target**, i.e. without
+  SageAttention. Building both stages needs the CUDA devel image plus a second
+  torch install in parallel, which does not fit a hosted runner's disk. The
+  image is fully functional either way; run the *Docker image* workflow
+  manually with "Also compile the SageAttention kernels" to publish a
+  `:latest-sage` variant.
 - The first generation on each model downloads its weights (the default video model
   is ~18 GB); only requested models are fetched.
 
