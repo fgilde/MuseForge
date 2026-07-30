@@ -64,12 +64,21 @@ from transformers.generation.candidate_generator import (
     _prepare_attention_mask,
     _prepare_token_type_ids,
 )
-from transformers.generation.configuration_utils import (
-    NEED_SETUP_CACHE_CLASSES_MAPPING,
-    QUANT_BACKEND_CLASSES_MAPPING,
-    GenerationConfig,
-    GenerationMode,
-)
+try:
+    from transformers.generation.configuration_utils import (
+        NEED_SETUP_CACHE_CLASSES_MAPPING,
+        QUANT_BACKEND_CLASSES_MAPPING,
+        GenerationConfig,
+        GenerationMode,
+    )
+except ImportError:
+    # Both mappings were reorganised away in transformers >= 4.57 (see
+    # ALL_CACHE_IMPLEMENTATIONS et al). Empty means "no cache implementation
+    # needs setup", so generation falls through to DynamicCache — the path
+    # inference takes anyway. Same fallback as models/TTS/yue.
+    from transformers.generation.configuration_utils import GenerationConfig, GenerationMode
+    NEED_SETUP_CACHE_CLASSES_MAPPING = {}
+    QUANT_BACKEND_CLASSES_MAPPING = {}
 from transformers.generation.logits_process import (
     EncoderNoRepeatNGramLogitsProcessor,
     EncoderRepetitionPenaltyLogitsProcessor,
