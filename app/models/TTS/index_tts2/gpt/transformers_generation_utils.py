@@ -30,9 +30,15 @@ from transformers.cache_utils import (
     DynamicCache,
     EncoderDecoderCache,
     OffloadedCache,
-    QuantizedCacheConfig,
     StaticCache,
 )
+try:
+    # Gone in transformers >= 4.57; only the "quantized" cache path needs it,
+    # and importing it unconditionally made the whole engine unloadable.
+    # models/TTS/yue/generation_utils.py already guards it the same way.
+    from transformers.cache_utils import QuantizedCacheConfig
+except ImportError:
+    QuantizedCacheConfig = None
 from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.integrations.fsdp import is_fsdp_managed_module
@@ -1775,6 +1781,18 @@ class GenerationMixin:
                         "cache, please open an issue and tag @zucchini-nlp."
                     )
 
+                if generation_config.cache_config is None and QuantizedCacheConfig is None:
+                    warnings.warn(
+                        "QuantizedCacheConfig is not available in this transformers "
+                        "build; falling back to DynamicCache.",
+                        UserWarning,
+                    )
+                    model_kwargs[cache_name] = (
+                        DynamicCache()
+                        if not requires_cross_attention_cache
+                        else EncoderDecoderCache(DynamicCache(), DynamicCache())
+                    )
+                    return
                 cache_config = (
                     generation_config.cache_config
                     if generation_config.cache_config is not None
