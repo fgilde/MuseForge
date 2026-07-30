@@ -1294,6 +1294,37 @@ interface AppState {
   renameChatThread: (id: string, title: string) => Promise<void>
   sendChatMessage: (content: string) => Promise<void>
 
+  /** Internal: story poll loop. Exposed on the store only so actions can
+   *  call each other; components must not invoke it. */
+  _pollStory: (sid: string) => void
+
+  // Storywriter
+  stories: api.StorySummary[]
+  /** Not persisted, same reasoning as activeChatId. */
+  activeStoryId: string | null
+  activeStory: api.StoryState | null
+  storyModels: api.StoryModelLists | null
+  /** Set while a story of ours is running so the poll loop knows to keep
+   *  going; the authoritative status lives on activeStory.status. */
+  storyPolling: boolean
+  /** Live text of the pass currently generating, `<think>` included. */
+  storyStreamText: string
+  storyError: string | null
+  /** Draft params for the "new story" form. Kept in the store so switching
+   *  sub-modes or opening a story doesn't lose a half-filled form. */
+  storyDraft: api.StoryParams
+  setStoryDraft: (patch: Partial<api.StoryParams>) => void
+  loadStories: () => Promise<void>
+  loadStoryModels: () => Promise<void>
+  selectStory: (sid: string | null) => Promise<void>
+  startStory: () => Promise<string | null>
+  stopActiveStory: () => Promise<void>
+  deleteStoryById: (sid: string) => Promise<void>
+  regenerateChapter: (index: number, instruction?: string) => Promise<void>
+  saveChapterText: (index: number, text: string) => Promise<void>
+  extendActiveStory: (chapters: number) => Promise<void>
+  exportActiveStory: (format: 'md' | 'txt') => Promise<string | null>
+
   // Prompt enhancement
   isEnhancing: boolean
   enhancePrompt: (ttsMode?: string) => Promise<void>
@@ -1595,6 +1626,10 @@ function computeFilteredOutputs(outputs: OutputFile[], mediaFilter: MediaFilter)
   }
   return _foCachedResult
 }
+
+/** Story statuses that mean "work is still happening", so the poll loop
+ *  keeps running. Mirrors _ACTIVE_STORY_STATUSES in story_pipeline.py. */
+const ACTIVE_STORY_STATUSES = new Set(['queued', 'planning', 'writing'])
 
 export const useStore = create<AppState>((set, get) => ({
   // Generation mode
@@ -5148,6 +5183,194 @@ export const useStore = create<AppState>((set, get) => ({
     chatTemperature: patch.temperature ?? s.chatTemperature,
     chatMaxTokens: patch.maxTokens ?? s.chatMaxTokens,
   })),
+
+  // ── Storywriter ─────────────────────────────────────────────────────
+  stories: [],
+  activeStoryId: null,
+  activeStory: null,
+  storyModels: null,
+  storyPolling: false,
+  storyStreamText: '',
+  storyError: null,
+  storyDraft: {
+    premise: '',
+    title: '',
+    genre: '',
+    tone: '',
+    pov: 'third_limited',
+    tense: 'past',
+    audience: '',
+    min_pages: 60,
+    chapter_count: null,
+    explicitness: 'none',
+    temperature: 0.9,
+  },
+  setStoryDraft: (patch) => set(s => ({ storyDraft: { ...s.storyDraft, ...patch } })),
+
+  loadStories: async () => {
+    try {
+      const { stories } = await api.fetchStories()
+      set({ stories })
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not load stories' })
+    }
+  },
+
+  loadStoryModels: async () => {
+    try {
+      set({ storyModels: await api.fetchStoryModels() })
+    } catch { /* the form falls back to "use the configured model" */ }
+  },
+
+  selectStory: async (sid) => {
+    if (!sid) {
+      set({ activeStoryId: null, activeStory: null, storyStreamText: '', storyPolling: false })
+      return
+    }
+    set({ activeStoryId: sid, storyError: null, storyStreamText: '' })
+    const state = await api.fetchStory(sid)
+    if (!state) {
+      set({ activeStory: null, storyError: 'Story not found' })
+      return
+    }
+    set({ activeStory: state })
+    // A story may already be running when we open it (started in another
+    // tab, or still going after a reload) — pick the poll loop back up.
+    if (ACTIVE_STORY_STATUSES.has(state.status)) get()._pollStory(sid)
+  },
+
+  startStory: async () => {
+    const draft = get().storyDraft
+    if (!draft.premise?.trim()) {
+      set({ storyError: 'A premise is required' })
+      return null
+    }
+    set({ storyError: null })
+    try {
+      const { story_id } = await api.createStory(draft)
+      await get().loadStories()
+      set({ activeStoryId: story_id, storyStreamText: '' })
+      const state = await api.fetchStory(story_id)
+      set({ activeStory: state })
+      get()._pollStory(story_id)
+      return story_id
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not start the story' })
+      return null
+    }
+  },
+
+  stopActiveStory: async () => {
+    const sid = get().activeStoryId
+    if (!sid) return
+    try {
+      await api.stopStory(sid)
+      // Also cut the in-flight LLM pass so it ends within a token instead
+      // of running to completion after the user pressed Stop.
+      const ch = get().activeStory?.chapters?.find(c => c.status === 'writing')
+      await api.cancelLlmStream(
+        ch ? `story-${sid}-ch${ch.index}` : `story-${sid}-outline`
+      ).catch(() => {})
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not stop the story' })
+    }
+  },
+
+  deleteStoryById: async (sid) => {
+    try {
+      await api.deleteStory(sid)
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not delete the story' })
+      return
+    }
+    if (get().activeStoryId === sid) {
+      set({ activeStoryId: null, activeStory: null, storyPolling: false })
+    }
+    await get().loadStories()
+  },
+
+  regenerateChapter: async (index, instruction) => {
+    const sid = get().activeStoryId
+    if (!sid) return
+    set({ storyError: null, storyStreamText: '' })
+    try {
+      await api.regenerateStoryChapter(sid, index, instruction)
+      get()._pollStory(sid)
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not regenerate the chapter' })
+    }
+  },
+
+  saveChapterText: async (index, text) => {
+    const sid = get().activeStoryId
+    if (!sid) return
+    try {
+      await api.saveStoryChapter(sid, index, text)
+      set({ activeStory: await api.fetchStory(sid) })
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not save the chapter' })
+    }
+  },
+
+  extendActiveStory: async (chapters) => {
+    const sid = get().activeStoryId
+    if (!sid) return
+    set({ storyError: null, storyStreamText: '' })
+    try {
+      await api.extendStory(sid, chapters)
+      get()._pollStory(sid)
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not extend the story' })
+    }
+  },
+
+  exportActiveStory: async (format) => {
+    const sid = get().activeStoryId
+    if (!sid) return null
+    try {
+      const { path } = await api.exportStory(sid, format)
+      get().loadOutputs()
+      return path
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not export the story' })
+      return null
+    }
+  },
+
+  /** Poll story state + the live stream of whichever pass is running.
+   *  Single loop guarded by storyPolling so re-entry (start, then extend)
+   *  cannot double it up. */
+  _pollStory: (sid: string) => {
+    if (get().storyPolling) return
+    set({ storyPolling: true })
+    const tick = async () => {
+      if (get().activeStoryId !== sid) { set({ storyPolling: false }); return }
+      let state: api.StoryState | null = null
+      try {
+        state = await api.fetchStory(sid)
+      } catch { /* transient — try again next tick */ }
+      if (state) {
+        set({ activeStory: state })
+        const writing = state.chapters?.find(c => c.status === 'writing')
+        const streamId = state.status === 'planning'
+          ? `story-${sid}-outline`
+          : writing ? `story-${sid}-ch${writing.index}` : null
+        if (streamId) {
+          try {
+            const s = await api.getLlmStreamStatus(streamId)
+            set({ storyStreamText: s.text || '' })
+          } catch { /* ignore */ }
+        }
+        if (!ACTIVE_STORY_STATUSES.has(state.status)) {
+          set({ storyPolling: false, storyStreamText: '' })
+          get().loadStories()
+          return
+        }
+      }
+      setTimeout(tick, 1200)
+    }
+    tick()
+  },
   loadChatThreads: async () => {
     try {
       const { threads } = await api.fetchChatThreads()

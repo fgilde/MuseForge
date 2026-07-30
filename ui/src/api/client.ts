@@ -1363,6 +1363,8 @@ export interface StoryChapter {
   status: string
   generated_at: number | null
   model_id?: string | null
+  /** True once the user hand-edited this chapter. */
+  edited?: boolean
 }
 
 /** One recorded LLM call — what "Show prompt" displays. */

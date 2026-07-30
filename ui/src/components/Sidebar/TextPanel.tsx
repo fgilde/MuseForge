@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { MessageSquareText, Plus, Pencil, Trash2, Check, X, ChevronDown, ChevronRight, Sparkles } from 'lucide-react'
+import { MessageSquareText, Plus, Pencil, Trash2, Check, X, ChevronDown, ChevronRight } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { TextSubModeToggle } from './TextSubModeToggle'
+import { StoryPanel } from './StoryPanel'
 
 /**
  * Sidebar for the Text mode: sub-mode toggle, the thread list, which LLM
@@ -39,20 +40,7 @@ export function TextPanel() {
     return () => { cancelled = true }
   }, [loadChatThreads])
 
-  if (textSubMode === 'story') {
-    return (
-      <div className="flex flex-col gap-4">
-        <TextSubModeToggle />
-        <div className="rounded-lg border border-border bg-bg-tertiary/50 p-4 text-center">
-          <Sparkles size={18} className="mx-auto mb-2 text-accent-blue" />
-          <p className="text-xs text-text-secondary">Story writing is coming soon.</p>
-          <p className="text-[10px] text-text-muted mt-1">
-            Long-form drafting with chapters and characters. Use Chat in the meantime.
-          </p>
-        </div>
-      </div>
-    )
-  }
+  if (textSubMode === 'story') return <StoryPanel />
 
   return (
     <div className="flex flex-col gap-4">

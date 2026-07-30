@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Send, Loader2, Copy, Check, ChevronDown, ChevronRight, MessageSquareText, BookText, AlertTriangle } from 'lucide-react'
+import { Send, Loader2, Copy, Check, ChevronDown, ChevronRight, MessageSquareText, AlertTriangle } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import { StoryView } from './StoryView'
 import type { ChatMessage } from '../../api/client'
 
 /**
@@ -188,21 +189,7 @@ export function ChatView() {
     if (nearBottom) endRef.current?.scrollIntoView({ block: 'end' })
   }, [thread?.messages.length, streamText, streamingHere, activeChatId])
 
-  if (textSubMode === 'story') {
-    return (
-      <main className="flex-1 flex items-center justify-center h-full px-6">
-        <div className="flex flex-col items-center gap-3 text-center max-w-sm">
-          <div className="w-16 h-16 rounded-2xl bg-bg-active flex items-center justify-center text-text-muted">
-            <BookText size={24} />
-          </div>
-          <p className="text-sm text-text-secondary">Story writing is coming soon.</p>
-          <p className="text-[11px] text-text-muted leading-snug">
-            Switch to Chat in the sidebar to talk to the model today.
-          </p>
-        </div>
-      </main>
-    )
-  }
+  if (textSubMode === 'story') return <StoryView />
 
   const messages = thread?.messages ?? []
   const canSend = !!draft.trim() && !busy
