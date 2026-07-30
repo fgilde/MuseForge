@@ -1,0 +1,17 @@
+{
+  "recipe_version": 1,
+  "name": "Princess: Frozen Canal",
+  "description": "Blue winter dress, skating between old houses. Storybook look on the 4-step Klein model, so it renders in seconds. Edit the prompt to keep the look and change the scene.",
+  "kind": "generation",
+  "mode": "image",
+  "model_type": "flux2_klein_9b",
+  "loras": [],
+  "params": {
+    "resolution": "1024x1024",
+    "num_inference_steps": 4,
+    "guidance_scale": 1,
+    "negative_prompt": "",
+    "image_mode": 1
+  },
+  "prompt_example": "classic animated-film princess with silver-blonde hair in a blue winter dress, ice-skating along a frozen canal between old gabled houses, arms out, scarf streaming behind her, soft cel shading, warm rim light, painterly storybook illustration, clean line work, rich colour"
+}
