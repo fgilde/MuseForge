@@ -1323,9 +1323,34 @@ interface AppState {
   stopActiveStory: () => Promise<void>
   deleteStoryById: (sid: string) => Promise<void>
   regenerateChapter: (index: number, instruction?: string) => Promise<void>
-  saveChapterText: (index: number, text: string) => Promise<void>
+  /** `lang` edits that translation instead of the original. */
+  saveChapterText: (index: number, text: string, lang?: string) => Promise<void>
   extendActiveStory: (chapters: number) => Promise<void>
   exportActiveStory: (format: 'md' | 'txt') => Promise<string | null>
+  /** Languages offered for writing/translating (curated server-side list). */
+  storyLanguages: api.StoryLanguage[]
+  /** Which download formats this install can produce; null until loaded. */
+  storyExportFormats: Record<string, boolean> | null
+  /** True while the analyze pass runs — it takes minutes on a long story. */
+  storyAnalyzing: boolean
+  loadStoryLanguages: () => Promise<void>
+  loadStoryExportFormats: () => Promise<void>
+  /** Whole-story translation; progress arrives via the normal story poll. */
+  translateActiveStory: (language: string) => Promise<void>
+  retranslateChapter: (index: number, language: string) => Promise<void>
+  insertChapter: (body: {
+    at_index: number; title?: string; text?: string; brief?: string; write?: boolean
+  }) => Promise<void>
+  deleteChapterAt: (index: number) => Promise<void>
+  analyzeActiveStory: (lang?: string) => Promise<void>
+  /** Proposes a rewrite of a marked passage — nothing is written yet.
+   *  Returns null when the call failed (reason lands in storyError). */
+  rewriteChapterPassage: (
+    index: number, selectedText: string, instruction: string, lang?: string,
+  ) => Promise<api.StoryRewriteProposal | null>
+  applyChapterRewrite: (
+    index: number, selectedText: string, replacement: string, lang?: string,
+  ) => Promise<boolean>
 
   // AudioBook Creator
   audiobooks: api.AudiobookProjectSummary[]
@@ -5359,14 +5384,135 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  saveChapterText: async (index, text) => {
+  saveChapterText: async (index, text, lang) => {
     const sid = get().activeStoryId
     if (!sid) return
     try {
-      await api.saveStoryChapter(sid, index, text)
+      await api.saveStoryChapter(sid, index, text, lang)
       set({ activeStory: await api.fetchStory(sid) })
     } catch (e) {
       set({ storyError: e instanceof Error ? e.message : 'Could not save the chapter' })
+    }
+  },
+
+  storyLanguages: [],
+  storyExportFormats: null,
+  storyAnalyzing: false,
+
+  loadStoryLanguages: async () => {
+    try {
+      const { languages } = await api.fetchStoryLanguages()
+      set({ storyLanguages: languages ?? [] })
+    } catch { /* the form falls back to the default language */ }
+  },
+
+  loadStoryExportFormats: async () => {
+    try {
+      const { formats } = await api.fetchStoryExportFormats()
+      set({ storyExportFormats: formats ?? null })
+    } catch { /* the menu falls back to md/txt only */ }
+  },
+
+  translateActiveStory: async (language) => {
+    const sid = get().activeStoryId
+    if (!sid) return
+    set({ storyError: null, storyStreamText: '' })
+    try {
+      await api.translateStory(sid, language)
+      get()._pollStory(sid)
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not translate the story' })
+    }
+  },
+
+  retranslateChapter: async (index, language) => {
+    const sid = get().activeStoryId
+    if (!sid) return
+    set({ storyError: null, storyStreamText: '' })
+    try {
+      await api.retranslateStoryChapter(sid, index, language)
+      get()._pollStory(sid)
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not re-translate the chapter' })
+    }
+  },
+
+  insertChapter: async (body) => {
+    const sid = get().activeStoryId
+    if (!sid) return
+    set({ storyError: null })
+    try {
+      await api.insertStoryChapter(sid, body)
+      // write=true runs as a worker; an empty insert is already on disk.
+      if (body.write) get()._pollStory(sid)
+      else set({ activeStory: await api.fetchStory(sid) })
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not insert the chapter' })
+    }
+  },
+
+  deleteChapterAt: async (index) => {
+    const sid = get().activeStoryId
+    if (!sid) return
+    set({ storyError: null })
+    try {
+      await api.deleteStoryChapter(sid, index)
+      set({ activeStory: await api.fetchStory(sid) })
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not delete the chapter' })
+    }
+  },
+
+  analyzeActiveStory: async (lang) => {
+    const sid = get().activeStoryId
+    if (!sid) return
+    set({ storyError: null, storyAnalyzing: true })
+    try {
+      // No timeout on purpose: one LLM pass per chapter.
+      const analysis = await api.analyzeStory(sid, lang)
+      // The backend persists the analysis on the story, so re-read (that
+      // also picks up anything else that moved) and only fall back to the
+      // response if the reload somehow lacks it.
+      const state = await api.fetchStory(sid)
+      set({
+        activeStory: state
+          ? { ...state, analysis: state.analysis ?? analysis }
+          : get().activeStory,
+      })
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not analyse the story' })
+    } finally {
+      set({ storyAnalyzing: false })
+    }
+  },
+
+  rewriteChapterPassage: async (index, selectedText, instruction, lang) => {
+    const sid = get().activeStoryId
+    if (!sid) return null
+    set({ storyError: null })
+    try {
+      return await api.rewriteStoryPassage(sid, index, {
+        selected_text: selectedText, instruction, lang,
+      })
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not rewrite the passage' })
+      return null
+    }
+  },
+
+  applyChapterRewrite: async (index, selectedText, replacement, lang) => {
+    const sid = get().activeStoryId
+    if (!sid) return false
+    set({ storyError: null })
+    try {
+      await api.applyStoryRewrite(sid, index, {
+        selected_text: selectedText, replacement, lang,
+      })
+      set({ activeStory: await api.fetchStory(sid) })
+      return true
+    } catch (e) {
+      set({ storyError: e instanceof Error ? e.message : 'Could not apply the rewrite' })
+      return false
     }
   },
 

@@ -11,6 +11,7 @@ import { OomRecoveryBanner } from './components/OomRecoveryBanner'
 import { DownloadStatusBanner } from './components/DownloadStatusBanner'
 import { PreflightBanner } from './components/PreflightBanner'
 import { WelcomeModal } from './components/WelcomeModal'
+import { ActivityPanel } from './components/ActivityPanel'
 import { RecipesOverlay } from './components/Recipes/RecipesOverlay'
 import { useStore } from './stores/useStore'
 import { useIsMobile } from './lib/useIsMobile'
@@ -100,6 +101,10 @@ function App() {
           downloads in amber so users know the system is recovering
           rather than frozen. */}
       <DownloadStatusBanner />
+      {/* ActivityPanel — fixed bottom-LEFT (bottom-right is the download
+          banner's). Polls /api/v1/activity and renders nothing while
+          nothing runs and the panel is closed. */}
+      <ActivityPanel />
       {/* WelcomeModal — one-time first-run orientation (localStorage-gated). */}
       <WelcomeModal />
     </div>

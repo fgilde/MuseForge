@@ -1329,6 +1329,9 @@ export type StoryStatus = 'queued' | 'planning' | 'writing' | 'paused' | 'comple
 export interface StoryParams {
   premise: string
   title?: string
+  /** Language the story itself is written in (BCP-47-ish code, "en" default).
+   *  Translations live per chapter under `translations`. */
+  language?: string
   genre?: string
   tone?: string
   pov?: 'first' | 'third_limited' | 'third_omniscient'
@@ -1365,6 +1368,16 @@ export interface StoryChapter {
   model_id?: string | null
   /** True once the user hand-edited this chapter. */
   edited?: boolean
+  /** Per-language translations of this chapter. `stale` means the original
+   *  changed after the translation was made. */
+  translations?: Record<string, StoryTranslation>
+}
+
+export interface StoryTranslation {
+  title: string
+  text: string
+  translated_at?: number
+  stale?: boolean
 }
 
 /** One recorded LLM call — what "Show prompt" displays. */
@@ -1391,6 +1404,69 @@ export interface StoryState {
   error?: string | null
   llm_passes?: StoryLlmPass[]
   output_files?: string[]
+  /** Original language first, then every language a translation exists in.
+   *  Derived server-side on every save. */
+  languages?: string[]
+  /** Result of the last analyze pass, persisted with the story. */
+  analysis?: StoryAnalysis | null
+}
+
+export interface StoryLanguage { code: string; name: string }
+
+export interface StoryCharacter {
+  name: string
+  role: string
+  description: string
+  first_chapter: number
+  last_chapter: number
+  chapters: number[]
+  traits: string[]
+}
+
+export interface StoryDialogueLine {
+  chapter: number
+  speaker: string
+  line_excerpt: string
+  context: string
+}
+
+export interface StoryIssue {
+  kind: string
+  severity: 'high' | 'medium' | 'low' | string
+  chapter: number
+  description: string
+  suggestion: string
+}
+
+export interface StoryTimelineEntry {
+  chapter: number
+  when: string
+  where: string
+  summary: string
+}
+
+/** All `chapter` fields are 0-based state indices. */
+export interface StoryAnalysis {
+  ok?: boolean
+  characters: StoryCharacter[]
+  dialogue_map: StoryDialogueLine[]
+  /** The dialogue map hit the server-side cap. */
+  truncated: boolean
+  issues: StoryIssue[]
+  timeline: StoryTimelineEntry[]
+  summary: string
+  /** Issues dropped because the model named a chapter that doesn't exist. */
+  dropped_refs: number
+  language?: string
+  chapters_analyzed?: number
+  analyzed_at?: number
+}
+
+export interface StoryRewriteProposal {
+  ok: boolean
+  replacement: string
+  before: string
+  after: string
 }
 
 export interface StoryModelLists {
@@ -1448,14 +1524,113 @@ export async function regenerateStoryChapter(
   return storyJson(res, 'Regenerating the chapter')
 }
 
-/** Manual edit — replaces a chapter's prose verbatim. */
-export async function saveStoryChapter(sid: string, index: number, text: string): Promise<unknown> {
+/** Manual edit — replaces a chapter's prose verbatim. With `lang` the
+ *  translation in that language is edited instead of the original. */
+export async function saveStoryChapter(sid: string, index: number, text: string, lang?: string): Promise<unknown> {
   const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/chapters/${index}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(lang ? { text, lang } : { text }),
   })
   return storyJson(res, 'Saving the chapter')
+}
+
+/** Curated list of languages the models write and translate well. */
+export async function fetchStoryLanguages(): Promise<{ languages: StoryLanguage[] }> {
+  return storyJson(await fetch(`${BASE}/api/v1/story/languages`), 'Loading languages')
+}
+
+/** Translate every written chapter. Runs as a worker — progress arrives
+ *  through the normal story polling. 409 while the story is busy. */
+export async function translateStory(sid: string, language: string): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/translate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ language }),
+  })
+  return storyJson(res, 'Translating the story')
+}
+
+export async function retranslateStoryChapter(sid: string, index: number, language: string): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/chapters/${index}/retranslate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ language }),
+  })
+  return storyJson(res, 'Re-translating the chapter')
+}
+
+/** Propose a rewrite of a marked passage. Applies nothing. The selection
+ *  must match exactly once — anything else is a 400 with the reason. */
+export async function rewriteStoryPassage(sid: string, index: number, body: {
+  selected_text: string; instruction: string; lang?: string
+}): Promise<StoryRewriteProposal> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/chapters/${index}/rewrite`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return storyJson(res, 'Rewriting the passage')
+}
+
+export async function applyStoryRewrite(sid: string, index: number, body: {
+  selected_text: string; replacement: string; lang?: string
+}): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/chapters/${index}/apply-rewrite`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return storyJson(res, 'Applying the rewrite')
+}
+
+/** Insert a chapter at `at_index`. `write: true` has the LLM write it
+ *  (optionally steered by `brief`); otherwise an empty chapter lands. */
+export async function insertStoryChapter(sid: string, body: {
+  at_index: number; title?: string; text?: string; brief?: string; write?: boolean
+}): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/chapters`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return storyJson(res, 'Inserting the chapter')
+}
+
+export async function deleteStoryChapter(sid: string, index: number): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/chapters/${index}`, { method: 'DELETE' })
+  return storyJson(res, 'Deleting the chapter')
+}
+
+/** Audit the story. One LLM pass per chapter, so this takes minutes on a
+ *  long book — deliberately without a timeout. */
+export async function analyzeStory(sid: string, lang?: string): Promise<StoryAnalysis> {
+  const res = await fetch(`${BASE}/api/v1/story/stories/${sid}/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(lang ? { lang } : {}),
+  })
+  return storyJson(res, 'Analysing the story')
+}
+
+/** md/txt always work; docx and pdf depend on optional server packages. */
+export async function fetchStoryExportFormats(): Promise<{ formats: Record<string, boolean> }> {
+  return storyJson(await fetch(`${BASE}/api/v1/story/export-formats`), 'Loading export formats')
+}
+
+/** Download links, not fetches — the server sets Content-Disposition, so
+ *  these belong in an <a href> / window.open. */
+export function storyDownloadUrl(sid: string, opts: { fmt: string; lang?: string; perChapter?: boolean }): string {
+  const q = new URLSearchParams({ fmt: opts.fmt })
+  if (opts.lang) q.set('lang', opts.lang)
+  if (opts.perChapter) q.set('per_chapter', 'true')
+  return `${BASE}/api/v1/story/stories/${sid}/download?${q}`
+}
+
+export function storyChapterDownloadUrl(sid: string, index: number, opts: { fmt: string; lang?: string }): string {
+  const q = new URLSearchParams({ fmt: opts.fmt })
+  if (opts.lang) q.set('lang', opts.lang)
+  return `${BASE}/api/v1/story/stories/${sid}/chapters/${index}/download?${q}`
 }
 
 export async function extendStory(sid: string, additionalChapters: number): Promise<unknown> {
@@ -2552,5 +2727,46 @@ export interface ActiveDownload {
 export async function fetchActiveDownloads(): Promise<{ downloads: ActiveDownload[] }> {
   const res = await fetch(`${BASE}/api/v1/downloads/active`)
   if (!res.ok) throw new Error(`Failed to fetch active downloads (${res.status})`)
+  return res.json()
+}
+
+// --- Activity (everything currently running, across features) ---
+
+export interface ActivityItem {
+  kind: 'job' | 'director' | 'story' | 'audiobook'
+  id: string
+  label: string
+  status: string
+  message: string
+  /** 0..1, only meaningful for generation jobs. Prefer step/total_steps. */
+  progress: number
+  step: number
+  total_steps: number
+  started_at: number | null
+  /** Ready-made endpoint path to POST to in order to stop this item —
+   *  the UI never has to know the per-feature cancel conventions. */
+  cancel: string
+}
+
+export async function fetchActivity(): Promise<{ activity: ActivityItem[]; count: number }> {
+  const res = await fetch(`${BASE}/api/v1/activity`)
+  if (!res.ok) throw new Error(`Failed to fetch activity (${res.status})`)
+  return res.json()
+}
+
+/** POST an item's own `cancel` path. No body. */
+export async function stopActivityItem(cancelPath: string): Promise<void> {
+  const res = await fetch(`${BASE}${cancelPath}`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Stop failed' }))
+    throw new Error(err.detail || 'Stop failed')
+  }
+}
+
+export async function stopAllActivity(): Promise<{
+  results: { kind: string; id: string; stopped: boolean; error?: string }[]
+}> {
+  const res = await fetch(`${BASE}/api/v1/activity/stop-all`, { method: 'POST' })
+  if (!res.ok) throw new Error('Failed to stop everything')
   return res.json()
 }

@@ -19,12 +19,14 @@ export function StoryPanel() {
   const activeStoryId = useStore(s => s.activeStoryId)
   const activeStory = useStore(s => s.activeStory)
   const models = useStore(s => s.storyModels)
+  const languages = useStore(s => s.storyLanguages)
   const draft = useStore(s => s.storyDraft)
   const error = useStore(s => s.storyError)
   const nsfwMode = useStore(s => s.servicesConfig?.nsfw_mode ?? false)
   const setStoryDraft = useStore(s => s.setStoryDraft)
   const loadStories = useStore(s => s.loadStories)
   const loadStoryModels = useStore(s => s.loadStoryModels)
+  const loadStoryLanguages = useStore(s => s.loadStoryLanguages)
   const selectStory = useStore(s => s.selectStory)
   const startStory = useStore(s => s.startStory)
   const stopActiveStory = useStore(s => s.stopActiveStory)
@@ -37,7 +39,8 @@ export function StoryPanel() {
   useEffect(() => {
     loadStories()
     loadStoryModels()
-  }, [loadStories, loadStoryModels])
+    loadStoryLanguages()
+  }, [loadStories, loadStoryModels, loadStoryLanguages])
 
   const running = !!activeStory && ACTIVE.has(activeStory.status)
   const estimate = estimateStory(draft.min_pages ?? 60, draft.chapter_count ?? null)
@@ -157,6 +160,18 @@ export function StoryPanel() {
                 className="mt-1 w-full rounded-lg border border-border bg-bg-tertiary px-2.5 py-1.5 text-xs text-text-primary placeholder:text-text-muted"
               />
             </div>
+
+            {/* The language the prose is written in. Translations are added
+                later from the story view, never in place of this. */}
+            <Select
+              label="Language"
+              value={draft.language ?? 'en'}
+              onChange={v => setStoryDraft({ language: v })}
+              options={(languages.length
+                ? languages
+                : [{ code: 'en', name: 'English' }]
+              ).map(l => [l.code, l.name] as [string, string])}
+            />
 
             {/* Length */}
             <div>
