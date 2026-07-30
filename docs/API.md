@@ -107,6 +107,8 @@ to match. Applying is a separate call with the subset you accept.
 | `POST /voices/{id}/speak` | Read arbitrary text with a library voice (real output) |
 | `GET /activity` | Everything running — jobs, Director pipelines, story runs and analyses, audiobook renders — each with the exact path that stops it |
 | `POST /activity/stop-all` | Stop everything, reported per item |
+| `GET /downloads/active` | Model file transfers in flight, with rate, ETA and stall age |
+| `POST /downloads/cancel` | Stop a transfer (`file_id` as query or body; all of them without one) |
 
 **Keeping a voice.** The engines that build a speaker from a written
 description (Qwen3 Voice Design / Custom Voice, and KugelAudio without a clip)

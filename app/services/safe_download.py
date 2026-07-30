@@ -140,6 +140,44 @@ _active_downloads_lock = threading.Lock()
 # model downloads ever become a real feature.
 _download_context: Optional[str] = None
 
+# file_ids the user asked to abort. Checked on every tqdm chunk, which is the
+# only place we get control back: a HuggingFace transfer is a blocking call
+# inside hf_hub, so nothing outside it can interrupt it. Without this a
+# cancelled generation kept downloading for its whole model set while holding
+# the generation lock, so the app looked hung and new jobs queued for ever.
+_cancel_requests: set = set()
+
+
+class DownloadCancelled(RuntimeError):
+    """Raised inside a transfer when its download was cancelled.
+
+    Deliberately a RuntimeError and not BaseException: hf_hub's own cleanup
+    should run, and the partial `.incomplete` file must survive so the next
+    attempt resumes instead of starting over.
+    """
+
+
+def request_cancel(file_id: Optional[str] = None,
+                   *, only_untagged: bool = False) -> list:
+    """Ask downloads to stop. Returns the file_ids that were asked.
+
+    file_id=None targets every active transfer. only_untagged targets just
+    the ones with no model_type — those are the files a generation pulled in
+    on its own, as opposed to an explicit pre-download the user started from
+    Settings, which must not die because an unrelated job was cancelled.
+    """
+    with _active_downloads_lock:
+        targets = [
+            fid for fid, state in _active_downloads.items()
+            if state.get("status") == "downloading"
+            and (file_id is None or fid == file_id)
+            and (not only_untagged or not state.get("model_type"))
+        ]
+        _cancel_requests.update(targets)
+        for fid in targets:
+            _active_downloads[fid]["status"] = "cancelling"
+    return targets
+
 
 def set_download_context(model_type: Optional[str]) -> None:
     """Tag tqdm-tracked downloads with the model they belong to."""
@@ -160,7 +198,8 @@ def get_active_downloads() -> list:
         # shows an interrupted download briefly, then clears on its own.
         for fid in [
             fid for fid, st in _active_downloads.items()
-            if st.get("status") == "incomplete" and now - st.get("ended_at", now) > 60
+            if st.get("status") in ("incomplete", "cancelled")
+            and now - st.get("ended_at", now) > 60
         ]:
             _active_downloads.pop(fid, None)
         results = []
@@ -227,6 +266,16 @@ def _record_download_done(
     short-lived "incomplete" marker the UI can show. A clean finish (or
     an unknown-size bar) is popped as before.
     """
+    # A cancelled transfer is short on purpose. Keep it labelled as cancelled
+    # instead of warning about a truncated file the user chose to stop.
+    with _active_downloads_lock:
+        if (_active_downloads.get(file_id) or {}).get("status") == "cancelled":
+            _active_downloads[file_id]["downloaded_bytes"] = (
+                downloaded if downloaded is not None
+                else _active_downloads[file_id].get("downloaded_bytes", 0)
+            )
+            _active_downloads[file_id]["ended_at"] = time.time()
+            return
     if total and downloaded is not None and downloaded < total:
         short = total - downloaded
         print(
@@ -359,8 +408,22 @@ def _install_tqdm_hook() -> None:
 
         def _patched_update(self, n=1):
             result = _original_update(self, n)
+            # Cancellation checkpoint. Raising here unwinds hf_hub's transfer
+            # loop; the partial file stays on disk for the next resume.
+            file_id = getattr(self, "_museforge_file_id", None)
+            if file_id:
+                with _active_downloads_lock:
+                    wanted = file_id in _cancel_requests
+                    if wanted:
+                        _cancel_requests.discard(file_id)
+                        state = _active_downloads.get(file_id)
+                        if state is not None:
+                            state["status"] = "cancelled"
+                            state["ended_at"] = time.time()
+                if wanted:
+                    print(f"[safe_download] '{file_id}' cancelled by request")
+                    raise DownloadCancelled(f"Download cancelled: {file_id}")
             try:
-                file_id = getattr(self, "_museforge_file_id", None)
                 if file_id:
                     rate, elapsed = _rate_and_elapsed(self)
                     _record_download_progress(
@@ -448,4 +511,40 @@ if __name__ == "__main__":
     assert get_active_downloads()[0]["rate"] == 5.0
 
     set_download_context(None)
+
+    # ── Cancellation ───────────────────────────────────────────────────
+    _active_downloads.clear()
+    _cancel_requests.clear()
+
+    # Nothing running -> nothing to cancel, and that is not an error.
+    assert request_cancel() == []
+
+    _record_download_progress("a.bin", "a.bin", 10, 100)
+    set_download_context("t2v_14B")
+    _record_download_progress("pre.bin", "pre.bin", 10, 100)
+    set_download_context(None)
+
+    # only_untagged spares an explicit pre-download: cancelling a generation
+    # must not kill the model the user started fetching from Settings.
+    assert request_cancel(only_untagged=True) == ["a.bin"]
+    states = {d["file_id"]: d["status"] for d in get_active_downloads()}
+    assert states["a.bin"] == "cancelling", states
+    assert states["pre.bin"] == "downloading", states
+
+    # Targeting one by id, even a tagged one.
+    assert request_cancel("pre.bin") == ["pre.bin"]
+
+    # A cancelled transfer must not be reported as a truncated file: that
+    # warning tells the user to re-download something they chose to stop.
+    _active_downloads["a.bin"]["status"] = "cancelled"
+    _record_download_done("a.bin", downloaded=10, total=100)
+    assert _active_downloads["a.bin"]["status"] == "cancelled"
+
+    # And a genuinely short one still is.
+    _record_download_progress("cut.bin", "cut.bin", 10, 100)
+    _record_download_done("cut.bin", downloaded=10, total=100)
+    assert _active_downloads["cut.bin"]["status"] == "incomplete"
+
+    _active_downloads.clear()
+    _cancel_requests.clear()
     print("safe_download self-check OK")

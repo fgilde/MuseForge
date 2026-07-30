@@ -19,6 +19,7 @@ import torch
 import os
 import glob
 import json
+import urllib.parse
 import time
 import uuid
 import asyncio
@@ -5389,6 +5390,32 @@ def get_active_downloads():
     return {"downloads": _get()}
 
 
+@api.post("/api/v1/downloads/cancel")
+async def cancel_downloads(request: Request, file_id: str = None):
+    """Stop a model file download. `file_id` as a query param or in the body;
+    without one, every active transfer stops.
+
+    A transfer is a blocking call inside huggingface_hub, so the only place it
+    can be interrupted is its own progress callback; the request is recorded
+    and the next chunk raises. The partial file stays for a later resume.
+
+    Returns the file_ids that were asked to stop — an empty list means nothing
+    matching was running, not that the call failed.
+    """
+    from services import safe_download
+
+    # Query param OR body: the Activity panel POSTs the cancel path it was
+    # given with no body at all, while API callers send JSON.
+    body = {}
+    try:
+        if await request.body():
+            body = await request.json()
+    except ValueError:
+        body = {}
+    asked = safe_download.request_cancel(body.get("file_id") or file_id or None)
+    return {"cancelled": asked, "count": len(asked)}
+
+
 @api.get("/api/v1/system-detect")
 def get_system_detect():
     """Return current hardware + the auto-tune recommendation for it.
@@ -6950,6 +6977,39 @@ def list_activity():
     except Exception as e:  # noqa: BLE001
         print(f"[activity] Could not list stories: {e}")
 
+    # Model file downloads. They are the longest-running thing in the app and
+    # were the one kind of work the panel could not show or stop — a cancelled
+    # generation kept pulling weights for its whole model set.
+    try:
+        from services import safe_download
+        for one in (safe_download.get_active_downloads() or []):
+            if one.get("status") not in ("downloading", "cancelling"):
+                continue
+            total = one.get("total_bytes") or 0
+            done = one.get("downloaded_bytes") or 0
+            rate = one.get("rate") or 0
+            items.append({
+                "kind": "download",
+                "id": one["file_id"],
+                "label": f"Downloading {one.get('filename') or one['file_id']}"[:80],
+                "status": "cancelling" if one.get("status") == "cancelling" else "running",
+                "message": (
+                    f"{done / 1e9:.1f} of {total / 1e9:.1f} GB"
+                    + (f" at {rate / 1e6:.0f} MB/s" if rate else "")
+                    + (f", {one['eta_seconds'] / 60:.0f} min left"
+                       if one.get("eta_seconds") else "")
+                    if total else f"{done / 1e9:.1f} GB so far"
+                ),
+                "progress": int(done * 100 / total) if total else 0,
+                "step": 0,
+                "total_steps": 0,
+                "started_at": one.get("started_at"),
+                "cancel": "/api/v1/downloads/cancel?file_id="
+                          + urllib.parse.quote(str(one["file_id"]), safe=""),
+            })
+    except Exception as e:  # noqa: BLE001 — the panel must render without these
+        print(f"[activity] Could not list downloads: {e}")
+
     items.sort(key=lambda i: i.get("started_at") or 0, reverse=True)
     return {"activity": items, "count": len(items)}
 
@@ -6974,6 +7034,9 @@ def stop_all_activity():
             elif item["kind"] == "story-op":
                 from services import story_pipeline
                 story_pipeline.cancel_story_operation(item["id"])
+            elif item["kind"] == "download":
+                from services import safe_download
+                safe_download.request_cancel(item["id"])
             results.append({"kind": item["kind"], "id": item["id"], "stopped": True})
         except Exception as e:  # noqa: BLE001
             results.append({"kind": item["kind"], "id": item["id"],
@@ -15361,7 +15424,27 @@ def cancel_job(job_id: str):
     )
     if result.abort_signalled:
         print(f"[Cancel] Signalling abort for job {job_id}")
-    return {"status": job["status"], "was_running": result.was_running}
+
+    # Also stop whatever weights it is pulling. The abort flag is only read
+    # between generation steps, so a job cancelled while downloading its model
+    # set kept downloading — holding the generation lock the whole time, which
+    # left every later job stuck at "queued" and the app looking hung.
+    #
+    # only_untagged: a pre-download the user started from Settings carries its
+    # model_type and must survive an unrelated job being cancelled.
+    stopped_downloads = []
+    if result.was_running:
+        try:
+            from services import safe_download
+            stopped_downloads = safe_download.request_cancel(only_untagged=True)
+            if stopped_downloads:
+                print(f"[Cancel] Also stopping {len(stopped_downloads)} download(s) "
+                      f"for job {job_id}: {', '.join(stopped_downloads)}")
+        except Exception as e:  # noqa: BLE001 — cancelling the job still counts
+            print(f"[Cancel] Could not stop downloads: {e}")
+
+    return {"status": job["status"], "was_running": result.was_running,
+            "stopped_downloads": stopped_downloads}
 
 
 @api.get("/api/v1/jobs")

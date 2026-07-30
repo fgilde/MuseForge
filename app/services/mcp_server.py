@@ -522,8 +522,8 @@ def list_activity() -> dict:
     """Everything currently running, with how to stop each one.
 
     Covers generation jobs, Director pipelines, Storywriter runs, story
-    analysis/translation passes and audiobook renders. Each entry carries a
-    `cancel` path — pass it to stop_activity_item.
+    analysis/translation passes, audiobook renders and model file downloads.
+    Each entry carries a `cancel` path — pass it to stop_activity_item.
     """
     return _get("/api/v1/activity")
 
@@ -888,6 +888,21 @@ def download_model(model_type: str) -> dict:
     {"status": "downloading", "model_type"}; poll model_download_status().
     """
     return _post(f"/api/v1/models/{model_type}/download")
+
+
+@mcp.tool()
+def cancel_download(file_id: str = "") -> dict:
+    """Stop a model file download; every active one when file_id is empty.
+
+    A transfer only yields control in its progress callback, so the request is
+    recorded and the next chunk aborts. The partial file stays on disk and a
+    later download resumes from it.
+
+    Cancelling a generation stops the downloads it started by itself, but not a
+    pre-download begun with download_model — use this for those.
+    """
+    return _post("/api/v1/downloads/cancel",
+                 json={"file_id": file_id} if file_id else {})
 
 
 @mcp.tool()
