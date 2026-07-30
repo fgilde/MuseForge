@@ -8123,7 +8123,10 @@ async def freeze_library_voice(voice_id: str, request: Request):
         warnings.append(
             f"The frozen take is only {duration:.0f}s. Cloning is more faithful "
             "with 10-30 seconds — audition a longer line and freeze that instead.")
-    return {"voice": updated, "frozen_from": resolved, "warnings": warnings}
+    return {"voice": updated, "frozen_from": resolved,
+            # Reported, not just used for the warning: a caller checking how
+            # long the frozen clip is should not have to probe it again.
+            "duration": duration, "warnings": warnings}
 
 
 @api.post("/api/v1/voices/{voice_id}/preview")
