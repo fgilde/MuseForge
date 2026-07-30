@@ -402,8 +402,10 @@ function VoiceCard({ voice, engine, engines }: {
       )}
 
       {/* Identity. Only meaningful without a clip: there the seed decides who
-          the speaker turns out to be, so it has to be visible and stickable. */}
-      {!engine?.clone && (
+          the speaker turns out to be, so it has to be visible and stickable.
+          Keyed on the clip, not on the engine — a cloning engine that does not
+          require one (KugelAudio) and has none is in exactly the same boat. */}
+      {(!voice.reference_path || voice.reference_missing) && (
         <div className="mt-3 rounded-xl border border-border bg-bg-tertiary/40 p-2.5">
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
