@@ -31,6 +31,11 @@ export function LoraBrowser() {
   const activatedLoras = useStore(s => s.params.activated_loras)
   // Not named useSomething: the lint rule reads that as a hook call.
   const activateLora = useStore(s => s.activateInstalledLora)
+  const activateWithModel = useStore(s => s.useLoraWithModel)
+  const allModels = useStore(s => s.models)
+  // The LoRA whose model still has to be chosen. Not a boolean: the dialog
+  // needs to know which file it is picking a model for.
+  const [pickModelFor, setPickModelFor] = useState<InstalledLora | null>(null)
   const results = useStore(s => s.civitSearchResults)
   const cursor = useStore(s => s.civitSearchCursor)
   const loading = useStore(s => s.civitSearchLoading)
@@ -196,8 +201,11 @@ export function LoraBrowser() {
     if (owners && !owners.includes(currentModel)) {
       return {
         usable: false,
+        // Offerable: the selected model cannot load it, but others can — so
+        // this is a model choice, not a dead end.
+        offer: owners,
         reason: owners.length
-          ? `For ${lora.directory} models — e.g. ${owners.slice(0, 3).join(', ')}. Switch model to use it.`
+          ? `Needs one of the ${lora.directory} models — pick one`
           : `In loras/${lora.directory}, which no installed model loads from.`,
       }
     }
@@ -857,22 +865,29 @@ export function LoraBrowser() {
                         <button
                           onClick={async e => {
                             e.stopPropagation()
-                            if (!verdict.usable) return
-                            await applyOwnedLora(lora, cardKey)
+                            if (verdict.usable) {
+                              await applyOwnedLora(lora, cardKey)
+                            } else if (verdict.offer?.length) {
+                              setPickModelFor(lora)
+                            }
                           }}
-                          disabled={!verdict.usable}
+                          disabled={!verdict.usable && !verdict.offer?.length}
                           title={verdict.usable && on ? 'Already active for this model' : verdict.reason}
                           className={`w-full border-t border-border/60 px-2 py-1.5 text-[11px] font-medium transition-colors ${
                             !verdict.usable
-                              ? 'bg-bg-active text-text-muted cursor-not-allowed'
+                              ? verdict.offer?.length
+                                ? 'bg-bg-tertiary text-accent-blue hover:bg-bg-hover'
+                                : 'bg-bg-active text-text-muted cursor-not-allowed'
                               : done || on
                                 ? 'bg-indicator-success/20 text-indicator-success'
                                 : 'bg-cta text-white hover:opacity-90'
                           }`}
                         >
-                          {!verdict.usable
-                            ? (lora.directory === '.' ? 'Wrong folder' : `For ${lora.directory} models`)
-                            : done ? 'Added' : on ? 'Active' : 'Use now'}
+                          {verdict.usable
+                            ? (done ? 'Added' : on ? 'Active' : 'Use now')
+                            : verdict.offer?.length
+                              ? 'Use now — pick a model'
+                              : lora.directory === '.' ? 'Wrong folder' : 'Cannot be used here'}
                         </button>
                       )
                     })()}
@@ -993,6 +1008,72 @@ export function LoraBrowser() {
 
       {/* Download progress bar */}
       <DownloadBar />
+
+      {/* Model picker — for a LoRA the selected model cannot load. The folder
+          says which models look there, so this is a choice, not a dead end.
+          Downloaded models first: an undownloaded one means a long wait before
+          anything happens, and that should be a deliberate pick. */}
+      {pickModelFor && (() => {
+        const owners = dirModels[pickModelFor.directory] || []
+        const rows = owners
+          .map(mt => allModels.find(m => m.model_type === mt) || null)
+          .map((m, i) => ({
+            model_type: m?.model_type || owners[i],
+            name: m?.name || owners[i],
+            downloaded: !!m?.is_downloaded,
+          }))
+          .sort((a, b) => Number(b.downloaded) - Number(a.downloaded)
+            || a.name.localeCompare(b.name))
+        return (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/60" onClick={() => setPickModelFor(null)} />
+            <div className="glass-panel relative flex max-h-[70vh] w-full max-w-lg flex-col rounded-2xl p-4 shadow-2xl">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="text-sm font-semibold text-text-primary">Pick a model for this LoRA</h2>
+                  <p className="mt-0.5 truncate text-[11px] text-text-muted">
+                    {pickModelFor.name || pickModelFor.filename} — stored in loras/{pickModelFor.directory}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setPickModelFor(null)}
+                  className="shrink-0 rounded-lg p-1 text-text-muted hover:text-text-primary"
+                  aria-label="Close"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              <p className="mt-2 text-[11px] text-text-secondary">
+                LoRAs are stored per architecture, so only these {rows.length} models
+                load from that folder. Choosing one switches the model and activates
+                the LoRA with its trigger words.
+              </p>
+              <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
+                {rows.map(row => (
+                  <button
+                    key={row.model_type}
+                    onClick={async () => {
+                      const ok = await activateWithModel(
+                        pickModelFor.filename, row.model_type, pickModelFor.trained_words,
+                      )
+                      setPickModelFor(null)
+                      if (ok) setOpen(false)
+                    }}
+                    className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-bg-hover"
+                  >
+                    <span className="min-w-0 truncate text-[12px] text-text-primary">{row.name}</span>
+                    <span className={`shrink-0 text-[9px] uppercase tracking-wide ${
+                      row.downloaded ? 'text-indicator-success' : 'text-text-muted'
+                    }`}>
+                      {row.downloaded ? 'ready' : 'downloads first'}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </div>
   )
 }

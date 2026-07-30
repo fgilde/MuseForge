@@ -1178,6 +1178,7 @@ interface AppState {
   loadLoras: (modelType: string) => Promise<void>
   toggleLora: (filename: string) => void
   activateInstalledLora: (filename: string, trainedWords?: string[]) => Promise<boolean>
+  useLoraWithModel: (filename: string, modelType: string, trainedWords?: string[]) => Promise<boolean>
   /** Ensure the LTX-2.3 transition LoRA is downloaded and activated for
    *  blend mode. Called when blend mode is opened. Idempotent: no-op if
    *  the LoRA is already installed and activated. */
@@ -4903,6 +4904,25 @@ export const useStore = create<AppState>((set, get) => ({
   /** Turn an installed LoRA on for the current model, from the browser.
    *  Returns false when the file is not one this model can load — LoRAs live
    *  per architecture, so that is a real answer, not a failure to handle. */
+  /** Switch to a model that can load this LoRA, then activate it there.
+   *
+   *  Order matters: selectModel clears activated_loras, so activating first
+   *  would silently drop it. It also keys the saved selection by the current
+   *  generation mode, so the mode has to follow the model or the pick lands in
+   *  the wrong sub-mode's slot. */
+  useLoraWithModel: async (filename, modelType, trainedWords) => {
+    const model = get().models.find(m => m.model_type === modelType)
+    if (model) {
+      const mode = getModelMode(modelType, model.family)
+      if (mode && mode !== get().generationMode) get().setGenerationMode(mode)
+    }
+    get().selectModel(modelType)
+    // selectModel starts loadLoras without awaiting it; the activation below
+    // needs the list to be there.
+    await get().loadLoras(modelType)
+    return get().activateInstalledLora(filename, trainedWords)
+  },
+
   activateInstalledLora: async (filename, trainedWords) => {
     const modelType = get().params.model_type
     if (!modelType) return false

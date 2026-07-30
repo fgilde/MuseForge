@@ -15,6 +15,7 @@ assumed, which `sanitize_entry` does.
 import json
 import os
 import random
+import shutil
 import threading
 import time
 import uuid
@@ -64,6 +65,39 @@ def new_seed() -> int:
     reference clip — see the /voices/{id}/freeze endpoint.
     """
     return random.randint(1, _SEED_MAX)
+
+
+REFS_DIRNAME = "_voice_refs"
+
+
+def refs_dir(out_dir: str) -> str:
+    return os.path.join(out_dir, REFS_DIRNAME)
+
+
+def own_reference(out_dir: str, src_path: str, voice_id: str) -> str:
+    """Copy an audio file into the library's own folder and return that path.
+
+    The library normally points at wherever a file already lives, which is
+    right for an upload the user keeps. It is wrong for a clip the library
+    depends on: a frozen audition is an ordinary workspace output, so tidying
+    the gallery deleted it and the voice became unusable with
+    "This file is gone from the workspace". Four seeded voices died that way.
+
+    Copies rather than moves: whatever pointed at the original (the gallery,
+    an audition player) keeps working.
+    """
+    target_dir = refs_dir(out_dir)
+    # Already ours: re-freezing the same voice must not stack another id prefix
+    # onto the name (vid-vid-take.wav) or copy a file onto itself.
+    if os.path.dirname(os.path.abspath(src_path)) == os.path.abspath(target_dir):
+        return src_path
+    os.makedirs(target_dir, exist_ok=True)
+    base = os.path.basename(src_path)
+    # Prefix with the voice id so two voices frozen from the same take, or the
+    # same filename from different runs, cannot collide.
+    target = os.path.join(target_dir, f"{voice_id}-{base}")
+    shutil.copy2(src_path, target)
+    return target
 
 
 def library_path(out_dir: str) -> str:
@@ -304,6 +338,21 @@ if __name__ == "__main__":
         # -- a minted seed must be PERSISTED, not re-minted per read. An
         #    unsaved heal gives the voice a new identity on every request,
         #    which is worse than having no seed at all.
+        # -- a reference the library OWNS survives deletion of the original,
+        #    which is what broke four frozen voices: the audition they pointed
+        #    at was an ordinary output and got tidied away.
+        src = os.path.join(d, "take.wav")
+        with open(src, "wb") as f:
+            f.write(b"RIFFfake")
+        owned = own_reference(d, src, "vid123")
+        assert os.path.isfile(owned), owned
+        assert os.path.basename(owned).startswith("vid123-"), owned
+        os.remove(src)
+        assert os.path.isfile(owned), "owning it must survive the original going"
+        # Idempotent: owning an already-owned path must not delete it.
+        assert own_reference(d, owned, "vid123") == owned
+        assert os.path.isfile(owned)
+
         legacy_dir = os.path.join(d, "legacy")   # own library: the writes below
         os.makedirs(legacy_dir, exist_ok=True)   # would clobber the one above
         save_library(legacy_dir, [{"id": "seedless", "name": "Seedless",

@@ -786,6 +786,31 @@ def list_lora_directories():
     return {"directories": dirs}
 
 
+def _same_model_family(base_model: str, expected: list) -> bool:
+    """Is this LoRA's base_model from the same family as the folder it is in?
+
+    Exact membership is too strict: CivitAI keeps adding variants ("Wan Video
+    2.2 TI2V-5B") that no static list has, and refusing a legitimate Wan LoRA
+    because of a label we have not seen is worse than letting the loader decide.
+    A shared family is enough — that still catches what actually breaks, which
+    is an image LoRA sitting in a video folder ("SDXL 1.0", "Pony", "SD 1.5" and
+    "Illustrious" were all found in loras/wan on a real install).
+
+    Family = the first word, or a four-character prefix, so "LTXV2" still
+    matches "LTXV" while "SDXL 1.0" does not match "Wan Video 14B t2v".
+    """
+    def _key(value: str) -> tuple:
+        text = str(value or "").strip().lower()
+        return (text.split()[0] if text.split() else text, text[:4])
+
+    mine = _key(base_model)
+    for one in expected or []:
+        theirs = _key(one)
+        if mine[0] == theirs[0] or (len(mine[1]) >= 4 and mine[1] == theirs[1]):
+            return True
+    return False
+
+
 @api.get("/api/v1/loras/directory-models")
 def list_lora_directory_models():
     """Which models can use each LoRA directory: {directory: [model_type, ...]}.
@@ -8057,14 +8082,23 @@ async def adopt_voice(request: Request):
             "speaker usually clones better than a long mixed recording.")
 
     default_name = os.path.splitext(os.path.basename(candidate))[0][:60]
+    out_dir = _voice_dir(workspace)
     voice = voice_library.add_voice(
-        _voice_dir(workspace),
+        out_dir,
         name=(body.get("name") or default_name).strip() or "Voice",
         model_type=engine,
         reference_path=candidate,
         language=body.get("language"),
         description=(body.get("description") or "").strip(),
     )
+    # Owned after the fact, since the id only exists once the entry does.
+    try:
+        owned = voice_library.own_reference(out_dir, candidate, voice["id"])
+        voice = voice_library.update_voice(out_dir, voice["id"],
+                                           {"reference_path": owned}) or voice
+    except OSError as e:  # keep the voice, just say it still points at the source
+        warnings.append(f"Could not copy the clip into the library ({e}); the "
+                        "voice breaks if that file is deleted.")
     return {"voice": voice, "adopted_from": candidate,
             "duration": duration, "warnings": warnings}
 
@@ -8216,8 +8250,17 @@ async def freeze_library_voice(voice_id: str, request: Request):
             status_code=400,
             detail=f"{engine} cannot clone a recording. Use one of: {', '.join(cloning)}")
 
+    # Copy it into the library's own folder. Pointing at the audition left the
+    # voice depending on a normal workspace output, and tidying the gallery
+    # then broke it with "This file is gone from the workspace".
+    try:
+        owned = voice_library.own_reference(out_dir, resolved, voice_id)
+    except OSError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not store the reference clip for this voice: {e}")
     updated = voice_library.update_voice(
-        out_dir, voice_id, {"reference_path": resolved, "model_type": engine})
+        out_dir, voice_id, {"reference_path": owned, "model_type": engine})
     duration = None
     try:
         from services.audiobook import render as ab_render
@@ -8229,7 +8272,7 @@ async def freeze_library_voice(voice_id: str, request: Request):
         warnings.append(
             f"The frozen take is only {duration:.0f}s. Cloning is more faithful "
             "with 10-30 seconds — audition a longer line and freeze that instead.")
-    return {"voice": updated, "frozen_from": resolved,
+    return {"voice": updated, "frozen_from": owned,
             # Reported, not just used for the warning: a caller checking how
             # long the frozen clip is should not have to probe it again.
             "duration": duration, "warnings": warnings}
@@ -10648,7 +10691,7 @@ async def generate(request: Request):
                         continue
                     expected = _bases.get(entry.get("directory") or "")
                     base = entry.get("base_model")
-                    if base and expected and base not in expected:
+                    if base and expected and not _same_model_family(base, expected):
                         _wrong.append(f"{one} (built for {base})")
                 if _wrong:
                     raise HTTPException(
