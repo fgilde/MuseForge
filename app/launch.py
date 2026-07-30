@@ -7765,12 +7765,47 @@ async def ab_apply_cast(pid: str, request: Request):
 # Short neutral lines for auditioning a voice. Deliberately per language:
 # a German narrator sample read in English tells you nothing about how the
 # voice will actually sound in the book.
+# Audition lines, one paragraph per language rather than one sentence: an
+# audition is also what gets FROZEN into a reference clip, and cloning wants
+# 10-30 seconds. A single sentence produced 4-second clips and a warning on
+# every freeze. Mixed sentence lengths and some dialogue on purpose — that is
+# what shows whether a voice holds up over a chapter.
 _VOICE_SAMPLE_TEXTS = {
-    "de": "Der Regen hatte aufgehört, doch die Straßen glänzten noch immer.",
-    "en": "The rain had stopped, but the streets were still shining.",
-    "fr": "La pluie avait cessé, mais les rues brillaient encore.",
-    "es": "La lluvia había parado, pero las calles seguían brillando.",
-    "it": "La pioggia era cessata, ma le strade brillavano ancora.",
+    "de": (
+        "Der Regen hatte aufgehört, doch die Straßen glänzten noch immer. "
+        "Ich blieb im Türrahmen stehen und zählte die Fenster gegenüber, "
+        "eins nach dem anderen, bis in einem das Licht anging. "
+        "„Du bist zu früh“, sagte sie, ohne sich umzudrehen. "
+        "Vielleicht hatte sie recht. Vielleicht war ich auch nur der Einzige, "
+        "der überhaupt noch gekommen war."
+    ),
+    "en": (
+        "The rain had stopped, but the streets were still shining. "
+        "I stayed in the doorway and counted the windows across the road, "
+        "one after another, until a light came on in one of them. "
+        "“You're early,” she said, without turning around. "
+        "Maybe she was right. Or maybe I was simply the only one who had "
+        "bothered to come at all."
+    ),
+    "fr": (
+        "La pluie avait cessé, mais les rues brillaient encore. "
+        "Je suis resté dans l'embrasure de la porte et j'ai compté les "
+        "fenêtres d'en face, une par une, jusqu'à ce qu'une lumière "
+        "s'allume. « Tu es en avance », dit-elle sans se retourner. "
+        "Elle avait peut-être raison."
+    ),
+    "es": (
+        "La lluvia había parado, pero las calles seguían brillando. "
+        "Me quedé en el umbral y conté las ventanas de enfrente, una por "
+        "una, hasta que en una se encendió la luz. "
+        "«Llegas temprano», dijo sin volverse. Quizá tenía razón."
+    ),
+    "it": (
+        "La pioggia era cessata, ma le strade brillavano ancora. "
+        "Sono rimasto sulla soglia e ho contato le finestre di fronte, una "
+        "dopo l'altra, finché in una si è accesa la luce. "
+        "«Sei in anticipo», disse senza voltarsi. Forse aveva ragione."
+    ),
 }
 
 # Starting points for the voices a book actually needs. Each is a real
@@ -7852,6 +7887,68 @@ def list_voices(workspace: str = None):
     }
 
 
+@api.post("/api/v1/voices/adopt")
+async def adopt_voice(request: Request):
+    """Turn audio you already have into a voice, in one call.
+
+    Body: {path | name_of_file, name?, engine?, language?, description?,
+    workspace?}. `path` is any audio already on the server — a workspace
+    output, an upload, or a file placed in the workspace.
+
+    Bound to a cloning engine (IndexTTS2 by default) because that is what
+    makes a voice keep its identity: the clip carries the timbre, so the same
+    voice speaks every passage. Voices built from a written description
+    instead resample a speaker on every render.
+    """
+    from services import voice_library
+
+    body = await request.json()
+    workspace = body.get("workspace") or _get_active_workspace()
+    raw = body.get("path") or body.get("name_of_file") or ""
+    if not raw:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    candidate = raw if os.path.isfile(raw) else _safe_join(
+        _workspace_dir(workspace), os.path.basename(raw))
+    if not candidate or not os.path.isfile(candidate):
+        raise HTTPException(status_code=404, detail=f"Audio file not found: {raw}")
+
+    engine = body.get("engine") or "index_tts2"
+    caps = voice_library.ENGINES.get(engine)
+    if caps is None or not caps["clone"]:
+        cloning = [n for n, one in voice_library.ENGINES.items() if one["clone"]]
+        raise HTTPException(
+            status_code=400,
+            detail=f"{engine} cannot clone a recording. Use one of: {', '.join(cloning)}")
+
+    warnings = []
+    try:
+        from services.audiobook import render as ab_render
+        duration = ab_render.probe_duration(candidate)
+    except Exception:  # noqa: BLE001 — a missing ffprobe must not block this
+        duration = None
+    if duration is not None and duration < 8:
+        warnings.append(
+            f"That clip is only {duration:.0f}s. Cloning is more faithful with "
+            "10-30 seconds of clean speech in one voice.")
+    if duration is not None and duration > 120:
+        warnings.append(
+            f"That clip is {duration / 60:.0f} minutes. A shorter excerpt of one "
+            "speaker usually clones better than a long mixed recording.")
+
+    default_name = os.path.splitext(os.path.basename(candidate))[0][:60]
+    voice = voice_library.add_voice(
+        _voice_dir(workspace),
+        name=(body.get("name") or default_name).strip() or "Voice",
+        model_type=engine,
+        reference_path=candidate,
+        language=body.get("language"),
+        description=(body.get("description") or "").strip(),
+    )
+    return {"voice": voice, "adopted_from": candidate,
+            "duration": duration, "warnings": warnings}
+
+
 @api.post("/api/v1/voices")
 async def create_voice(request: Request):
     """Create a named voice.
@@ -7923,24 +8020,40 @@ def delete_voice_entry(voice_id: str, workspace: str = None):
 
 
 @api.post("/api/v1/voices/{voice_id}/reroll")
-def reroll_library_voice(voice_id: str, workspace: str = None):
-    """Give the voice a new identity — a different take on the same settings.
+async def reroll_library_voice(voice_id: str, request: Request):
+    """Start looking for a voice again: new seed, stored audition dropped.
 
-    Engines that build a speaker from a written description turn the seed into
-    the actual person, so the same description with a new seed is a different
-    voice. Rerolling is explicit for exactly that reason: previewing must not
-    change a voice you already decided to keep.
-
-    The stored audition is dropped with it, since it no longer represents the
-    voice. Pointless for cloned voices, where the clip carries the identity.
+    Body: {unfreeze?, engine?, workspace?}. `unfreeze` also drops the
+    reference clip and puts the voice back on the engine that builds a speaker
+    from its written description — otherwise a frozen voice is a dead end,
+    since the clip and not the seed decides who speaks. Only possible when the
+    voice still carries that description.
     """
     from services import voice_library
-    out_dir = _voice_dir(workspace)
-    updated = voice_library.update_voice(
-        out_dir, voice_id,
-        {"seed": voice_library.new_seed(), "sample_path": None})
-    if updated is None:
+
+    body = await request.json() if await request.body() else {}
+    out_dir = _voice_dir(body.get("workspace"))
+    voice = voice_library.get_voice(out_dir, voice_id)
+    if voice is None:
         raise HTTPException(status_code=404, detail=f"Voice {voice_id} not found")
+
+    patch = {"seed": voice_library.new_seed(), "sample_path": None}
+    if body.get("unfreeze"):
+        described = (voice.get("params") or {}).get("voice_description")
+        if not described:
+            raise HTTPException(
+                status_code=400,
+                detail="This voice has no written description to go back to — "
+                       "it only exists as its recording.")
+        engine = body.get("engine") or "qwen3_tts_voicedesign"
+        caps = voice_library.ENGINES.get(engine)
+        if caps is None or caps["clone"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{engine} does not build a voice from a description.")
+        patch.update({"reference_path": None, "model_type": engine})
+
+    updated = voice_library.update_voice(out_dir, voice_id, patch)
     return updated
 
 

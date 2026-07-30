@@ -1,0 +1,16 @@
+{
+  "recipe_version": 1,
+  "name": "Erzählerin (deutsch)",
+  "description": "Klare, warme Frauenstimme. Freundlich, ohne Nachrichtensprecher-Ton. Anhören, dann „Keep this take“ — vorher erfindet die Engine bei jedem Render eine neue Person.",
+  "kind": "voice",
+  "voice": {
+    "name": "Erzählerin (deutsch)",
+    "model_type": "qwen3_tts_voicedesign",
+    "language": "de",
+    "description": "Klare, warme Frauenstimme. Freundlich, ohne Nachrichtensprecher-Ton.",
+    "params": {
+      "voice_description": "klare warme Frauenstimme, deutsche Muttersprachlerin, freundlich, deutlich artikuliert, ruhiges Tempo",
+      "temperature": 0.75
+    }
+  }
+}

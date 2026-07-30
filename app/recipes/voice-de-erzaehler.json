@@ -1,0 +1,16 @@
+{
+  "recipe_version": 1,
+  "name": "Erzähler (deutsch)",
+  "description": "Ruhige, tiefe Männerstimme. Unaufgeregt, verlässlich — Standard für lange Bücher. Anhören, dann „Keep this take“ — vorher erfindet die Engine bei jedem Render eine neue Person.",
+  "kind": "voice",
+  "voice": {
+    "name": "Erzähler (deutsch)",
+    "model_type": "qwen3_tts_voicedesign",
+    "language": "de",
+    "description": "Ruhige, tiefe Männerstimme. Unaufgeregt, verlässlich — Standard für lange Bücher.",
+    "params": {
+      "voice_description": "ruhige tiefe Männerstimme, deutscher Muttersprachler, unaufgeregt, verlässlich, warm, erzählt gleichmäßig",
+      "temperature": 0.75
+    }
+  }
+}

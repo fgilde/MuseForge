@@ -2221,9 +2221,29 @@ export async function updateVoice(id: string, patch: VoiceDraft): Promise<VoiceL
   return storyJson(res, 'Saving the voice')
 }
 
-export async function rerollVoice(id: string): Promise<VoiceLibraryEntry> {
-  const res = await fetch(`${BASE}/api/v1/voices/${id}/reroll`, { method: 'POST' })
+export async function rerollVoice(
+  id: string, opts?: { unfreeze?: boolean },
+): Promise<VoiceLibraryEntry> {
+  const res = await fetch(`${BASE}/api/v1/voices/${id}/reroll`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts ?? {}),
+  })
   return storyJson(res, 'Re-rolling the voice')
+}
+
+/** Turn audio that already exists into a cloning voice, in one call. The clip
+ *  carries the timbre, which is what makes the voice stable across passages. */
+export async function adoptVoice(body: {
+  path: string; name?: string; engine?: string; language?: string; description?: string
+}): Promise<{ voice: VoiceLibraryEntry; adopted_from: string
+              duration: number | null; warnings: string[] }> {
+  const res = await fetch(`${BASE}/api/v1/voices/adopt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return storyJson(res, 'Making a voice from that file')
 }
 
 /** Keep the audition you liked: it becomes the voice's reference clip and the

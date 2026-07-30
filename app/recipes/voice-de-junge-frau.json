@@ -1,0 +1,16 @@
+{
+  "recipe_version": 1,
+  "name": "Junge Frau (deutsch)",
+  "description": "Hell und beweglich — für eine Ich-Erzählerin oder eine junge Figur. Anhören, dann „Keep this take“ — vorher erfindet die Engine bei jedem Render eine neue Person.",
+  "kind": "voice",
+  "voice": {
+    "name": "Junge Frau (deutsch)",
+    "model_type": "qwen3_tts_voicedesign",
+    "language": "de",
+    "description": "Hell und beweglich — für eine Ich-Erzählerin oder eine junge Figur.",
+    "params": {
+      "voice_description": "junge Frauenstimme, deutsche Muttersprachlerin, hell und beweglich, lebendig, spricht schnell aber deutlich",
+      "temperature": 0.85
+    }
+  }
+}

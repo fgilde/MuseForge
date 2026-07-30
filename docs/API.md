@@ -102,7 +102,8 @@ to match. Applying is a separate call with the subset you accept.
 | `PUT/DELETE /voices/{id}` | Patch or remove a voice |
 | `POST /voices/{id}/preview` | Audition a voice; returns `{job_id}` |
 | `POST /voices/{id}/freeze` | Keep the current audition as the voice's reference clip, switching to a cloning engine |
-| `POST /voices/{id}/reroll` | New seed, audition cleared — start looking for a voice again |
+| `POST /voices/adopt` | Turn audio you already have into a cloning voice, in one call |
+| `POST /voices/{id}/reroll` | New seed, audition cleared. `unfreeze` also drops the clip and returns to the described engine |
 | `POST /voices/{id}/speak` | Read arbitrary text with a library voice (real output) |
 | `GET /activity` | Everything running — jobs, Director pipelines, story runs and analyses, audiobook renders — each with the exact path that stops it |
 | `POST /activity/stop-all` | Stop everything, reported per item |
@@ -125,6 +126,15 @@ back several voices — and a deleted file surfaces as `reference_missing` with
 `ready: false` instead of failing mid-render. Importing a voice into an
 audiobook copies the configuration, so edits inside a book cannot rewrite the
 shared entry.
+
+**A voice you can keep starts from a recording.** `POST /voices/adopt` takes
+any audio already on the server — a workspace output, an upload, a file in
+the workspace — and binds it to a cloning engine, so the clip carries the
+timbre and every passage is spoken by the same person. Describing a voice
+instead is a search, not a result: audition, then `/freeze` the take you
+want, or `/reroll` for another. Audition lines are a paragraph per language
+(`GET /audiobook/voice-presets`) because the audition is also what gets
+frozen, and cloning wants 10-30 seconds.
 
 ### Blueprints
 

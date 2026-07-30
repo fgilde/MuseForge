@@ -660,6 +660,31 @@ def create_voice(name: str, model_type: str = "index_tts2",
 
 
 @mcp.tool()
+def adopt_voice(path: str, name: str = "", engine: str = "index_tts2",
+                language: str = "", description: str = "") -> dict:
+    """Turn audio that already exists into a library voice, in one call.
+
+    path: any audio on the server — a workspace output from list_outputs, an
+    upload_audio result, or a file in the workspace. Binds it to a cloning
+    engine, which is what makes the voice stable: the clip carries the timbre,
+    so every passage is spoken by the same person.
+
+    Prefer this over create_voice whenever a recording of the wanted voice
+    exists. create_voice with a written description gives a speaker that
+    changes on every render until freeze_voice pins one.
+
+    Returns {voice, adopted_from, duration, warnings} — a warning says so when
+    the clip is too short or too long to clone well.
+    """
+    body = {"path": path, "engine": engine}
+    for key, value in (("name", name), ("language", language),
+                       ("description", description)):
+        if value:
+            body[key] = value
+    return _post("/api/v1/voices/adopt", json=body)
+
+
+@mcp.tool()
 def preview_voice(voice_id: str, text: str = "") -> dict:
     """Audition a library voice. Returns a job_id; poll job_status.
 
@@ -829,6 +854,28 @@ def upload_audio(audio_base64: str, filename: str = "upload.mp3") -> dict:
     files = {"file": (filename, base64.b64decode(audio_base64))}
     r = requests.post(
         f"http://127.0.0.1:{_api_port}/api/v1/upload-audio", files=files, timeout=300
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+@mcp.tool()
+def upload_document(document_base64: str, filename: str = "book.txt") -> dict:
+    """Upload a text document (base64) so audiobook_import can read it.
+
+    Accepts .txt, .md, .docx, .pdf and .epub — the extension of `filename`
+    decides which parser runs, so keep it correct. Returns
+    {"filename", "path", "url"}; pass the returned "path" to
+    audiobook_import.
+
+    Full hand-off for "here is a document, make an audiobook":
+      upload_document -> audiobook_create -> audiobook_import ->
+      adopt_voice or create_voice (+ audiobook_import_voice) ->
+      audiobook_plan until ready -> audiobook_render -> get_output_url.
+    """
+    files = {"file": (filename, base64.b64decode(document_base64))}
+    r = requests.post(
+        f"http://127.0.0.1:{_api_port}/api/v1/upload", files=files, timeout=300
     )
     r.raise_for_status()
     return r.json()

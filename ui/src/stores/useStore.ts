@@ -1452,7 +1452,8 @@ interface AppState {
   loadVoices: () => Promise<void>
   createVoiceEntry: (draft: api.VoiceDraft) => Promise<string | null>
   patchVoiceEntry: (id: string, patch: api.VoiceDraft) => Promise<void>
-  rerollVoiceEntry: (id: string) => Promise<void>
+  adoptVoiceFromFile: (file: File, opts?: { name?: string; language?: string }) => Promise<string | null>
+  rerollVoiceEntry: (id: string, opts?: { unfreeze?: boolean }) => Promise<void>
   freezeVoiceEntry: (id: string, engine?: string) => Promise<void>
   deleteVoiceEntry: (id: string) => Promise<void>
   /** Auditions, keyed by library voice id or in-book profile id — one at a
@@ -6014,12 +6015,37 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  /** A recording you already have -> a voice that holds. Uploads it, then
+   *  adopts it server-side so the engine choice and the clip checks live in
+   *  one place rather than being re-implemented per caller. */
+  adoptVoiceFromFile: async (file, opts) => {
+    set({ voicesBusy: true, voicesError: null })
+    try {
+      const { path } = await api.uploadAudio(file)
+      const { voice, warnings } = await api.adoptVoice({
+        path,
+        name: opts?.name || file.name.replace(/\.[^.]+$/, ''),
+        language: opts?.language,
+      })
+      set(s => ({
+        voices: [...s.voices.filter(v => v.id !== voice.id), voice],
+        voicePreviewWarnings: { ...s.voicePreviewWarnings, [voice.id]: warnings || [] },
+      }))
+      return voice.id
+    } catch (e) {
+      set({ voicesError: e instanceof Error ? e.message : 'Could not make a voice from that file' })
+      return null
+    } finally {
+      set({ voicesBusy: false })
+    }
+  },
+
   /** New take on the same settings. Drops the stored audition with it, since
    *  that sample was the old voice. */
-  rerollVoiceEntry: async (id) => {
+  rerollVoiceEntry: async (id, opts) => {
     set({ voicesError: null })
     try {
-      const voice = await api.rerollVoice(id)
+      const voice = await api.rerollVoice(id, opts)
       set(s => ({
         voices: s.voices.map(v => (v.id === id ? voice : v)),
         voicePreviewUrls: { ...s.voicePreviewUrls, [id]: undefined as unknown as string },

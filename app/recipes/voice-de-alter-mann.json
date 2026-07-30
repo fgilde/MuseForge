@@ -1,0 +1,16 @@
+{
+  "recipe_version": 1,
+  "name": "Alter Mann (deutsch)",
+  "description": "Rau, langsam, viele Jahre in der Stimme. Passt zum Noir-Blueprint. Anhören, dann „Keep this take“ — vorher erfindet die Engine bei jedem Render eine neue Person.",
+  "kind": "voice",
+  "voice": {
+    "name": "Alter Mann (deutsch)",
+    "model_type": "qwen3_tts_voicedesign",
+    "language": "de",
+    "description": "Rau, langsam, viele Jahre in der Stimme. Passt zum Noir-Blueprint.",
+    "params": {
+      "voice_description": "alte raue Männerstimme, deutscher Muttersprachler, langsam, müde, trocken, viel Lebenszeit in der Stimme",
+      "temperature": 0.8
+    }
+  }
+}

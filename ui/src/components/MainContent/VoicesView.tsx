@@ -24,6 +24,9 @@ export function VoicesView() {
   const error = useStore(s => s.voicesError)
   const loadVoices = useStore(s => s.loadVoices)
   const loadSampleTexts = useStore(s => s.loadAbVoicePresets)
+  const adoptVoice = useStore(s => s.adoptVoiceFromFile)
+  const busy = useStore(s => s.voicesBusy)
+  const adoptInput = useRef<HTMLInputElement>(null)
 
   useEffect(() => { loadVoices(); loadSampleTexts() }, [loadVoices, loadSampleTexts])
 
@@ -38,12 +41,36 @@ export function VoicesView() {
               reused by every audiobook
             </p>
           </div>
-          <button
-            onClick={() => loadVoices()}
-            className="shrink-0 rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
-          >
-            <RefreshCw size={12} className="mr-1 inline" /> Reload
-          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <input
+              ref={adoptInput}
+              type="file"
+              accept="audio/*,video/*"
+              className="hidden"
+              onChange={e => {
+                const f = e.target.files?.[0]
+                if (f) adoptVoice(f)
+                e.target.value = ''
+              }}
+            />
+            <button
+              onClick={() => adoptInput.current?.click()}
+              disabled={busy}
+              title="Pick a recording — it becomes a cloning voice that stays the same in every passage"
+              className="rounded-lg bg-cta px-2.5 py-1 text-[11px] font-medium text-white disabled:opacity-40"
+            >
+              {busy
+                ? <Loader2 size={12} className="mr-1 inline animate-spin" />
+                : <Upload size={12} className="mr-1 inline" />}
+              Voice from a recording
+            </button>
+            <button
+              onClick={() => loadVoices()}
+              className="rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+            >
+              <RefreshCw size={12} className="mr-1 inline" /> Reload
+            </button>
+          </div>
         </div>
         {error && <p className="mt-2 text-[11px] text-red-400">{error}</p>}
       </div>
@@ -55,9 +82,11 @@ export function VoicesView() {
               <Mic2 size={28} className="mx-auto mb-3 text-text-muted" />
               <h2 className="text-sm font-semibold text-text-primary">No voices yet</h2>
               <p className="mt-1 text-xs text-text-secondary">
-                Create one in the sidebar, then upload or record a reference clip
-                here. Cloning engines need a clip of the voice you want; the
-                Qwen3 engines build a voice from a written description instead.
+                Fastest route: <span className="text-text-secondary">Voice from a
+                recording</span> above — any clip of the voice you want becomes a
+                clone that stays the same in every passage. Describing a voice
+                instead works too, but those engines invent a new speaker on
+                every render until you audition one and keep the take.
               </p>
             </div>
           </div>
@@ -398,6 +427,28 @@ function VoiceCard({ voice, engine, engines }: {
                   Switch to {eng.label}
                 </button>
               ))}
+          </div>
+        </div>
+      )}
+
+      {/* A frozen voice is otherwise a dead end: the clip decides who speaks,
+          so rerolling the seed does nothing. Offer the way back, but only when
+          the written description it was built from is still there. */}
+      {voice.reference_path && !voice.reference_missing
+        && !!voice.params?.voice_description && (
+        <div className="mt-3 rounded-xl border border-border bg-bg-tertiary/40 p-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <p className="min-w-0 text-[11px] text-text-secondary">
+              Kept as a recording — this voice now stays the same in every
+              passage.
+            </p>
+            <button
+              onClick={() => reroll(voice.id, { unfreeze: true })}
+              className="shrink-0 flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+              title="Drop the recording and go back to searching from the description"
+            >
+              <Dices size={11} /> Try another
+            </button>
           </div>
         </div>
       )}
