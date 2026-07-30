@@ -29,7 +29,14 @@ import type { OutputFile } from '../../types'
  * the only sane way to favourite, move or delete more than one thing.
  */
 export function MediaGrid() {
-  const outputs = useStore(s => s.outputs)
+  // filteredOutputs(), not the raw list: the type filter and the search box
+  // live there, and — more importantly — selectedOutput is an index INTO the
+  // filtered list. Rendering the raw one made the filter do nothing and would
+  // have pointed the dialog and Delete at the wrong file as soon as a filter
+  // was active. It only looked harmless because 'all' is the default.
+  const outputs = useStore(s => s.filteredOutputs())
+  // Paging is about what the server has, so it counts the unfiltered list.
+  const loadedCount = useStore(s => s.outputs.length)
   const outputsTotal = useStore(s => s.outputsTotal)
   const loadMore = useStore(s => s.loadMoreOutputs)
   const nsfwMode = !!useStore(s => s.servicesConfig?.nsfw_mode)
@@ -54,7 +61,7 @@ export function MediaGrid() {
   const [blueprintFor, setBlueprintFor] = useState<OutputFile | null>(null)
   const sentinel = useRef<HTMLDivElement | null>(null)
 
-  const hasMore = outputs.length < outputsTotal
+  const hasMore = loadedCount < outputsTotal
 
   // Infinite scroll. No offset maths — the sentinel is a real element and the
   // browser reports when it comes into view.
@@ -176,7 +183,10 @@ export function MediaGrid() {
               // deleteSelectedOutput works on the store's selection, so point
               // it at each file in turn rather than duplicating its logic.
               await forEachPicked('deleted', async file => {
-                const at = useStore.getState().outputs.findIndex(o => o.name === file.name)
+                // Index into the filtered list, which is what the store's
+                // selection means.
+                const at = useStore.getState().filteredOutputs()
+                  .findIndex(o => o.name === file.name)
                 if (at < 0) return
                 setSelectedOutput(at)
                 await deleteSelected()
@@ -351,7 +361,9 @@ function DetailDialog({ index, onClose, onStep }: {
   onClose: () => void
   onStep: (delta: number) => void
 }) {
-  const outputs = useStore(s => s.outputs)
+  // Same list the grid renders, or the arrows would page through items that
+  // are not on screen and the counter would lie.
+  const outputs = useStore(s => s.filteredOutputs())
   const file = outputs[index]
 
   useEffect(() => {

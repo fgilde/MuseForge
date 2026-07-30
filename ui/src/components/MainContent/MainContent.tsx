@@ -325,6 +325,9 @@ function PipelinePlaceholder() {
 
 export function MainContent() {
   const outputs = useStore(s => s.filteredOutputs())
+  // Unfiltered count, to tell "no generations yet" apart from "the filter
+  // hides them all" — the first-run text is wrong for the second case.
+  const loadedCount = useStore(s => s.outputs.length)
   const outputsTotal = useStore(s => s.outputsTotal)
   const jobs = useStore(s => s.jobs)
   const generationMode = useStore(s => s.generationMode)
@@ -416,7 +419,16 @@ export function MainContent() {
           <PipelinePlaceholder />
         )}
 
-        {outputs.length === 0 && jobs.length === 0 ? (() => {
+        {outputs.length === 0 && jobs.length === 0 && loadedCount > 0 ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+            <Film size={22} className="text-text-muted opacity-40" />
+            <p className="text-sm text-text-secondary">Nothing matches this filter.</p>
+            <p className="text-[11px] text-text-muted">
+              {loadedCount} item{loadedCount === 1 ? '' : 's'} in this workspace —
+              switch the type filter back to All, or clear the search.
+            </p>
+          </div>
+        ) : outputs.length === 0 && jobs.length === 0 ? (() => {
           const noun = generationMode === 'image' ? 'images'
             : generationMode === 'audio' ? 'audio' : 'videos'
           const example = generationMode === 'image'
