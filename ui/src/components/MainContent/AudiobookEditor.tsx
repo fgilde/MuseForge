@@ -55,6 +55,7 @@ export function AudiobookEditor() {
   const timeline = useStore(s => s.abTimeline)
   const error = useStore(s => s.abError)
   const patchAudiobook = useStore(s => s.patchAudiobook)
+  const setAbChapter = useStore(s => s.setAbChapter)
   const planChapter = useStore(s => s.planAbChapter)
   const renderChapter = useStore(s => s.renderAbChapter)
   const assisting = useStore(s => s.abAssisting)
@@ -232,11 +233,41 @@ export function AudiobookEditor() {
         )}
       </div>
 
-      {/* Blocks */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="flex min-h-0 flex-1">
+        {/* Chapter navigation — the book is read here, not in the sidebar. */}
+        {project.chapters.length > 0 && (
+          <nav className="w-52 shrink-0 overflow-y-auto border-r border-border p-2">
+            {project.chapters.map((c, i) => (
+              <button
+                key={c.id}
+                onClick={() => setAbChapter(c.id)}
+                className={`mb-0.5 block w-full rounded-md px-2 py-1.5 text-left ${
+                  c.id === chapterId ? 'bg-bg-active' : 'hover:bg-bg-hover'
+                }`}
+              >
+                <div className="truncate text-[11px] text-text-primary">
+                  {i + 1}. {c.title || 'Untitled'}
+                </div>
+                <div className="text-[9px] text-text-muted">
+                  {c.blocks.length} blocks
+                  {c.audio_path
+                    ? ` · ${Math.round(c.audio_duration ?? 0)}s rendered`
+                    : ' · not rendered'}
+                </div>
+              </button>
+            ))}
+          </nav>
+        )}
+
+        {/* Reading pane */}
+        <div className="min-w-0 flex-1 overflow-y-auto">
         {!chapter ? (
           <div className="flex h-full items-center justify-center">
-            <p className="text-xs text-text-secondary">Pick a chapter in the sidebar.</p>
+            <p className="text-xs text-text-secondary">
+              {project.chapters.length === 0
+                ? 'Import a text in the sidebar — its chapters land here.'
+                : 'Pick a chapter on the left.'}
+            </p>
           </div>
         ) : chapter.blocks.length === 0 ? (
           <div className="flex h-full items-center justify-center p-8">
@@ -245,7 +276,10 @@ export function AudiobookEditor() {
             </p>
           </div>
         ) : (
-          <div className="mx-auto max-w-[72ch] px-6 py-6 space-y-3">
+          <article className="mx-auto max-w-[72ch] px-6 py-6 space-y-3">
+            <h2 className="mb-4 text-base font-semibold text-text-primary">
+              {(project.chapters.findIndex(c => c.id === chapter.id) + 1)}. {chapter.title || 'Untitled'}
+            </h2>
             {chapter.blocks.map(block => {
               if (block.type === 'sfx') {
                 const asset = project.sfx.find(s => s.id === block.sfx_id)
@@ -331,8 +365,9 @@ export function AudiobookEditor() {
                 </div>
               )
             })}
-          </div>
+          </article>
         )}
+        </div>
       </div>
 
       {/* Selection popover */}
@@ -358,6 +393,13 @@ export function AudiobookEditor() {
                 </button>
               ))}
             </div>
+          )}
+
+          {project.sfx.length === 0 && (
+            <p className="mt-2 text-[10px] text-text-muted">
+              No effects yet — generate one or reuse an existing file under
+              Effects → From library in the sidebar.
+            </p>
           )}
 
           {project.sfx.length > 0 && (

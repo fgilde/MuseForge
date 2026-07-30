@@ -1,13 +1,23 @@
-# MuseForge
+<p align="center">
+  <img src="docs/logo.png" alt="MuseForge" width="420" />
+</p>
+
+<p align="center">
+  <strong>Self-hosted AI media studio</strong> — video, images, audio, long-form text and audiobooks,<br />
+  drivable from a browser, a script or an AI agent.
+</p>
+
+---
 
 > **Heritage:** MuseForge is a fork of [Maestro](https://github.com/Blizaine/Maestro) by
 > [@Blizaine](https://github.com/Blizaine), which itself builds on the
 > [Wan2GP](https://github.com/deepbeepmeep/Wan2GP) generation pipeline. Full credits
 > [below](#credits) — this README only covers what MuseForge does differently.
 
-MuseForge is a **self-hosted AI media studio you can deploy anywhere and drive from
-anything** — a browser, a script, or an AI agent. Video, image and audio generation
-with an LLM-planned Director mode, packaged as a single Docker image.
+Deploy it anywhere with one `docker compose up`, then use it from the browser or
+let an agent drive it over MCP. Video, image and audio generation, an
+LLM-planned Director mode, a long-form Storywriter and an audiobook producer —
+all in a single Docker image.
 
 ## Why a separate tool?
 

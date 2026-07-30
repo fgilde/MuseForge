@@ -62,9 +62,11 @@ function App() {
             <Menu size={20} />
           </button>
           <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-accent-blue flex items-center justify-center text-white font-bold text-sm">
-              M
-            </div>
+            <img
+              src="/museforge-icon.png"
+              alt=""
+              className="w-7 h-7 rounded-lg"
+            />
             <span className="font-semibold text-sm">MuseForge</span>
             {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
           </div>

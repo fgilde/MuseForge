@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   BookAudio, Plus, Trash2, Upload, Loader2, Mic, ChevronDown, ChevronRight, Check,
+  Play, Library, AlertTriangle,
 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import type { AudiobookVoiceProfile } from '../../api/client'
+import type { AudiobookVoiceProfile, SfxLibraryEffect } from '../../api/client'
 
 /** TTS architectures that can voice a run. Kept here rather than hardcoded
  *  in a dropdown so a new engine only needs one line. `clone` marks the
@@ -17,6 +18,15 @@ const TTS_MODELS: { type: string; label: string; clone: boolean; emotion: 'nativ
 ]
 
 const SWATCHES = ['#22d3ee', '#a78bfa', '#f472b6', '#4ade80', '#fb923c', '#facc15', '#60a5fa', '#f87171']
+
+/** A profile id only has to be unique inside its project, so derive it from
+ *  the profiles that already exist. Deterministic on purpose — reading a
+ *  clock or a random source inside a component is a purity violation. */
+function nextProfileId(existing: AudiobookVoiceProfile[]): string {
+  let n = existing.length + 1
+  while (existing.some(v => v.id === `vp${n}`)) n++
+  return `vp${n}`
+}
 
 export function AudiobookPanel() {
   const projects = useStore(s => s.audiobooks)
@@ -39,31 +49,54 @@ export function AudiobookPanel() {
   const importStory = useStore(s => s.importStoryAsAudiobook)
   const createAsset = useStore(s => s.createAbAsset)
   const deleteAsset = useStore(s => s.deleteAbAsset)
+  const sfxLibrary = useStore(s => s.abSfxLibrary)
+  const loadSfxLibrary = useStore(s => s.loadAbSfxLibrary)
+  const adoptSfx = useStore(s => s.adoptAbSfx)
+  const presets = useStore(s => s.abVoicePresets)
+  const loadPresets = useStore(s => s.loadAbVoicePresets)
+  const libraryVoices = useStore(s => s.voices)
+  const loadVoices = useStore(s => s.loadVoices)
+  const importLibraryVoice = useStore(s => s.importLibraryVoice)
+  const previewVoice = useStore(s => s.previewAbVoice)
+  const previewBusy = useStore(s => s.voicePreviewBusy)
+  const previewUrls = useStore(s => s.voicePreviewUrls)
+  const previewWarnings = useStore(s => s.voicePreviewWarnings)
 
   const fileRef = useRef<HTMLInputElement>(null)
   const importFile = useStore(s => s.importAudiobookFile)
   const [autoSplit, setAutoSplit] = useState(true)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [openSection, setOpenSection] = useState<'voices' | 'sfx' | 'music' | 'chapters' | null>('voices')
+  const [addingVoice, setAddingVoice] = useState(false)
 
-  useEffect(() => { loadAudiobooks(); loadStories() }, [loadAudiobooks, loadStories])
+  useEffect(() => {
+    loadAudiobooks(); loadStories(); loadPresets(); loadVoices(); loadSfxLibrary()
+  }, [loadAudiobooks, loadStories, loadPresets, loadVoices, loadSfxLibrary])
 
   const finishedStories = stories.filter(s => (s.word_count ?? 0) > 0)
 
   const voices = project?.voice_profiles ?? []
 
-  const addVoice = () => {
+  /** A preset is a real configuration (engine + params), not a label — that
+   *  is why it is worth offering: only some engines can clone or take an
+   *  emotion at all. Without one you get a plain IndexTTS2 profile. */
+  const addVoice = (preset?: {
+    name: string; color: string; model_type: string
+    default_emotion?: string | null
+    params: Record<string, number | string | boolean>
+  }) => {
     const n = voices.length + 1
     const next: AudiobookVoiceProfile = {
-      id: `vp${Date.now().toString(36)}`,
-      name: n === 1 ? 'Narrator' : `Voice ${n}`,
-      color: SWATCHES[(n - 1) % SWATCHES.length],
-      model_type: 'index_tts2',
+      id: nextProfileId(voices),
+      name: preset?.name ?? (n === 1 ? 'Narrator' : `Voice ${n}`),
+      color: preset?.color ?? SWATCHES[(n - 1) % SWATCHES.length],
+      model_type: preset?.model_type ?? 'index_tts2',
       voice_ref_path: null,
       emotion_ref_path: null,
-      default_emotion: null,
-      params: {},
+      default_emotion: preset?.default_emotion ?? null,
+      params: { ...(preset?.params ?? {}) },
     }
+    setAddingVoice(false)
     patchAudiobook({
       voice_profiles: [...voices, next],
       // First profile becomes the default so imported paragraphs have a
@@ -214,13 +247,68 @@ export function AudiobookPanel() {
             onToggle={() => setOpenSection(s => (s === 'voices' ? null : 'voices'))}
             action={
               <button
-                onClick={e => { e.stopPropagation(); addVoice() }}
+                onClick={e => { e.stopPropagation(); setOpenSection('voices'); setAddingVoice(v => !v) }}
                 className="flex items-center gap-0.5 text-[10px] text-accent-blue hover:text-accent-blue-hover"
               >
-                <Plus size={10} /> Add
+                <Plus size={10} /> Add voice
               </button>
             }
           >
+            {addingVoice && (
+              <div className="mb-2 space-y-1.5 rounded-lg border border-border bg-bg-tertiary/40 p-2">
+                <div className="text-[10px] uppercase tracking-wider text-text-muted">
+                  Start from a preset
+                </div>
+                {presets.map(p => (
+                  <button
+                    key={p.id}
+                    onClick={() => addVoice(p)}
+                    className="block w-full rounded-md border border-border px-2 py-1.5 text-left transition-colors hover:border-border-light"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: p.color }} />
+                      <span className="truncate text-[11px] text-text-primary">{p.name}</span>
+                      {p.needs_reference && (
+                        <span className="ml-auto shrink-0 text-[9px] text-indicator-warning">
+                          needs a clip
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 text-[9px] leading-snug text-text-muted">{p.description}</div>
+                  </button>
+                ))}
+
+                {libraryVoices.length > 0 && (
+                  <>
+                    <div className="mt-2 flex items-center gap-1 text-[10px] uppercase tracking-wider text-text-muted">
+                      <Library size={10} /> From library
+                    </div>
+                    {libraryVoices.map(v => (
+                      <button
+                        key={v.id}
+                        onClick={() => { setAddingVoice(false); importLibraryVoice(v.id) }}
+                        className="flex w-full items-center gap-1.5 rounded-md border border-border px-2 py-1 text-left transition-colors hover:border-border-light"
+                        title={v.description || v.model_type}
+                      >
+                        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: v.color }} />
+                        <span className="truncate text-[11px] text-text-primary">{v.name}</span>
+                        <span className="ml-auto shrink-0 text-[9px] text-text-muted">
+                          {v.ready ? 'ready' : 'no reference'}
+                        </span>
+                      </button>
+                    ))}
+                  </>
+                )}
+
+                <button
+                  onClick={() => addVoice()}
+                  className="w-full rounded border border-border py-1 text-[10px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+                >
+                  Blank voice
+                </button>
+              </div>
+            )}
+
             {voices.length === 0 ? (
               <p className="text-[11px] text-text-muted">
                 Add at least one voice — a paragraph without one cannot be rendered.
@@ -234,6 +322,11 @@ export function AudiobookPanel() {
                     isDefault={project.default_profile_id === v.id}
                     onDefault={() => patchAudiobook({ default_profile_id: v.id })}
                     onPatch={patch => patchVoice(v.id, patch)}
+                    onPreview={() => previewVoice(v.id)}
+                    previewing={previewBusy === v.id}
+                    previewBlocked={previewBusy !== null && previewBusy !== v.id}
+                    previewUrl={previewUrls[v.id]}
+                    warnings={previewWarnings[v.id]}
                     onDelete={() => patchAudiobook({
                       voice_profiles: voices.filter(x => x.id !== v.id),
                       ...(project.default_profile_id === v.id
@@ -260,6 +353,9 @@ export function AudiobookPanel() {
               }))}
               onCreate={body => createAsset('sfx', body)}
               onDelete={id => deleteAsset('sfx', id)}
+              library={sfxLibrary}
+              onAdopt={adoptSfx}
+              onRefreshLibrary={loadSfxLibrary}
             />
           </Section>
 
@@ -333,12 +429,21 @@ function Section({ label, open, onToggle, action, children }: {
   )
 }
 
-function VoiceRow({ voice, isDefault, onPatch, onDefault, onDelete }: {
+function VoiceRow({
+  voice, isDefault, onPatch, onDefault, onDelete,
+  onPreview, previewing, previewBlocked, previewUrl, warnings,
+}: {
   voice: AudiobookVoiceProfile
   isDefault: boolean
   onPatch: (patch: Partial<AudiobookVoiceProfile>) => void
   onDefault: () => void
   onDelete: () => void
+  onPreview: () => void
+  previewing: boolean
+  /** Another audition holds the generation slot — one at a time. */
+  previewBlocked: boolean
+  previewUrl?: string
+  warnings?: string[]
 }) {
   const refInput = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState(false)
@@ -371,6 +476,15 @@ function VoiceRow({ voice, isDefault, onPatch, onDefault, onDelete }: {
           className="min-w-0 flex-1 rounded border border-border bg-bg-tertiary px-1.5 py-0.5 text-[11px] text-text-primary"
           aria-label="Voice name"
         />
+        <button
+          onClick={onPreview}
+          disabled={previewing || previewBlocked}
+          title="Speak a sample line with this voice"
+          aria-label="Preview voice"
+          className="rounded p-1 text-text-muted hover:text-text-primary disabled:opacity-30"
+        >
+          {previewing ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+        </button>
         <button
           onClick={onDefault}
           title={isDefault ? 'Default voice' : 'Make this the default voice'}
@@ -462,6 +576,21 @@ function VoiceRow({ voice, isDefault, onPatch, onDefault, onDelete }: {
         disabled={caps?.emotion === 'none'}
         className="mt-1.5 w-full rounded border border-border bg-bg-tertiary px-1.5 py-1 text-[10px] text-text-primary placeholder:text-text-muted disabled:opacity-50"
       />
+
+      {previewing && (
+        <p className="mt-1 text-[9px] text-text-muted">
+          Rendering a sample line — the first use of a model downloads it.
+        </p>
+      )}
+      {previewUrl && !previewing && (
+        <audio src={previewUrl} controls autoPlay className="mt-1.5 h-6 w-full" />
+      )}
+      {(warnings ?? []).length > 0 && (
+        <p className="mt-1 flex items-start gap-1 text-[9px] text-indicator-warning">
+          <AlertTriangle size={9} className="mt-0.5 shrink-0" />
+          <span>{(warnings ?? []).join(' · ')}</span>
+        </p>
+      )}
     </div>
   )
 }
@@ -475,7 +604,7 @@ function VoiceRow({ voice, isDefault, onPatch, onDefault, onDelete }: {
  * An asset without audio is marked pending rather than looking ready and
  * then failing the render.
  */
-function AssetList({ kind, items, onCreate, onDelete }: {
+function AssetList({ kind, items, onCreate, onDelete, library, onAdopt, onRefreshLibrary }: {
   kind: 'sfx' | 'music'
   items: { id: string; label: string; audio_path?: string | null; detail: string }[]
   onCreate: (body: {
@@ -483,8 +612,16 @@ function AssetList({ kind, items, onCreate, onDelete }: {
     playback_mode?: 'parallel' | 'sequential'; loop?: boolean; volume?: number
   }) => Promise<void>
   onDelete: (id: string) => Promise<void>
+  /** Effects already on disk. Adopting one costs nothing — no generation. */
+  library?: SfxLibraryEffect[]
+  onAdopt?: (effect: SfxLibraryEffect, opts?: {
+    playback_mode?: 'parallel' | 'sequential'; loop?: boolean
+  }) => Promise<void>
+  onRefreshLibrary?: () => Promise<void>
 }) {
   const [adding, setAdding] = useState(false)
+  const [browsing, setBrowsing] = useState(false)
+  const [adoptMode, setAdoptMode] = useState<'parallel' | 'sequential'>('parallel')
   const [label, setLabel] = useState('')
   const [prompt, setPrompt] = useState('')
   const [duration, setDuration] = useState(kind === 'sfx' ? 5 : 60)
@@ -609,12 +746,70 @@ function AssetList({ kind, items, onCreate, onDelete }: {
           </div>
         </div>
       ) : (
-        <button
-          onClick={() => setAdding(true)}
-          className="flex w-full items-center justify-center gap-1 rounded-lg border border-border py-1.5 text-[10px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
-        >
-          <Plus size={10} /> {kind === 'sfx' ? 'New effect' : 'New music bed'}
-        </button>
+        <div className="flex gap-1.5">
+          <button
+            onClick={() => setAdding(true)}
+            className="flex flex-1 items-center justify-center gap-1 rounded-lg border border-border py-1.5 text-[10px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+          >
+            <Plus size={10} /> {kind === 'sfx' ? 'New effect' : 'New music bed'}
+          </button>
+          {onAdopt && (
+            <button
+              onClick={() => { setBrowsing(v => !v); if (!browsing) onRefreshLibrary?.() }}
+              className={`flex items-center justify-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] transition-colors ${
+                browsing
+                  ? 'border-accent-blue text-accent-blue'
+                  : 'border-border text-text-secondary hover:border-border-light hover:text-text-primary'
+              }`}
+              title="Reuse an effect you already generated in Audio → SFX"
+            >
+              <Library size={10} /> From library
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Existing files, reusable as they are — adopting one generates nothing. */}
+      {browsing && onAdopt && (
+        <div className="space-y-1.5 rounded-lg border border-border bg-bg-tertiary/40 p-2">
+          <select
+            value={adoptMode}
+            onChange={e => setAdoptMode(e.target.value as 'parallel' | 'sequential')}
+            className="w-full rounded border border-border bg-bg-tertiary px-1.5 py-1 text-[10px] text-text-primary"
+          >
+            <option value="parallel">Parallel — plays under the speech</option>
+            <option value="sequential">Sequential — speech pauses for it</option>
+          </select>
+          {(library ?? []).length === 0 ? (
+            <p className="text-[10px] text-text-muted">
+              Nothing yet. Effects made in Audio → SFX show up here.
+            </p>
+          ) : (
+            <div className="max-h-56 space-y-1 overflow-y-auto">
+              {(library ?? []).map(eff => (
+                <div key={eff.path} className="rounded-md border border-border bg-bg-tertiary/60 px-2 py-1">
+                  <div className="truncate text-[10px] text-text-primary" title={eff.name}>
+                    {eff.name}
+                  </div>
+                  {eff.prompt && (
+                    <div className="truncate text-[9px] text-text-muted" title={eff.prompt}>
+                      {eff.prompt}
+                    </div>
+                  )}
+                  <div className="mt-1 flex items-center gap-1.5">
+                    <audio src={eff.url} controls className="h-6 min-w-0 flex-1" />
+                    <button
+                      onClick={() => onAdopt(eff, { playback_mode: adoptMode })}
+                      className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[9px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+                    >
+                      Adopt
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   )

@@ -624,6 +624,9 @@ export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamil
     if (audioSubMode === 'music') return audioSubFamilies.filter(f => f.id === 'tts_music')
     if (audioSubMode === 'sfx') return audioSubFamilies.filter(f => f.id === 'tts_sfx')
     if (audioSubMode === 'mixer') return []  // Mixer has no model selector
+    // Audiobook picks a TTS model per voice profile, and the voice library
+    // only stores voices — neither has a mode-level model to select.
+    if (audioSubMode === 'audiobook' || audioSubMode === 'voices') return []
     return audioSubFamilies
   }
   // Text mode talks to the LLM service — no generation-model families at all
@@ -1407,6 +1410,38 @@ interface AppState {
     effects?: api.AbCastEffect[]
   }) => Promise<void>
   clearAbProposals: () => void
+  /** Effects already sitting in the workspace, offered for reuse instead of
+   *  regenerating a door slam that exists. */
+  abSfxLibrary: api.SfxLibraryEffect[]
+  loadAbSfxLibrary: () => Promise<void>
+  adoptAbSfx: (effect: api.SfxLibraryEffect, opts?: {
+    playback_mode?: 'parallel' | 'sequential'; loop?: boolean
+  }) => Promise<void>
+  /** Starting points offered by "Add voice", plus the per-language audition
+   *  lines the preview endpoints fall back to. */
+  abVoicePresets: api.AudiobookVoicePreset[]
+  abVoiceSampleTexts: Record<string, string>
+  loadAbVoicePresets: () => Promise<void>
+  /** Copy a library voice into the open project. */
+  importLibraryVoice: (voiceId: string) => Promise<void>
+
+  // Voice library (workspace-wide, shared by Speech and audiobooks)
+  voices: api.VoiceLibraryEntry[]
+  voiceEngines: Record<string, api.VoiceEngine>
+  voicesError: string | null
+  voicesBusy: boolean
+  loadVoices: () => Promise<void>
+  createVoiceEntry: (draft: api.VoiceDraft) => Promise<string | null>
+  patchVoiceEntry: (id: string, patch: api.VoiceDraft) => Promise<void>
+  deleteVoiceEntry: (id: string) => Promise<void>
+  /** Auditions, keyed by library voice id or in-book profile id — one at a
+   *  time, since each one occupies the generation slot anyway. */
+  voicePreviewBusy: string | null
+  voicePreviewUrls: Record<string, string>
+  voicePreviewWarnings: Record<string, string[]>
+  previewLibraryVoice: (voiceId: string, text?: string, language?: string) => Promise<void>
+  previewAbVoice: (profileId: string, text?: string) => Promise<void>
+  _pollVoicePreview: (key: string, jobId: string, library: boolean) => void
 
   // Prompt enhancement
   isEnhancing: boolean
@@ -2015,6 +2050,8 @@ export const useStore = create<AppState>((set, get) => ({
       // Audiobook picks a TTS model per voice profile inside the project,
       // so there is no single mode-level model to restore.
       audiobook: '',
+      // The voice library stores voices; each one names its own engine.
+      voices: '',
     }
     const saved = savedModels[subMode]
     const targetModel = (saved && models.some(m => m.model_type === saved))
@@ -5817,6 +5854,179 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (e) {
       set({ abError: e instanceof Error ? e.message : 'Could not add the asset' })
     }
+  },
+
+  abSfxLibrary: [],
+
+  loadAbSfxLibrary: async () => {
+    try {
+      const { effects } = await api.fetchAbSfxLibrary()
+      set({ abSfxLibrary: effects })
+    } catch { /* an empty library is not worth an error banner */ }
+  },
+
+  adoptAbSfx: async (effect, opts) => {
+    const pid = get().activeAudiobookId
+    if (!pid) return
+    set({ abError: null })
+    try {
+      const { project } = await api.adoptAudiobookSfx(pid, {
+        path: effect.path,
+        label: effect.name.replace(/\.[^.]+$/, ''),
+        prompt: effect.prompt,
+        playback_mode: opts?.playback_mode ?? 'parallel',
+        loop: opts?.loop ?? false,
+      })
+      set({ activeAudiobook: project })
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not adopt the effect' })
+    }
+  },
+
+  abVoicePresets: [],
+  abVoiceSampleTexts: {},
+
+  loadAbVoicePresets: async () => {
+    try {
+      const { presets, sample_texts } = await api.fetchVoicePresets()
+      set({ abVoicePresets: presets, abVoiceSampleTexts: sample_texts })
+    } catch { /* the panel falls back to a plain new voice */ }
+  },
+
+  importLibraryVoice: async (voiceId) => {
+    const pid = get().activeAudiobookId
+    if (!pid) return
+    set({ abError: null })
+    try {
+      const { project } = await api.importVoiceIntoAudiobook(pid, voiceId)
+      set({ activeAudiobook: project })
+      get().loadAudiobooks()
+    } catch (e) {
+      set({ abError: e instanceof Error ? e.message : 'Could not import the voice' })
+    }
+  },
+
+  // ── Voice library ───────────────────────────────────────────────────
+  voices: [],
+  voiceEngines: {},
+  voicesError: null,
+  voicesBusy: false,
+
+  loadVoices: async () => {
+    try {
+      const { voices, engines } = await api.fetchVoices()
+      set({ voices, voiceEngines: engines, voicesError: null })
+    } catch (e) {
+      set({ voicesError: e instanceof Error ? e.message : 'Could not load the voice library' })
+    }
+  },
+
+  createVoiceEntry: async (draft) => {
+    set({ voicesBusy: true, voicesError: null })
+    try {
+      const voice = await api.createVoice(draft)
+      set(s => ({ voices: [...s.voices, voice] }))
+      return voice.id
+    } catch (e) {
+      set({ voicesError: e instanceof Error ? e.message : 'Could not create the voice' })
+      return null
+    } finally {
+      set({ voicesBusy: false })
+    }
+  },
+
+  /** The server recomputes `ready`/`reference_missing`, so adopt its answer
+   *  rather than patching our copy — a broken reference must not read ready. */
+  patchVoiceEntry: async (id, patch) => {
+    set({ voicesError: null })
+    try {
+      const voice = await api.updateVoice(id, patch)
+      set(s => ({ voices: s.voices.map(v => (v.id === id ? voice : v)) }))
+    } catch (e) {
+      set({ voicesError: e instanceof Error ? e.message : 'Could not save the voice' })
+    }
+  },
+
+  deleteVoiceEntry: async (id) => {
+    try {
+      await api.deleteVoice(id)
+      set(s => ({ voices: s.voices.filter(v => v.id !== id) }))
+    } catch (e) {
+      set({ voicesError: e instanceof Error ? e.message : 'Could not delete the voice' })
+    }
+  },
+
+  voicePreviewBusy: null,
+  voicePreviewUrls: {},
+  voicePreviewWarnings: {},
+
+  previewLibraryVoice: async (voiceId, text, language) => {
+    if (get().voicePreviewBusy) return
+    set({ voicePreviewBusy: voiceId, voicesError: null })
+    try {
+      const started = await api.previewVoice(voiceId, { text, language })
+      set(s => ({
+        voicePreviewWarnings: { ...s.voicePreviewWarnings, [voiceId]: started.warnings || [] },
+      }))
+      get()._pollVoicePreview(voiceId, started.job_id, true)
+    } catch (e) {
+      set({
+        voicePreviewBusy: null,
+        voicesError: e instanceof Error ? e.message : 'Could not preview this voice',
+      })
+    }
+  },
+
+  previewAbVoice: async (profileId, text) => {
+    const pid = get().activeAudiobookId
+    if (!pid || get().voicePreviewBusy) return
+    set({ voicePreviewBusy: profileId, abError: null })
+    try {
+      const started = await api.previewAudiobookVoice(pid, profileId, { text })
+      set(s => ({
+        voicePreviewWarnings: { ...s.voicePreviewWarnings, [profileId]: started.warnings || [] },
+      }))
+      get()._pollVoicePreview(profileId, started.job_id, false)
+    } catch (e) {
+      set({
+        voicePreviewBusy: null,
+        abError: e instanceof Error ? e.message : 'Could not preview this voice',
+      })
+    }
+  },
+
+  /** Wait for an audition job and hand the finished file to the panel that
+   *  asked for it. Keyed rather than global so switching voices mid-render
+   *  cannot make one voice play another's sample. */
+  _pollVoicePreview: (key, jobId, library) => {
+    const tick = async () => {
+      if (get().voicePreviewBusy !== key) return  // superseded
+      try {
+        const job = await api.fetchJobStatus(jobId)
+        if (job.status === 'completed') {
+          const audio = (job.output_files || []).find(f => !f.endsWith('.json'))
+          set(s => ({
+            voicePreviewBusy: null,
+            voicePreviewUrls: audio
+              ? { ...s.voicePreviewUrls, [key]: `/api/v1/file/${encodeURIComponent(audio)}` }
+              : s.voicePreviewUrls,
+          }))
+          // A library audition is remembered as the entry's sample_path, so
+          // re-reading the library makes it replayable without regenerating.
+          if (library) get().loadVoices()
+          get().loadOutputs()
+          return
+        }
+        if (job.status === 'failed' || job.status === 'cancelled') {
+          const msg = job.error || `Preview ${job.status}`
+          set(library ? { voicePreviewBusy: null, voicesError: msg }
+                      : { voicePreviewBusy: null, abError: msg })
+          return
+        }
+      } catch { /* transient */ }
+      setTimeout(tick, 1500)
+    }
+    tick()
   },
 
   deleteAbAsset: async (kind, assetId) => {

@@ -2020,6 +2020,161 @@ export async function fetchAudiobookTimeline(url: string): Promise<AudiobookTime
     !!e && typeof (e as AudiobookTimelineEntry).start === 'number')
 }
 
+// --- Sound effects already in the workspace ---
+
+/** An effect file Audio → SFX (or an earlier book) already produced. */
+export interface SfxLibraryEffect {
+  name: string
+  path: string
+  url: string
+  prompt: string
+  size_bytes: number
+  created_at: number
+}
+
+export async function fetchAbSfxLibrary(limit = 60): Promise<{ effects: SfxLibraryEffect[] }> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/sfx-library?limit=${limit}`)
+  if (!res.ok) return { effects: [] }
+  return res.json()
+}
+
+/** Reuse an existing file as a project effect — nothing is generated. */
+export async function adoptAudiobookSfx(pid: string, body: {
+  path?: string; name?: string; label?: string
+  playback_mode?: 'parallel' | 'sequential'; loop?: boolean; volume?: number; prompt?: string
+}): Promise<{ project: AudiobookProject; asset_id: string }> {
+  const data = await abPost<{ project: AudiobookProject; asset_id: string }>(
+    pid, 'assets/sfx/adopt', body)
+  return { ...data, project: normalizeProject(data.project) }
+}
+
+// --- Voices: presets, previews, and the workspace-wide library ---
+
+/** A ready-made voice configuration offered when adding a voice to a book. */
+export interface AudiobookVoicePreset {
+  id: string
+  name: string
+  color: string
+  model_type: string
+  default_emotion?: string | null
+  params: Record<string, number | string | boolean>
+  description: string
+  needs_reference: boolean
+}
+
+export async function fetchVoicePresets(): Promise<{
+  presets: AudiobookVoicePreset[]
+  sample_texts: Record<string, string>
+}> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/voice-presets`)
+  if (!res.ok) return { presets: [], sample_texts: {} }
+  return res.json()
+}
+
+/** A started audition. The audio is in the job's `output_files` once the
+ *  job completes — poll `fetchJobStatus(job_id)`. */
+export interface VoicePreviewStart {
+  job_id: string
+  voice_id: string
+  text: string
+  warnings: string[]
+}
+
+/** Audition a voice that lives inside an audiobook project. */
+export async function previewAudiobookVoice(
+  pid: string, profileId: string, body: { text?: string; language?: string } = {},
+): Promise<VoicePreviewStart> {
+  return abPost(pid, `voices/${profileId}/preview`, body)
+}
+
+/** Copy a library voice into a project. A copy on purpose: editing it in
+ *  the book must not rewrite the shared library entry. */
+export async function importVoiceIntoAudiobook(
+  pid: string, voiceId: string,
+): Promise<{ project: AudiobookProject; profile_id: string }> {
+  const data = await abPost<{ project: AudiobookProject; profile_id: string }>(
+    pid, 'voices/import', { voice_id: voiceId })
+  return { ...data, project: normalizeProject(data.project) }
+}
+
+/** What a TTS engine can do. Drives which fields the voice forms show:
+ *  a reference upload is pointless on an engine that cannot clone. */
+export interface VoiceEngine {
+  label: string
+  clone: boolean
+  emotion: 'native' | 'partial' | 'instruction' | 'none' | string
+  needs_reference: boolean
+}
+
+/** One named voice in the workspace library. `ready` is the only field
+ *  worth gating playback on — it already accounts for a missing reference. */
+export interface VoiceLibraryEntry {
+  id: string
+  name: string
+  color: string
+  model_type: string
+  reference_path?: string | null
+  emotion_reference_path?: string | null
+  default_emotion?: string | null
+  language?: string | null
+  description: string
+  params: Record<string, number | string | boolean>
+  sample_path?: string | null
+  created_at: number
+  updated_at: number
+  ready: boolean
+  reference_missing: boolean
+  emotion_support: VoiceEngine['emotion']
+  supports_cloning: boolean
+}
+
+export type VoiceDraft = Partial<Pick<VoiceLibraryEntry,
+  'name' | 'model_type' | 'reference_path' | 'emotion_reference_path'
+  | 'default_emotion' | 'language' | 'description' | 'params' | 'color'
+>>
+
+export async function fetchVoices(): Promise<{
+  voices: VoiceLibraryEntry[]
+  engines: Record<string, VoiceEngine>
+}> {
+  const res = await fetch(`${BASE}/api/v1/voices`)
+  return storyJson(res, 'Loading the voice library')
+}
+
+export async function createVoice(body: VoiceDraft): Promise<VoiceLibraryEntry> {
+  const res = await fetch(`${BASE}/api/v1/voices`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return storyJson(res, 'Creating the voice')
+}
+
+export async function updateVoice(id: string, patch: VoiceDraft): Promise<VoiceLibraryEntry> {
+  const res = await fetch(`${BASE}/api/v1/voices/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  return storyJson(res, 'Saving the voice')
+}
+
+export async function deleteVoice(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/voices/${id}`, { method: 'DELETE' })
+  if (!res.ok && res.status !== 404) throw new Error('Could not delete the voice')
+}
+
+export async function previewVoice(
+  id: string, body: { text?: string; language?: string } = {},
+): Promise<VoicePreviewStart> {
+  const res = await fetch(`${BASE}/api/v1/voices/${id}/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return storyJson(res, 'Voice preview')
+}
+
 // --- Audio Analysis ---
 
 export async function uploadAudio(file: File): Promise<{ filename: string; path: string; url: string }> {

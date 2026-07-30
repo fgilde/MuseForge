@@ -171,8 +171,9 @@ export type EditSubMode = 'retake' | 'inpaint' | 'restyle' | 'outpaint' | 'edit_
 /** `audiobook` owns no generation model of its own — it drives the TTS
  *  models through the audiobook backend, so `getFamiliesForMode` returns []
  *  for it and the sidebar hides the Model + Forge bottom bar (same shape as
- *  `mixer`). */
-export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer' | 'audiobook'
+ *  `mixer`). `voices` is the workspace voice library — pure management, it
+ *  generates nothing on its own either. */
+export type AudioSubMode = 'speech' | 'music' | 'sfx' | 'mixer' | 'audiobook' | 'voices'
 /** Text mode sub-modes. `chat` is a conversation, `story` is the long-form
  *  Storywriter (outline pass + chapter prose passes, server-side state). */
 export type TextSubMode = 'chat' | 'story'

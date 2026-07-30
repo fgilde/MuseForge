@@ -5,6 +5,7 @@ import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
 import { ChatView } from './ChatView'
 import { AudiobookEditor } from './AudiobookEditor'
+import { VoicesView } from './VoicesView'
 import { useStore } from '../../stores/useStore'
 import type { GenerationJob } from '../../types'
 
@@ -571,6 +572,7 @@ export function MainContent() {
   const takeoverView =
     generationMode === 'text' ? <ChatView />
     : generationMode === 'audio' && audioSubMode === 'audiobook' ? <AudiobookEditor />
+    : generationMode === 'audio' && audioSubMode === 'voices' ? <VoicesView />
     : null
   if (takeoverView) {
     return (

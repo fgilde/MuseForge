@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Sparkles, Download, Cpu, ShieldAlert, X } from 'lucide-react'
+import { Download, Cpu, ShieldAlert, X } from 'lucide-react'
 
 const SEEN_KEY = 'museforge_welcome_seen_v1'
 
@@ -30,14 +30,19 @@ export function WelcomeModal() {
       >
         {/* Header */}
         <div className="px-6 pt-6 pb-4 flex items-start gap-3">
-          <div className="w-11 h-11 rounded-xl bg-accent-blue/15 flex items-center justify-center shrink-0">
-            <Sparkles size={22} className="text-accent-blue" />
-          </div>
+          {/* The wordmark carries the introduction better than a generic
+              icon — this is the one screen where branding belongs. */}
+          <img
+            src="/museforge-logo.png"
+            alt="MuseForge"
+            className="w-16 h-16 rounded-xl shrink-0 object-cover"
+          />
           <div className="flex-1">
             <h2 className="text-base font-semibold text-text-primary">Welcome to MuseForge</h2>
             <p className="text-xs text-text-muted mt-0.5">
-              A local AI studio for video, images, and music — including a Director mode
-              that plans a whole music video or short film from a sentence.
+              A local AI studio for video, images, audio, long-form text and
+              audiobooks — including a Director mode that plans a whole music
+              video or short film from a sentence.
             </p>
           </div>
           <button onClick={dismiss} className="p-1 rounded text-text-muted hover:text-text-primary" aria-label="Close">

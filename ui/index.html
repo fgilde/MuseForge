@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/museforge.svg" />
+    <!-- PNG rather than the old placeholder SVG: the mark is a rendered
+         illustration, so a raster favicon is what actually reproduces it. -->
+    <link rel="icon" type="image/png" sizes="256x256" href="/museforge-icon.png" />
+    <link rel="apple-touch-icon" sizes="512x512" href="/museforge-icon-512.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <!-- Hint the UA before CSS loads so native controls don't flash the
          wrong scheme; the effective scheme comes from index.css
@@ -80,8 +83,8 @@
             '<ol style="line-height:1.9;font-size:14px;color:#b8b0a0;padding-left:20px;">' +
             '<li>Hard refresh: <b style="color:#e8e0d0">Ctrl+F5</b> (or Cmd+Shift+R)</li>' +
             '<li>Press <b style="color:#e8e0d0">F12</b> &rarr; Console tab, and share the first red error on Discord/GitHub</li>' +
-            '<li>If the error mentions <b style="color:#e8e0d0">MIME type</b>: update MuseForge (the fix shipped), or add an antivirus exclusion for the pinokio folder</li>' +
-            '<li>Re-run <b style="color:#e8e0d0">Update</b> in Pinokio to rebuild the UI</li>' +
+            '<li>If the error mentions <b style="color:#e8e0d0">MIME type</b>: update MuseForge (the fix shipped), or add an antivirus exclusion for the MuseForge folder</li>' +
+            '<li>Rebuild the UI: <b style="color:#e8e0d0">docker compose up -d --build</b> (or <b style="color:#e8e0d0">cd ui &amp;&amp; npm run build</b> for a manual install)</li>' +
             '</ol></div>';
         }, 10000);
       })();

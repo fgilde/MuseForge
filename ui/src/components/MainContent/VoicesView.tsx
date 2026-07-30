@@ -1,0 +1,427 @@
+import { useEffect, useRef, useState } from 'react'
+import {
+  Mic2, Upload, Loader2, Play, Square, Circle, AlertTriangle, Check,
+  RefreshCw, Trash2, BookAudio,
+} from 'lucide-react'
+import { useStore } from '../../stores/useStore'
+import { uploadAudio, type VoiceEngine, type VoiceLibraryEntry } from '../../api/client'
+
+/** Container the browser gave us → an extension /api/v1/upload-audio accepts.
+ *  webm/mp4 land in its video branch, which extracts the audio track to wav —
+ *  exactly what a reference clip needs. */
+function recordingExtension(mime: string): string {
+  if (mime.includes('ogg')) return 'ogg'
+  if (mime.includes('mp4')) return 'm4a'
+  if (mime.includes('wav')) return 'wav'
+  return 'webm'
+}
+
+const fileName = (path?: string | null) => path?.split(/[\\/]/).pop() ?? ''
+
+export function VoicesView() {
+  const voices = useStore(s => s.voices)
+  const engines = useStore(s => s.voiceEngines)
+  const error = useStore(s => s.voicesError)
+  const loadVoices = useStore(s => s.loadVoices)
+  const loadSampleTexts = useStore(s => s.loadAbVoicePresets)
+
+  useEffect(() => { loadVoices(); loadSampleTexts() }, [loadVoices, loadSampleTexts])
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden">
+      <div className="shrink-0 border-b border-border px-5 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="truncate text-sm font-semibold text-text-primary">Voices</h1>
+            <p className="mt-0.5 text-[11px] text-text-muted">
+              {voices.length} saved · reference recordings live here once and are
+              reused by every audiobook
+            </p>
+          </div>
+          <button
+            onClick={() => loadVoices()}
+            className="shrink-0 rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary"
+          >
+            <RefreshCw size={12} className="mr-1 inline" /> Reload
+          </button>
+        </div>
+        {error && <p className="mt-2 text-[11px] text-red-400">{error}</p>}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        {voices.length === 0 ? (
+          <div className="flex h-full items-center justify-center">
+            <div className="max-w-md text-center">
+              <Mic2 size={28} className="mx-auto mb-3 text-text-muted" />
+              <h2 className="text-sm font-semibold text-text-primary">No voices yet</h2>
+              <p className="mt-1 text-xs text-text-secondary">
+                Create one in the sidebar, then upload or record a reference clip
+                here. Cloning engines need a clip of the voice you want; the
+                Qwen3 engines build a voice from a written description instead.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-4 xl:grid-cols-2">
+            {voices.map(v => (
+              <VoiceCard key={v.id} voice={v} engine={engines[v.model_type]} engines={engines} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function VoiceCard({ voice, engine, engines }: {
+  voice: VoiceLibraryEntry
+  engine?: VoiceEngine
+  engines: Record<string, VoiceEngine>
+}) {
+  const patch = useStore(s => s.patchVoiceEntry)
+  const remove = useStore(s => s.deleteVoiceEntry)
+  const preview = useStore(s => s.previewLibraryVoice)
+  const previewBusy = useStore(s => s.voicePreviewBusy)
+  const previewUrls = useStore(s => s.voicePreviewUrls)
+  const previewWarnings = useStore(s => s.voicePreviewWarnings)
+  const sampleTexts = useStore(s => s.abVoiceSampleTexts)
+
+  const fileInput = useRef<HTMLInputElement>(null)
+  const recorder = useRef<MediaRecorder | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [recording, setRecording] = useState(false)
+  const [recError, setRecError] = useState('')
+  const [clip, setClip] = useState<{ url: string; file: File } | null>(null)
+  const [sampleText, setSampleText] = useState('')
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  const previewing = previewBusy === voice.id
+  const previewUrl = previewUrls[voice.id]
+    ?? (voice.sample_path ? `/api/v1/file/${encodeURIComponent(fileName(voice.sample_path))}` : undefined)
+  const warnings = previewWarnings[voice.id] ?? []
+  const lang = (voice.language || 'en').slice(0, 2)
+  const canRecord = typeof MediaRecorder !== 'undefined' && !!navigator.mediaDevices
+
+  const setReference = async (file: File) => {
+    setUploading(true)
+    try {
+      const { path } = await uploadAudio(file)
+      await patch(voice.id, { reference_path: path })
+      setClip(prev => { if (prev) URL.revokeObjectURL(prev.url); return null })
+    } catch (e) {
+      setRecError(e instanceof Error ? e.message : 'Upload failed')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const startRecording = async () => {
+    setRecError('')
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const chunks: Blob[] = []
+      const rec = new MediaRecorder(stream)
+      rec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data) }
+      rec.onstop = () => {
+        stream.getTracks().forEach(t => t.stop())
+        const mime = rec.mimeType || 'audio/webm'
+        const blob = new Blob(chunks, { type: mime })
+        const file = new File([blob], `voice-reference.${recordingExtension(mime)}`, { type: mime })
+        setClip(prev => {
+          if (prev) URL.revokeObjectURL(prev.url)
+          return { url: URL.createObjectURL(blob), file }
+        })
+        setRecording(false)
+      }
+      recorder.current = rec
+      rec.start()
+      setRecording(true)
+    } catch (e) {
+      setRecError(e instanceof Error ? e.message : 'Microphone access was refused')
+    }
+  }
+
+  return (
+    <div className="glass-panel rounded-2xl p-4">
+      {/* Identity */}
+      <div className="flex items-center gap-2">
+        <input
+          type="color"
+          value={voice.color}
+          onChange={e => patch(voice.id, { color: e.target.value })}
+          className="h-6 w-6 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0"
+          aria-label="Voice colour"
+        />
+        <input
+          defaultValue={voice.name}
+          onBlur={e => {
+            if (e.target.value.trim() && e.target.value !== voice.name) {
+              patch(voice.id, { name: e.target.value.trim() })
+            }
+          }}
+          className="min-w-0 flex-1 rounded-lg border border-border bg-bg-tertiary px-2 py-1 text-sm text-text-primary"
+          aria-label="Voice name"
+        />
+        {voice.ready ? (
+          <span className="flex shrink-0 items-center gap-0.5 text-[10px] text-indicator-success">
+            <Check size={11} /> ready
+          </span>
+        ) : (
+          <span className="flex shrink-0 items-center gap-0.5 text-[10px] text-indicator-warning">
+            <AlertTriangle size={11} /> not usable yet
+          </span>
+        )}
+        <button
+          onClick={() => {
+            if (confirmDelete) { remove(voice.id); setConfirmDelete(false) }
+            else { setConfirmDelete(true); setTimeout(() => setConfirmDelete(false), 3000) }
+          }}
+          title={confirmDelete ? 'Click again to delete' : 'Delete voice'}
+          aria-label="Delete voice"
+          className={`shrink-0 rounded p-1.5 ${
+            confirmDelete ? 'text-red-400' : 'text-text-muted hover:text-text-primary'
+          }`}
+        >
+          <Trash2 size={13} />
+        </button>
+      </div>
+
+      {/* Engine + language + emotion */}
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <label className="col-span-2 block">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted">Engine</span>
+          <select
+            value={voice.model_type}
+            onChange={e => patch(voice.id, { model_type: e.target.value })}
+            className="mt-1 w-full rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-xs text-text-primary"
+          >
+            {Object.entries(engines).map(([type, eng]) => (
+              <option key={type} value={type}>{eng.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted">Language</span>
+          <input
+            defaultValue={voice.language ?? ''}
+            onBlur={e => patch(voice.id, { language: e.target.value.trim() || null })}
+            placeholder="en"
+            className="mt-1 w-full rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted"
+          />
+        </label>
+        <label className="block">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted">Default emotion</span>
+          <input
+            defaultValue={voice.default_emotion ?? ''}
+            onBlur={e => patch(voice.id, { default_emotion: e.target.value.trim() || null })}
+            placeholder={engine?.emotion === 'none' ? 'not supported by this engine' : 'neutral'}
+            disabled={engine?.emotion === 'none'}
+            className="mt-1 w-full rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted disabled:opacity-50"
+          />
+        </label>
+      </div>
+
+      {/* Engine-specific parameters — only what has an effect here. */}
+      {voice.model_type === 'qwen3_tts_voicedesign' && (
+        <label className="mt-2 block">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted">Voice description</span>
+          <input
+            defaultValue={String(voice.params?.voice_description ?? '')}
+            onBlur={e => patch(voice.id, {
+              params: { ...voice.params, voice_description: e.target.value },
+            })}
+            placeholder="older man, gravelly, unhurried"
+            className="mt-1 w-full rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted"
+          />
+        </label>
+      )}
+      {voice.model_type === 'qwen3_tts_customvoice' && (
+        <label className="mt-2 block">
+          <span className="text-[10px] uppercase tracking-wider text-text-muted">Speaker preset</span>
+          <input
+            defaultValue={String(voice.params?.speaker ?? '')}
+            onBlur={e => patch(voice.id, { params: { ...voice.params, speaker: e.target.value } })}
+            placeholder="speaker preset id"
+            className="mt-1 w-full rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted"
+          />
+        </label>
+      )}
+      <label className="mt-2 block">
+        <span className="text-[10px] uppercase tracking-wider text-text-muted">Temperature</span>
+        <input
+          type="number"
+          step={0.05}
+          min={0.1}
+          max={2}
+          defaultValue={Number(voice.params?.temperature ?? 0.8)}
+          onBlur={e => patch(voice.id, {
+            params: { ...voice.params, temperature: Number(e.target.value) || 0.8 },
+          })}
+          className="mt-1 w-24 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-xs text-text-primary"
+        />
+      </label>
+
+      <label className="mt-2 block">
+        <span className="text-[10px] uppercase tracking-wider text-text-muted">Notes</span>
+        <textarea
+          defaultValue={voice.description}
+          onBlur={e => patch(voice.id, { description: e.target.value })}
+          rows={2}
+          placeholder="What this voice is for — which character, which book."
+          className="mt-1 w-full resize-y rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted"
+        />
+      </label>
+
+      {/* Reference clip — upload one, or record it right here. */}
+      {engine?.clone ? (
+        <div className="mt-3 rounded-xl border border-border bg-bg-tertiary/40 p-2.5">
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">Reference recording</div>
+          {voice.reference_path ? (
+            <div className="mt-1.5">
+              <p className="truncate text-[11px] text-text-secondary" title={voice.reference_path}>
+                {fileName(voice.reference_path)}
+              </p>
+              {voice.reference_missing ? (
+                <p className="mt-0.5 text-[10px] text-red-400">
+                  This file is gone from the workspace — upload or record it again.
+                </p>
+              ) : (
+                <audio
+                  src={`/api/v1/file/${encodeURIComponent(fileName(voice.reference_path))}`}
+                  controls
+                  className="mt-1 h-7 w-full"
+                />
+              )}
+            </div>
+          ) : (
+            <p className="mt-1 text-[11px] text-text-secondary">
+              {engine.needs_reference
+                ? 'Required: 10–30 seconds of clean speech in the voice you want.'
+                : 'Optional — without one the engine uses its own voice.'}
+            </p>
+          )}
+
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <input
+              ref={fileInput}
+              type="file"
+              accept="audio/*,video/*"
+              className="hidden"
+              onChange={e => {
+                const f = e.target.files?.[0]
+                if (f) setReference(f)
+                e.target.value = ''
+              }}
+            />
+            <button
+              onClick={() => fileInput.current?.click()}
+              disabled={uploading}
+              className="flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary disabled:opacity-40"
+            >
+              {uploading ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />}
+              Upload a file
+            </button>
+            {recording ? (
+              <button
+                onClick={() => recorder.current?.stop()}
+                className="flex items-center gap-1 rounded-lg border border-red-500/60 px-2 py-1 text-[11px] text-red-400"
+              >
+                <Square size={11} /> Stop recording
+              </button>
+            ) : (
+              <button
+                onClick={startRecording}
+                disabled={!canRecord || uploading}
+                title={canRecord ? 'Record with your microphone' : 'This browser cannot record audio'}
+                className="flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary disabled:opacity-40"
+              >
+                <Circle size={11} /> Record
+              </button>
+            )}
+          </div>
+
+          {recording && (
+            <p className="mt-1.5 text-[10px] text-indicator-warning">
+              Recording — read a few sentences at your normal pace, then stop.
+            </p>
+          )}
+          {clip && !recording && (
+            <div className="mt-2 rounded-lg border border-border bg-bg-tertiary/60 p-2">
+              <p className="text-[10px] text-text-muted">Take not saved yet</p>
+              <audio src={clip.url} controls className="mt-1 h-7 w-full" />
+              <div className="mt-1.5 flex gap-1.5">
+                <button
+                  onClick={() => setReference(clip.file)}
+                  disabled={uploading}
+                  className="flex-1 rounded-lg bg-cta py-1 text-[11px] font-medium text-white disabled:opacity-40"
+                >
+                  {uploading ? 'Uploading…' : 'Use this recording'}
+                </button>
+                <button
+                  onClick={() => setClip(prev => { if (prev) URL.revokeObjectURL(prev.url); return null })}
+                  className="rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary"
+                >
+                  Discard
+                </button>
+              </div>
+            </div>
+          )}
+          {recError && <p className="mt-1.5 text-[10px] text-red-400">{recError}</p>}
+        </div>
+      ) : (
+        <p className="mt-3 text-[11px] text-text-muted">
+          {engine?.label ?? 'This engine'} cannot clone a recording — it builds
+          the voice from the fields above.
+        </p>
+      )}
+
+      {/* Audition */}
+      <div className="mt-3 rounded-xl border border-border bg-bg-tertiary/40 p-2.5">
+        <div className="text-[10px] uppercase tracking-wider text-text-muted">Audition</div>
+        <div className="mt-1.5 flex gap-1.5">
+          <input
+            value={sampleText}
+            onChange={e => setSampleText(e.target.value)}
+            placeholder={sampleTexts[lang] || sampleTexts.en || 'A line to read…'}
+            className="min-w-0 flex-1 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-xs text-text-primary placeholder:text-text-muted"
+          />
+          <button
+            onClick={() => preview(voice.id, sampleText.trim() || undefined, voice.language || undefined)}
+            disabled={!voice.ready || previewing || (previewBusy !== null && !previewing)}
+            title={voice.ready
+              ? 'Render this line with this voice'
+              : 'Add the reference clip this engine needs first'}
+            className="flex shrink-0 items-center gap-1 rounded-lg bg-cta px-2.5 py-1.5 text-[11px] font-medium text-white shadow-accent-glow disabled:opacity-40"
+          >
+            {previewing ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+            {previewing ? 'Rendering…' : 'Speak'}
+          </button>
+        </div>
+        {previewing && (
+          <p className="mt-1.5 text-[10px] text-text-muted">
+            Runs through the same TTS path a book render uses — the first use of
+            a model downloads it, which can take several minutes.
+          </p>
+        )}
+        {previewUrl && !previewing && (
+          <audio src={previewUrl} controls className="mt-1.5 h-7 w-full" />
+        )}
+        {warnings.length > 0 && (
+          <p className="mt-1.5 flex items-start gap-1 text-[10px] text-indicator-warning">
+            <AlertTriangle size={10} className="mt-0.5 shrink-0" />
+            <span>{warnings.join(' · ')}</span>
+          </p>
+        )}
+      </div>
+
+      <p className="mt-2.5 flex items-start gap-1.5 text-[10px] leading-snug text-text-muted">
+        <BookAudio size={11} className="mt-0.5 shrink-0" />
+        <span>
+          To read a book with this voice: Audio → Book → Voices → Add voice →
+          From library. The book gets its own copy, so tuning it there leaves
+          this entry untouched.
+        </span>
+      </p>
+    </div>
+  )
+}

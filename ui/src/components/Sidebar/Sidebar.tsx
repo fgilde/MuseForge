@@ -10,6 +10,7 @@ import { AudioModeSection } from './AudioModeSection'
 import { MusicControls } from './MusicControls'
 import { AudioSubModeToggle } from './AudioSubModeToggle'
 import { AudiobookPanel } from './AudiobookPanel'
+import { VoicesPanel } from './VoicesPanel'
 import { SfxControls } from './SfxControls'
 import { MixerControls } from './MixerControls'
 import { ModeToggle } from './ModeToggle'
@@ -65,6 +66,8 @@ export function Sidebar() {
   const isContinue = isVideo && imageMode === 3
   const isBlend = isVideo && imageMode === 4
   const isDirector = sidebarMode === 'director'
+  /** Manages saved voices — no prompt, no model, no Forge button. */
+  const isVoiceLibrary = isAudio && audioSubMode === 'voices'
   const isI2vOnly = modelOptions?.i2v_class && !modelOptions?.t2v_class
 
   const modeToggle = (size: 'sm' | 'md') => (
@@ -202,9 +205,10 @@ export function Sidebar() {
         {isAudio && audioSubMode === 'mixer' && <MixerControls />}
         {isAudio && audioSubMode === 'music' && <MusicControls />}
         {isAudio && audioSubMode === 'audiobook' && <AudiobookPanel />}
+        {isVoiceLibrary && <VoicesPanel />}
 
         {/* Prompt area (non-edit modes, skip for SFX/Mixer/Music which have their own UI) */}
-        {!isEdit && !(isAudio && (audioSubMode === 'sfx' || audioSubMode === 'mixer' || audioSubMode === 'music' || audioSubMode === 'audiobook')) && (isMultiClip ? <MultiClipEditor /> : <PromptInput />)}
+        {!isEdit && !(isAudio && (audioSubMode === 'sfx' || audioSubMode === 'mixer' || audioSubMode === 'music' || audioSubMode === 'audiobook' || audioSubMode === 'voices')) && (isMultiClip ? <MultiClipEditor /> : <PromptInput />)}
 
         {/* Video: reference images below prompt. In Frames mode the InputsPanel
             renders them as ordered tiles instead. */}
@@ -224,8 +228,9 @@ export function Sidebar() {
       {/* Bottom Bar: Advanced + LoRA Browser + Model + Generate.
           Hidden in Tools mode — ToolsPanel has its own Run button and
           owns no model — and in Text mode, which owns no generation
-          model either and sends from its own composer. */}
-      {!isTools && !isText && (
+          model either and sends from its own composer. The voice library
+          is the same shape: it renders auditions per voice, not a Forge run. */}
+      {!isTools && !isText && !isVoiceLibrary && (
       <div className="px-3 py-2.5 border-t border-border">
         <div className="flex items-center gap-2">
           <AdvancedSettings />
@@ -271,9 +276,7 @@ export function Sidebar() {
           {/* Header */}
           <div className="px-4 py-3 border-b border-border flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-lg bg-accent-blue flex items-center justify-center text-white font-bold text-sm">
-                M
-              </div>
+              <img src="/museforge-icon.png" alt="" className="w-7 h-7 rounded-lg" />
               <span className="font-semibold text-sm">MuseForge</span>
               {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
             </div>
@@ -300,9 +303,7 @@ export function Sidebar() {
       {/* Header */}
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-accent-blue flex items-center justify-center text-white font-bold text-sm">
-            M
-          </div>
+          <img src="/museforge-icon.png" alt="" className="w-7 h-7 rounded-lg" />
           <span className="font-semibold text-sm">MuseForge</span>
               {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
         </div>

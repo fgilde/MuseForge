@@ -1,4 +1,4 @@
-import { Mic, Music, Zap, Layers, BookAudio } from 'lucide-react'
+import { Mic, Mic2, Music, Zap, Layers, BookAudio } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import type { AudioSubMode } from '../../types'
 
@@ -8,6 +8,7 @@ const modes: { value: AudioSubMode; label: string; icon: typeof Mic }[] = [
   { value: 'sfx', label: 'SFX', icon: Zap },
   { value: 'mixer', label: 'Mixer', icon: Layers },
   { value: 'audiobook', label: 'Book', icon: BookAudio },
+  { value: 'voices', label: 'Voices', icon: Mic2 },
 ]
 
 export function AudioSubModeToggle() {
@@ -23,14 +24,15 @@ export function AudioSubModeToggle() {
           <button
             key={m.value}
             onClick={() => setAudioSubMode(m.value)}
-            className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-1.5 rounded-md transition-all ${
+            title={m.label}
+            className={`flex-1 min-w-0 flex items-center justify-center gap-1 text-[11px] py-1.5 rounded-md transition-all ${
               active
                 ? 'bg-bg-active text-text-primary'
                 : 'text-text-secondary hover:text-text-primary'
             }`}
           >
-            <Icon size={13} />
-            <span>{m.label}</span>
+            <Icon size={13} className="shrink-0" />
+            <span className="truncate">{m.label}</span>
           </button>
         )
       })}
