@@ -290,6 +290,16 @@ function _saveSettings(
   } catch { /* quota exceeded or private browsing */ }
 }
 
+const SPEECH_VOICE_KEY = 'museforge_speech_voice_id'
+
+function _loadSpeechVoiceId(): string | null {
+  try {
+    return localStorage.getItem(SPEECH_VOICE_KEY) || null
+  } catch {
+    return null  // private mode
+  }
+}
+
 function _loadSettings(): PersistedModeSettings | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -6045,15 +6055,26 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // ── Audio → Speech with a library voice ─────────────────────────────
-  speechVoiceId: null,
+  // Own key rather than the versioned per-mode blob: this is one string, and
+  // re-picking the voice after every reload was pure friction. A stale id is
+  // harmless — the picker only offers voices the library still has.
+  speechVoiceId: _loadSpeechVoiceId(),
   speechVoiceEmotion: '',
   speechVoiceLanguage: '',
 
-  setSpeechVoice: (patch) => set(s => ({
-    speechVoiceId: patch.id !== undefined ? patch.id : s.speechVoiceId,
-    speechVoiceEmotion: patch.emotion !== undefined ? patch.emotion : s.speechVoiceEmotion,
-    speechVoiceLanguage: patch.language !== undefined ? patch.language : s.speechVoiceLanguage,
-  })),
+  setSpeechVoice: (patch) => set(s => {
+    if (patch.id !== undefined) {
+      try {
+        if (patch.id) localStorage.setItem(SPEECH_VOICE_KEY, patch.id)
+        else localStorage.removeItem(SPEECH_VOICE_KEY)
+      } catch { /* private mode */ }
+    }
+    return {
+      speechVoiceId: patch.id !== undefined ? patch.id : s.speechVoiceId,
+      speechVoiceEmotion: patch.emotion !== undefined ? patch.emotion : s.speechVoiceEmotion,
+      speechVoiceLanguage: patch.language !== undefined ? patch.language : s.speechVoiceLanguage,
+    }
+  }),
 
   /** The Forge button would run the selected generation model and ignore the
    *  picked voice, so Speech gets its own path: /voices/{id}/speak reads the
