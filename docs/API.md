@@ -63,6 +63,7 @@ run without overwriting each other's output.
 | `GET/POST /audiobook/projects` | List or create projects |
 | `GET/PUT/DELETE /audiobook/projects/{id}` | Read, patch, delete. `PUT` is the only write path |
 | `POST /audiobook/projects/{id}/import` | Import txt/md/docx/pdf/epub as chapters |
+| `POST /audiobook/from-story` | Create a project from a written story, keeping its chapters. `lang` picks a translation |
 | `POST /audiobook/projects/{id}/plan` | Dry-run the TTS mapping; returns blocking `errors` and `ready` |
 | `POST /audiobook/projects/{id}/assets/{sfx\|music}` | Add an effect or music bed, generating its audio |
 | `POST /audiobook/projects/{id}/assets/{kind}/{aid}/generate` | Generate audio for an asset that already exists |

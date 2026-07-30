@@ -1826,6 +1826,21 @@ export async function createAudiobookProject(
   return normalizeProject(await storyJson(res, 'Creating the audiobook'))
 }
 
+/** Create a project from a written story, keeping its chapter structure.
+ *  `lang` picks a translation, falling back to the original per chapter. */
+export async function createAudiobookFromStory(
+  body: { story_id: string; lang?: string; title?: string; profile_id?: string; workspace?: string },
+): Promise<{ project: AudiobookProject; chapters: number; lang: string }> {
+  const res = await fetch(`${BASE}/api/v1/audiobook/from-story`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const out = await storyJson<{ project: AudiobookProject; chapters: number; lang: string }>(
+    res, 'Creating the audiobook from the story')
+  return { ...out, project: normalizeProject(out.project) }
+}
+
 export async function fetchAudiobookProject(pid: string, workspace?: string): Promise<AudiobookProject | null> {
   const q = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
   const res = await fetch(`${BASE}/api/v1/audiobook/projects/${pid}${q}`)

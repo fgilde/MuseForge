@@ -7224,6 +7224,58 @@ async def ab_create_project(request: Request):
     return project.to_dict()
 
 
+@api.post("/api/v1/audiobook/from-story")
+async def ab_from_story(request: Request):
+    """Create an audiobook project from a finished story.
+
+    Body: {story_id, lang?, title?, profile_id?, workspace?}. The story's own
+    chapter boundaries are kept — re-detecting headings in text we already
+    have structured for would only lose them. `lang` picks a translation and
+    falls back to the original per chapter, same as the story export.
+    """
+    from services import story_pipeline, story_export
+    from services.audiobook import importer as ab_importer, model as ab_model, store as ab_store
+
+    body = await request.json() if await request.body() else {}
+    sid = body.get("story_id") or ""
+    if not sid:
+        raise HTTPException(status_code=400, detail="story_id is required")
+    workspace = body.get("workspace")
+    story = story_pipeline.get_story(sid) or story_pipeline.load_story(_story_dir(workspace), sid)
+    if story is None:
+        raise HTTPException(status_code=404, detail=f"Story {sid} not found")
+
+    original = ((story.get("params") or {}).get("language")) or "en"
+    lang = body.get("lang") or original
+    profile_id = body.get("profile_id")
+    chapters = []
+    for index, chapter in enumerate(story.get("chapters") or [], start=1):
+        title, text = story_export.chapter_view(chapter, lang, original)
+        if not (text or "").strip():
+            continue
+        chapters.append(ab_model.Chapter(
+            id=ab_model.new_id(),
+            title=title or f"Chapter {index}",
+            blocks=ab_importer.paragraphs_to_blocks(
+                ab_importer.split_paragraphs(text), profile_id),
+            language=lang,
+        ))
+    if not chapters:
+        raise HTTPException(
+            status_code=400,
+            detail="The story has no written chapters yet — write it first.")
+
+    project = ab_store.create_project(
+        _ab_dir(workspace),
+        title=body.get("title") or story.get("title") or "Untitled audiobook",
+        language=lang,
+        chapters=chapters,
+        params_snapshot={"source": "story", "story_id": sid, "lang": lang},
+    )
+    return {"project": project.to_dict(), "chapters": len(chapters),
+            "story_id": sid, "lang": lang}
+
+
 @api.get("/api/v1/audiobook/projects/{pid}")
 def ab_get_project(pid: str, workspace: str = None):
     _out_dir, project = _ab_load(pid, workspace)

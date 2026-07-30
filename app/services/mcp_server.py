@@ -36,7 +36,8 @@ mcp = FastMCP(
         "Text: chat() for conversation; story_start() -> story_status() for "
         "long-form prose, then story_export().\n"
         "Audiobooks: audiobook_create() -> audiobook_import() -> assign "
-        "voices -> audiobook_plan() to verify -> audiobook_render().\n\n"
+        "voices -> audiobook_plan() to verify -> audiobook_render(). From a "
+        "story, audiobook_from_story() replaces the first two steps.\n\n"
         "Generation takes minutes to hours and the first use of any model "
         "downloads weights (potentially many GB), so poll patiently. "
         "Anything without a dedicated tool is reachable through "
@@ -304,6 +305,26 @@ def audiobook_create(title: str = "Untitled audiobook", language: str = "en") ->
     """
     return _post("/api/v1/audiobook/projects",
                  json={"title": title, "language": language})
+
+
+@mcp.tool()
+def audiobook_from_story(story_id: str, lang: str = "", title: str = "",
+                         profile_id: str = "") -> dict:
+    """Create an audiobook project from a written story in one step.
+
+    Keeps the story's own chapters instead of re-detecting headings. lang
+    picks a translation (falling back to the original per chapter); empty
+    means the story's original language. profile_id pre-assigns one voice to
+    every run. Returns {project, chapters, story_id, lang}.
+
+    Use this instead of audiobook_create + audiobook_import when the source
+    is a story — no file export/upload roundtrip is needed.
+    """
+    body = {"story_id": story_id}
+    for key, value in (("lang", lang), ("title", title), ("profile_id", profile_id)):
+        if value:
+            body[key] = value
+    return _post("/api/v1/audiobook/from-story", json=body, timeout=300)
 
 
 @mcp.tool()

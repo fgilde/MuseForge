@@ -1391,7 +1391,7 @@ interface AppState {
   renderAbChapter: (opts?: { book?: boolean; format?: 'mp3' | 'wav' | 'flac' | 'm4b'; force?: boolean }) => Promise<void>
   /** Turn a finished story into an audiobook project, one chapter per
    *  story chapter. Switches to Audio -> Book on success. */
-  importStoryAsAudiobook: (sid: string) => Promise<string | null>
+  importStoryAsAudiobook: (sid: string, lang?: string) => Promise<string | null>
   /** Add an sfx or music asset; generation runs in the background and the
    *  project refreshes when the audio lands. */
   createAbAsset: (kind: 'sfx' | 'music', body: {
@@ -6123,34 +6123,14 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  importStoryAsAudiobook: async (sid) => {
+  importStoryAsAudiobook: async (sid, lang) => {
     set({ abBusy: true, abError: null })
     try {
-      const story = await api.fetchStory(sid)
-      if (!story) throw new Error('Story not found')
-      const written = (story.chapters ?? []).filter(c => c.text?.trim())
-      if (written.length === 0) throw new Error('That story has no written chapters yet')
-
-      const project = await api.createAudiobookProject({
-        title: story.title || 'Untitled story',
+      // One server call: it knows the story's chapter structure and its
+      // translations, so nothing here has to re-parse prose into chapters.
+      const { project: updated } = await api.createAudiobookFromStory({
+        story_id: sid, lang,
       })
-      // The story's chapter structure is already known, so build blocks
-      // straight from it instead of re-parsing prose into chapters.
-      const chapters = written.map((c, i) => ({
-        id: `sc${i}${Date.now().toString(36)}`,
-        title: c.title || `Chapter ${i + 1}`,
-        blocks: c.text.split(/\n\s*\n/).map((para, j) => ({
-          id: `sb${i}_${j}`,
-          type: 'paragraph' as const,
-          runs: [{ id: `sr${i}_${j}`, text: para.trim() }],
-        })).filter(b => b.runs[0].text.length > 0),
-        music_id: null,
-        language: null,
-        audio_path: null,
-        audio_hash: null,
-        audio_duration: null,
-      }))
-      const updated = await api.updateAudiobookProject(project.project_id, { chapters })
       set({
         activeAudiobookId: updated.project_id,
         activeAudiobook: updated,

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   BookText, Copy, Check, Pencil, RefreshCw, Plus, Download, FileText,
   ChevronDown, ChevronUp, X, Loader2, Languages, Wand2, Trash2, Search,
-  AlertTriangle,
+  AlertTriangle, AudioLines,
 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { WORDS_PER_PAGE } from '../../lib/storyEstimate'
@@ -63,6 +63,8 @@ export function StoryView() {
   const analyzing = useStore(s => s.storyAnalyzing)
   const allLanguages = useStore(s => s.storyLanguages)
   const exportFormats = useStore(s => s.storyExportFormats)
+  const importStoryAsAudiobook = useStore(s => s.importStoryAsAudiobook)
+  const abBusy = useStore(s => s.abBusy)
   const regenerateChapter = useStore(s => s.regenerateChapter)
   const saveChapterText = useStore(s => s.saveChapterText)
   const extendActiveStory = useStore(s => s.extendActiveStory)
@@ -212,6 +214,20 @@ export function StoryView() {
                 ? <Loader2 size={12} className="mr-1 inline animate-spin" />
                 : <Search size={12} className="mr-1 inline" />}
               Analyze
+            </button>
+
+            {/* Hand-off to Audio/Book. Uses the language currently being
+                viewed, so reading a translation makes the audiobook of it. */}
+            <button
+              onClick={() => importStoryAsAudiobook(sid, langArg)}
+              disabled={!anyWritten || abBusy}
+              className="rounded-lg border border-border px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary hover:border-border-light transition-colors disabled:opacity-40"
+              title="Create a new audiobook project from this story and open it"
+            >
+              {abBusy
+                ? <Loader2 size={12} className="mr-1 inline animate-spin" />
+                : <AudioLines size={12} className="mr-1 inline" />}
+              As audiobook
             </button>
 
             {/* Download menu — replaces the old workspace-only export. */}
