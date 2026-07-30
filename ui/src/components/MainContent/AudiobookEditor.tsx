@@ -519,7 +519,10 @@ export function AudiobookEditor() {
 
           <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">Voice</div>
           {voices.length === 0 ? (
-            <p className="text-[10px] text-text-muted">Add a voice in the sidebar first.</p>
+            <p className="text-[10px] text-text-muted">
+              No voices in this book yet — add one in the sidebar under
+              Voices → From library, then assign it here.
+            </p>
           ) : (
             <div className="space-y-0.5">
               {voices.map(v => (
