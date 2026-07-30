@@ -34,6 +34,9 @@ export function AudiobookPanel() {
   const setTextSubMode = useStore(s => s.setTextSubMode)
   const setGenerationMode = useStore(s => s.setGenerationMode)
   const setStoryDraft = useStore(s => s.setStoryDraft)
+  const stories = useStore(s => s.stories)
+  const loadStories = useStore(s => s.loadStories)
+  const importStory = useStore(s => s.importStoryAsAudiobook)
 
   const fileRef = useRef<HTMLInputElement>(null)
   const importFile = useStore(s => s.importAudiobookFile)
@@ -41,7 +44,9 @@ export function AudiobookPanel() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [openSection, setOpenSection] = useState<'voices' | 'chapters' | null>('voices')
 
-  useEffect(() => { loadAudiobooks() }, [loadAudiobooks])
+  useEffect(() => { loadAudiobooks(); loadStories() }, [loadAudiobooks, loadStories])
+
+  const finishedStories = stories.filter(s => (s.word_count ?? 0) > 0)
 
   const voices = project?.voice_profiles ?? []
 
@@ -127,20 +132,25 @@ export function AudiobookPanel() {
         )}
       </div>
 
-      {project && (
-        <>
-          {/* Import */}
-          <div>
+      {/* Import is available with no project open: picking a file creates
+          one, named after the file. */}
+      <>
+        <div>
             <label className="text-[11px] uppercase tracking-wider text-text-muted">Import text</label>
             <input
               ref={fileRef}
               type="file"
               accept=".txt,.md,.docx,.pdf,.epub"
               className="hidden"
-              onChange={e => {
+              onChange={async e => {
                 const f = e.target.files?.[0]
-                if (f) importFile(f, { autoSplit })
                 e.target.value = ''
+                if (!f) return
+                if (!activeId) {
+                  const created = await createAudiobook(f.name.replace(/\.[^.]+$/, ''))
+                  if (!created) return
+                }
+                importFile(f, { autoSplit })
               }}
             />
             <button
@@ -171,8 +181,30 @@ export function AudiobookPanel() {
             >
               No text yet? Write a story first
             </button>
-          </div>
 
+            {finishedStories.length > 0 && (
+              <div className="mt-2">
+                <label className="text-[10px] text-text-muted">Or take a finished story</label>
+                <div className="mt-1 space-y-0.5">
+                  {finishedStories.slice(0, 6).map(s => (
+                    <button
+                      key={s.id}
+                      onClick={() => importStory(s.id)}
+                      disabled={busy}
+                      className="block w-full truncate rounded-md border border-border px-2 py-1 text-left text-[10px] text-text-secondary transition-colors hover:border-border-light hover:text-text-primary disabled:opacity-40"
+                      title={`${s.chapter_count} chapters · ${(s.word_count ?? 0).toLocaleString()} words`}
+                    >
+                      {s.title || 'Untitled'} — {s.chapter_count} ch
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+        </div>
+      </>
+
+      {project && (
+        <>
           {/* Voices */}
           <Section
             label={`Voices (${voices.length})`}

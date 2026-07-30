@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, Ref
 import type { ModelFolderCandidate } from '../../types'
 import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
 import * as api from '../../api/client'
+import { TextModelsSection } from './TextModelsSection'
 import type { GenerationMode } from '../../types'
 import { FAMILIES, resolveVariant, onOsThemeChange, type FamilyId, type ThemeMode } from '../../lib/theme'
 import { formatBytes } from '../../lib/format'
@@ -395,6 +396,10 @@ function ModelVisibilitySection() {
                       </div>
                       )
                     })}
+
+      {/* Text models live in their own section: they have no per-mode
+          visibility, only a download state. */}
+      <TextModelsSection />
                   </div>
                   )
                 })}

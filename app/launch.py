@@ -6548,6 +6548,77 @@ def _story_nsfw_allowed() -> bool:
     return bool(services.get("nsfw_mode", False)) and provider not in _PUBLIC_LLM_PROVIDERS
 
 
+@api.get("/api/v1/llm/catalog")
+def llm_catalog():
+    """Every built-in text model with size, capabilities and disk state.
+
+    This is what the Settings model list renders: unlike generation models
+    (which the UI can enable per mode), a text model is either on disk or
+    not, so the actionable bit is downloading it ahead of first use.
+    """
+    from services import llm_service
+
+    models = []
+    for repo_id, info in llm_service.MODEL_REGISTRY.items():
+        use_cases = info.get("use_cases") or []
+        models.append({
+            "id": repo_id,
+            "label": info["label"],
+            "size_hint": info.get("size_hint", ""),
+            "weights_gb": info.get("weights_gb", 0.0),
+            "mmproj_gb": info.get("mmproj_gb", 0.0),
+            "has_vision": bool(info.get("mmproj_file") or info.get("native_vision")),
+            "use_cases": use_cases,
+            "is_downloaded": llm_service.is_model_downloaded(repo_id),
+            # Curated entries are the ones the pickers offer; the rest are
+            # loadable by id but deliberately not surfaced.
+            "curated": repo_id in llm_service._PUBLIC_MODEL_ORDER or bool(use_cases),
+        })
+    active = wgp.server_config.get("services", {}).get("llm_model_id", _DEFAULT_LLM_REPO)
+    return {"models": models, "active_model_id": active}
+
+
+@api.post("/api/v1/llm/download")
+async def llm_download(request: Request):
+    """Pre-download a text model. Body: {model_id}.
+
+    Returns immediately; progress shows up in the shared download feed
+    (/api/v1/downloads/active) like any other model download.
+    """
+    from services import llm_service
+
+    body = await request.json()
+    model_id = (body.get("model_id") or "").strip()
+    if model_id not in llm_service.MODEL_REGISTRY:
+        raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
+    if llm_service.is_model_downloaded(model_id):
+        return {"status": "completed", "model_id": model_id}
+
+    with _model_downloads_lock:
+        if _model_downloads.get(model_id, {}).get("status") == "downloading":
+            return {"status": "downloading", "model_id": model_id}
+        _model_downloads[model_id] = {
+            "status": "downloading", "error": None, "started": time.time(),
+            "model_name": llm_service.MODEL_REGISTRY[model_id]["label"],
+            "files_total": len(llm_service.model_files(model_id)), "files_done": 0,
+            "current_file": None, "bytes_total": None,
+        }
+
+    def _worker():
+        from services import safe_download
+        try:
+            safe_download.set_download_context(model_id)
+            llm_service.prefetch_model(model_id)
+            _update_model_download(model_id, status="completed", current_file=None)
+        except Exception as e:  # noqa: BLE001
+            _update_model_download(model_id, status="failed", error=str(e))
+        finally:
+            safe_download.set_download_context(None)
+
+    threading.Thread(target=_worker, daemon=False).start()
+    return {"status": "downloading", "model_id": model_id}
+
+
 @api.get("/api/v1/story/models")
 def story_models():
     """Curated model lists per Storywriter pass.

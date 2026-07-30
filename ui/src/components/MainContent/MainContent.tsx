@@ -559,15 +559,29 @@ export function MainContent() {
     return items
   }, [startIndex, endIndex, outputs, activeIndex, handleItemVisible, handleItemMeasured, itemOffsets])
 
-  // Text mode owns the whole main area — a conversation, not a media feed.
-  // Placed after every hook above so the hook order stays stable.
-  if (generationMode === 'text') return <ChatView />
-  // Audiobook editing replaces the media feed: the work is the text,
-  // and rendered chapters still show up in the gallery as outputs.
-  if (generationMode === 'audio' && audioSubMode === 'audiobook') return <AudiobookEditor />
+  // Text mode and the audiobook editor own the whole main area instead of
+  // the media feed. Placed after every hook above so the hook order stays
+  // stable.
+  //
+  // They MUST keep the same flex-1/min-w-0 wrapper the feed uses: without
+  // flex-1 the view only claims its intrinsic width inside App's flex row,
+  // which left the panel floating mid-screen with the rest of the window
+  // empty. min-w-0 lets long unbroken text shrink instead of pushing the
+  // sidebar off-screen.
+  const takeoverView =
+    generationMode === 'text' ? <ChatView />
+    : generationMode === 'audio' && audioSubMode === 'audiobook' ? <AudiobookEditor />
+    : null
+  if (takeoverView) {
+    return (
+      <main className="flex-1 min-w-0 flex flex-col h-full overflow-hidden">
+        {takeoverView}
+      </main>
+    )
+  }
 
   return (
-    <main className="flex-1 flex flex-col h-full overflow-hidden">
+    <main className="flex-1 min-w-0 flex flex-col h-full overflow-hidden">
       {/* Top bar */}
       <div className="px-2 md:px-6 py-2 md:py-3 border-b border-border flex items-center justify-between gap-2">
         <TabFilter />

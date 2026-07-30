@@ -1072,6 +1072,73 @@ def get_status() -> dict:
     }
 
 
+def model_cache_dir(repo_id: str) -> str:
+    """Where this model's files live on disk.
+
+    Mirrors the derivation inside load_model so callers can ask "is it
+    downloaded?" without loading anything. Kept next to the download helper
+    so the two stay in step.
+    """
+    repo_basename = repo_id.split("/")[-1] if "/" in repo_id else repo_id
+    model_stem = repo_basename.replace("-GGUF", "")
+    dir_override = MODEL_REGISTRY.get(repo_id, {}).get("cache_dir_override")
+    return os.path.join(get_model_dir(), dir_override or model_stem)
+
+
+def model_files(repo_id: str) -> list:
+    """The files this model needs: the GGUF plus its vision projector.
+
+    Returns [(filename, source_repo)] — mmproj may live in a different repo
+    (mmproj_repo), which is why the source is part of the tuple.
+    """
+    entry = MODEL_REGISTRY.get(repo_id)
+    if not entry:
+        return []
+    files = [(entry["gguf_file"], repo_id)]
+    if not entry.get("native_vision"):
+        mmproj = entry.get("mmproj_file", DEFAULT_MMPROJ_FILE)
+        if mmproj:
+            files.append((mmproj, entry.get("mmproj_repo") or repo_id))
+    return files
+
+
+def is_model_downloaded(repo_id: str) -> bool:
+    """True when the main GGUF is already on disk.
+
+    Only the GGUF is checked: a missing mmproj degrades to text-only rather
+    than failing, so it must not make a usable model look absent.
+    """
+    entry = MODEL_REGISTRY.get(repo_id)
+    if not entry:
+        return False
+    return os.path.isfile(os.path.join(model_cache_dir(repo_id), entry["gguf_file"]))
+
+
+def prefetch_model(repo_id: str) -> dict:
+    """Download a model's files without loading it.
+
+    Blocking — callers run it on a thread. The mmproj is best-effort: a
+    vision projector that fails to download leaves a working text model.
+    """
+    if repo_id not in MODEL_REGISTRY:
+        raise ValueError(f"Unknown model: {repo_id}")
+    cache_dir = model_cache_dir(repo_id)
+    os.makedirs(cache_dir, exist_ok=True)
+    fetched, failed = [], []
+    for filename, source_repo in model_files(repo_id):
+        try:
+            _download_gguf(source_repo, filename, cache_dir)
+            fetched.append(filename)
+        except Exception as e:  # noqa: BLE001
+            failed.append({"file": filename, "error": str(e)})
+            entry = MODEL_REGISTRY[repo_id]
+            if filename == entry["gguf_file"]:
+                raise
+            print(f"[LLM] Optional file {filename} not downloaded: {e}")
+    return {"repo_id": repo_id, "fetched": fetched, "failed": failed,
+            "cache_dir": cache_dir}
+
+
 def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
     """Download a GGUF file from HuggingFace and return the local path."""
     local_path = os.path.join(cache_dir, filename)
