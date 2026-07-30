@@ -6716,6 +6716,17 @@ def story_stop(sid: str):
     return {"stopped": story_pipeline.stop_story(sid), "story_id": sid}
 
 
+@api.post("/api/v1/story/stories/{sid}/stop-operation")
+def story_stop_operation(sid: str):
+    """Stop a running analysis, translation or rewrite on a finished story.
+
+    Separate from /stop because the story itself is not running and must keep
+    its 'completed' status — only the pass is cancelled.
+    """
+    from services import story_pipeline
+    return {"stopped": story_pipeline.cancel_story_operation(sid), "story_id": sid}
+
+
 @api.delete("/api/v1/story/stories/{sid}")
 def story_delete(sid: str, workspace: str = None):
     from services import story_pipeline
@@ -6877,6 +6888,22 @@ def list_activity():
                 "started_at": summary.get("created_at"),
                 "cancel": f"/api/v1/story/stories/{sid}/stop",
             })
+        # Synchronous story passes (analysis, translation, rewrite). They run
+        # in the request thread with the story still 'completed', so the
+        # status filter above cannot see them.
+        for op in (story_pipeline.active_operations() or []):
+            items.append({
+                "kind": "story-op",
+                "id": op["id"],
+                "label": f"{op['title']} — analysis / edit",
+                "status": "cancelling" if op.get("cancelling") else "running",
+                "message": op.get("message") or "",
+                "progress": 0,
+                "step": op.get("step") or 0,
+                "total_steps": op.get("total_steps") or 0,
+                "started_at": op.get("started_at"),
+                "cancel": f"/api/v1/story/stories/{op['id']}/stop-operation",
+            })
     except Exception as e:  # noqa: BLE001
         print(f"[activity] Could not list stories: {e}")
 
@@ -6901,6 +6928,9 @@ def stop_all_activity():
             elif item["kind"] == "story":
                 from services import story_pipeline
                 story_pipeline.stop_story(item["id"])
+            elif item["kind"] == "story-op":
+                from services import story_pipeline
+                story_pipeline.cancel_story_operation(item["id"])
             results.append({"kind": item["kind"], "id": item["id"], "stopped": True})
         except Exception as e:  # noqa: BLE001
             results.append({"kind": item["kind"], "id": item["id"],
@@ -7091,7 +7121,9 @@ async def story_analyze(sid: str, request: Request):
         ensure_model=_ensure_llm_loaded,
         lang=body.get("lang"),
     )
-    if not result.get("ok"):
+    # A cancellation is not a failure — the user asked for it, so it comes
+    # back as a normal response instead of a red error in the UI.
+    if not result.get("ok") and not result.get("cancelled"):
         raise HTTPException(status_code=400, detail=result.get("error") or "Analysis failed")
     return result
 

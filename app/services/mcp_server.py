@@ -491,11 +491,24 @@ def audiobook_plan(project_id: str, chapter_index: int = 0) -> dict:
 def list_activity() -> dict:
     """Everything currently running, with how to stop each one.
 
-    Covers generation jobs, Director pipelines, Storywriter runs and
-    audiobook renders. Each entry carries a `cancel` path — POST it via
-    api_request to stop that task.
+    Covers generation jobs, Director pipelines, Storywriter runs, story
+    analysis/translation passes and audiobook renders. Each entry carries a
+    `cancel` path — pass it to stop_activity_item.
     """
     return _get("/api/v1/activity")
+
+
+@mcp.tool()
+def stop_activity_item(cancel_path: str) -> dict:
+    """Stop one running task by the `cancel` path list_activity gave for it.
+
+    One tool for every kind of task, because the cancel route differs per
+    feature and list_activity already resolved it.
+    """
+    path = cancel_path if cancel_path.startswith("/") else f"/{cancel_path}"
+    if not path.startswith("/api/v1/"):
+        return {"error": f"Not a cancel path from list_activity: {cancel_path}"}
+    return _post(path, timeout=120)
 
 
 @mcp.tool()

@@ -1460,6 +1460,8 @@ export interface StoryAnalysis {
   language?: string
   chapters_analyzed?: number
   analyzed_at?: number
+  /** Set when the user stopped the pass; the other fields are absent. */
+  cancelled?: boolean
 }
 
 export interface StoryRewriteProposal {

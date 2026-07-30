@@ -83,6 +83,8 @@ _story_file_lock = threading.RLock()
 _story_threads: dict[str, threading.Thread] = {}
 _story_starting: set[str] = set()
 _story_operations: set[str] = set()
+# Pids whose running synchronous pass has been asked to stop.
+_operation_cancels: set[str] = set()
 _story_deleting: set[str] = set()
 
 STORY_STATE_VERSION = 1
@@ -898,12 +900,67 @@ def _claim_story_operation(pid: str) -> bool:
         ):
             return False
         _story_operations.add(pid)
+        # A stop request from a previous operation must never carry over and
+        # abort the next one before it has done anything.
+        _operation_cancels.discard(pid)
         return True
 
 
 def _release_story_operation(pid: str) -> None:
     with _story_lock:
         _story_operations.discard(pid)
+        _operation_cancels.discard(pid)
+
+
+def active_operations() -> list[dict]:
+    """Synchronous passes running right now (analysis, translation, rewrite).
+
+    These hold no worker thread, so they are invisible to the status-based
+    listing in list_stories — without this the Activity panel could not show
+    a running analysis, let alone stop it.
+    """
+    with _story_lock:
+        items = []
+        for pid in _story_operations:
+            state = _stories.get(pid) or {}
+            progress = state.get("progress") or {}
+            items.append({
+                "id": pid,
+                "title": state.get("title") or "Story",
+                "message": progress.get("message") or "Working...",
+                "step": progress.get("step") or 0,
+                "total_steps": progress.get("total_steps") or 0,
+                "started_at": state.get("created_at"),
+                "cancelling": pid in _operation_cancels,
+            })
+        return items
+
+
+def cancel_story_operation(pid: str) -> bool:
+    """Ask a running synchronous pass to stop.
+
+    Deliberately not stop_story: the story itself is finished and must keep
+    its status. Cancelling the in-flight LLM stream ends the current chapter
+    pass within a token, and the pass loop checks operation_cancelled()
+    before starting the next one.
+    """
+    with _story_lock:
+        if pid not in _story_operations:
+            return False
+        _operation_cancels.add(pid)
+        stream_id = (_stories.get(pid) or {}).get("_active_stream_id")
+    if stream_id:
+        try:
+            from services import llm_service
+            llm_service.cancel_stream(stream_id)
+        except Exception:
+            pass
+    return True
+
+
+def operation_cancelled(pid: str) -> bool:
+    with _story_lock:
+        return pid in _operation_cancels
 
 
 def _exclusive_story_operation(function):
@@ -2694,9 +2751,9 @@ def analyze_story(pid: str, out_dir: Optional[str] = None,
     is also persisted in the story state under `analysis`, with `analyzed_at`.
 
     Runs in the calling thread (minutes for a long book) and holds the story's
-    exclusive-operation claim while it does.
-    # ponytail: not cancellable — stop_story only reaches active workers. Make
-    # it a worker job if users start aborting analyses of 40-chapter books.
+    exclusive-operation claim while it does. cancel_story_operation() stops it
+    between chapters; what was analysed so far is discarded, since a merged
+    result covering half the book would read as a complete audit.
     """
     ok, resolved = _for_synchronous_pass(pid, out_dir, ensure_model)
     if not ok:
@@ -2718,7 +2775,10 @@ def analyze_story(pid: str, out_dir: Optional[str] = None,
             )}
 
         entries = []
+        cancelled = {"ok": False, "error": "Analysis cancelled.", "cancelled": True}
         for position, index in enumerate(indices):
+            if operation_cancelled(pid):
+                return cancelled
             _update_story(pid, progress=_progress(
                 position, len(indices),
                 f"Analysing chapter {index + 1} of {len(chapters)}...",
@@ -2726,6 +2786,8 @@ def analyze_story(pid: str, out_dir: Optional[str] = None,
             ))
             entries.append((index, _pass_analyze_chapter(pid, index, code)))
 
+        if operation_cancelled(pid):
+            return cancelled
         analysis = _merge_chapter_analyses(entries, len(chapters))
         _update_story(pid, progress=_progress(
             len(indices), len(indices), "Writing the overall assessment...",
@@ -3470,6 +3532,25 @@ def _self_check() -> None:
                                            {"language": "de"}, language="fr")
     assert "ADULT CONTENT" not in _system_prompt(
         "analyze", None, {"nsfw": True}), "the audit pass writes no prose"
+
+    # 8. Cancelling a synchronous pass, without touching the story status.
+    op_pid = "selfcheck-op"
+    _stories[op_pid] = {"title": "Op story", "status": "completed",
+                        "progress": _progress(1, 4, "Analysing chapter 2 of 4")}
+    assert not cancel_story_operation(op_pid), "nothing claimed it yet"
+    assert _claim_story_operation(op_pid)
+    assert not operation_cancelled(op_pid)
+    listed = [i for i in active_operations() if i["id"] == op_pid]
+    assert len(listed) == 1 and "chapter 2" in listed[0]["message"], listed
+    assert cancel_story_operation(op_pid) and operation_cancelled(op_pid)
+    assert [i for i in active_operations() if i["id"] == op_pid][0]["cancelling"]
+    assert _stories[op_pid]["status"] == "completed", "cancel must not fail the story"
+    _release_story_operation(op_pid)
+    assert not active_operations() or all(i["id"] != op_pid for i in active_operations())
+    # The stop request must not leak into the next operation.
+    assert _claim_story_operation(op_pid) and not operation_cancelled(op_pid)
+    _release_story_operation(op_pid)
+    del _stories[op_pid]
 
     print("story_pipeline self-check: OK")
 

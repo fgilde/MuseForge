@@ -5527,6 +5527,9 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       // No timeout on purpose: one LLM pass per chapter.
       const analysis = await api.analyzeStory(sid, lang)
+      // Stopped from the Activity panel: leave any earlier analysis alone
+      // rather than replacing it with an empty one.
+      if (analysis.cancelled) return
       // The backend persists the analysis on the story, so re-read (that
       // also picks up anything else that moved) and only fall back to the
       // response if the reload somehow lacks it.
