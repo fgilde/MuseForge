@@ -467,6 +467,173 @@ def audiobook_plan(project_id: str, chapter_index: int = 0) -> dict:
 
 
 @mcp.tool()
+def list_activity() -> dict:
+    """Everything currently running, with how to stop each one.
+
+    Covers generation jobs, Director pipelines, Storywriter runs and
+    audiobook renders. Each entry carries a `cancel` path — POST it via
+    api_request to stop that task.
+    """
+    return _get("/api/v1/activity")
+
+
+@mcp.tool()
+def stop_all_activity() -> dict:
+    """Stop every running task. Reports per item, so one stubborn task does
+    not hide that the rest went down."""
+    return _post("/api/v1/activity/stop-all", timeout=120)
+
+
+@mcp.tool()
+def story_translate(story_id: str, language: str) -> dict:
+    """Translate a story into another language (ISO code, e.g. "de").
+
+    The original is untouched — a translation is an additional view. Runs in
+    the background; poll story_status and read languages/chapters.
+    """
+    return _post(f"/api/v1/story/stories/{story_id}/translate",
+                 json={"language": language})
+
+
+@mcp.tool()
+def story_rewrite_passage(story_id: str, chapter_index: int, selected_text: str,
+                          instruction: str, lang: str = "") -> dict:
+    """Propose a rewrite of an exact passage. Nothing is applied.
+
+    selected_text must appear exactly once in that chapter — zero or several
+    matches is an error rather than a guess, because rewriting the wrong
+    paragraph is worse than refusing. Returns {replacement, before, after};
+    apply it with story_apply_rewrite.
+    """
+    body = {"selected_text": selected_text, "instruction": instruction}
+    if lang:
+        body["lang"] = lang
+    return _post(
+        f"/api/v1/story/stories/{story_id}/chapters/{chapter_index}/rewrite",
+        json=body, timeout=900)
+
+
+@mcp.tool()
+def story_apply_rewrite(story_id: str, chapter_index: int, selected_text: str,
+                        replacement: str, lang: str = "") -> dict:
+    """Replace a passage with a reviewed rewrite."""
+    body = {"selected_text": selected_text, "replacement": replacement}
+    if lang:
+        body["lang"] = lang
+    return _post(
+        f"/api/v1/story/stories/{story_id}/chapters/{chapter_index}/apply-rewrite",
+        json=body)
+
+
+@mcp.tool()
+def story_insert_chapter(story_id: str, at_index: int, write: bool = False,
+                         brief: str = "", title: str = "") -> dict:
+    """Insert a chapter. write=True has the LLM write it using both
+    neighbours as the seam, so it fits where it lands; otherwise an empty
+    chapter is inserted. at_index past the end appends."""
+    return _post(f"/api/v1/story/stories/{story_id}/chapters", json={
+        "at_index": at_index, "write": write, "brief": brief, "title": title,
+    })
+
+
+@mcp.tool()
+def story_analyze(story_id: str) -> dict:
+    """Audit a story: characters with their chapter spans, who speaks where,
+    a timeline, and issues such as plot holes and continuity breaks.
+
+    Runs one pass per chapter and merges, so it takes a while on a novel.
+    The result is stored on the story and comes back from story_status too.
+    """
+    return _post(f"/api/v1/story/stories/{story_id}/analyze", timeout=3600)
+
+
+@mcp.tool()
+def story_download_url(story_id: str, fmt: str = "md", lang: str = "",
+                       per_chapter: bool = False) -> str:
+    """Download path for a story as md, txt, docx or pdf.
+
+    per_chapter=True returns a ZIP with one file per chapter. Append the
+    result to the host you connected to and fetch it.
+    """
+    query = f"fmt={fmt}"
+    if lang:
+        query += f"&lang={lang}"
+    if per_chapter:
+        query += "&per_chapter=true"
+    return f"/api/v1/story/stories/{story_id}/download?{query}"
+
+
+@mcp.tool()
+def list_voices() -> dict:
+    """Named voices in this workspace, shared by Speech and audiobooks.
+
+    `ready` is false when an engine needs a reference recording and none is
+    present (or the file went missing), which is what would otherwise fail
+    mid-render.
+    """
+    return _get("/api/v1/voices")
+
+
+@mcp.tool()
+def create_voice(name: str, model_type: str = "index_tts2",
+                 reference_path: str = "", description: str = "",
+                 default_emotion: str = "", language: str = "") -> dict:
+    """Add a named voice to the library.
+
+    reference_path is a file already on the server — upload a recording with
+    upload_audio first (mp3/ogg/m4a/wav or a video, whose track is
+    extracted). Engines that clone need one; qwen3_tts_voicedesign instead
+    takes a written description via params.voice_description.
+    """
+    body = {"name": name, "model_type": model_type}
+    for key, value in (("reference_path", reference_path),
+                       ("description", description),
+                       ("default_emotion", default_emotion),
+                       ("language", language)):
+        if value:
+            body[key] = value
+    return _post("/api/v1/voices", json=body)
+
+
+@mcp.tool()
+def preview_voice(voice_id: str, text: str = "") -> dict:
+    """Audition a library voice. Returns a job_id; poll job_status.
+
+    Goes through the same planner a real render uses, so a voice that
+    previews will also render.
+    """
+    return _post(f"/api/v1/voices/{voice_id}/preview",
+                 json={"text": text} if text else {})
+
+
+@mcp.tool()
+def audiobook_import_voice(project_id: str, voice_id: str) -> dict:
+    """Copy a library voice into an audiobook project. A copy on purpose:
+    editing it inside the book must not rewrite the shared entry."""
+    return _post(f"/api/v1/audiobook/projects/{project_id}/voices/import",
+                 json={"voice_id": voice_id})
+
+
+@mcp.tool()
+def audiobook_sfx_library() -> dict:
+    """Sound effects already in the workspace, ready to reuse instead of
+    regenerating them."""
+    return _get("/api/v1/audiobook/sfx-library")
+
+
+@mcp.tool()
+def audiobook_adopt_effect(project_id: str, path: str, label: str = "",
+                           ambience: bool = True) -> dict:
+    """Add an existing audio file to a project as an effect, without
+    generating anything. Use audiobook_sfx_library to find candidates."""
+    return _post(f"/api/v1/audiobook/projects/{project_id}/assets/sfx/adopt", json={
+        "path": path, "label": label,
+        "playback_mode": "parallel" if ambience else "sequential",
+        "loop": ambience,
+    })
+
+
+@mcp.tool()
 def system_status() -> dict:
     """Environment preflight: GPU/CUDA availability, disk space, ffmpeg.
     ok=true means the system is ready to generate."""

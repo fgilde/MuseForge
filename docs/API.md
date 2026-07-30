@@ -41,6 +41,16 @@ The core generation workflow:
 | `POST /story/stories/{id}/chapters/{i}/regenerate` | Rewrite a chapter, optional `instruction` |
 | `PUT /story/stories/{id}/chapters/{i}` | Save a manual edit |
 | `POST /story/stories/{id}/export` | Write `.md`/`.txt` into the workspace |
+| `GET /story/languages` · `GET /story/estimate` | Writing languages; pages to words/chapters |
+| `POST /story/stories/{id}/translate` | Translate the whole story; the original stays |
+| `POST /story/stories/{id}/chapters/{i}/retranslate` | Re-translate one chapter |
+| `POST /story/stories/{id}/chapters/{i}/rewrite` | Propose a rewrite of an exact passage |
+| `POST /story/stories/{id}/chapters/{i}/apply-rewrite` | Apply a reviewed rewrite |
+| `POST /story/stories/{id}/chapters` · `DELETE …/{i}` | Insert (empty or AI-written) / delete a chapter |
+| `POST /story/stories/{id}/analyze` | Characters, dialogue map, timeline, plot holes |
+| `GET /story/export-formats` | Which of md/txt/docx/pdf this install can produce |
+| `GET /story/stories/{id}/download` | Download as md/txt/docx/pdf, whole or per-chapter ZIP |
+| `GET /story/stories/{id}/chapters/{i}/download` | Download one chapter |
 
 Chat and story generations stream into per-`stream_id` slots
 (`chat-<tid>`, `story-<sid>-outline`, `story-<sid>-ch<i>`), so several can
@@ -62,6 +72,11 @@ run without overwriting each other's output.
 | `POST /audiobook/projects/{id}/suggest-split` | LLM proposals for where a chapter should break |
 | `POST /audiobook/projects/{id}/apply-split` | Split a chapter at the given break points |
 | `POST /audiobook/projects/{id}/render` | Render a chapter or the whole book. Returns `{job_id}` |
+| `GET /audiobook/sfx-library` | Effects already in the workspace, ready to reuse |
+| `POST /audiobook/projects/{id}/assets/sfx/adopt` | Adopt an existing audio file as an effect |
+| `GET /audiobook/voice-presets` | Voice starting points and audition sample lines |
+| `POST /audiobook/projects/{id}/voices/{vid}/preview` | Audition a voice in the project |
+| `POST /audiobook/projects/{id}/voices/import` | Copy a library voice into the project |
 
 A project is `chapters[] -> blocks[] -> runs[]`, where each run carries its
 voice binding and optional emotion. Runs, not character offsets, so voice
@@ -75,6 +90,22 @@ The two LLM passes (`suggest-cast`, `suggest-split`) return proposals and
 never write: every id they mention is checked against the project first, and
 invented ids are dropped and counted rather than applied to whatever happens
 to match. Applying is a separate call with the subset you accept.
+
+### Voices and activity
+
+| Endpoint | Purpose |
+|---|---|
+| `GET/POST /voices` | The workspace voice library, shared by Speech and audiobooks |
+| `PUT/DELETE /voices/{id}` | Patch or remove a voice |
+| `POST /voices/{id}/preview` | Audition a voice; returns `{job_id}` |
+| `GET /activity` | Everything running, each with the exact path that stops it |
+| `POST /activity/stop-all` | Stop everything, reported per item |
+
+A voice references its recording rather than copying it, so the same audio can
+back several voices — and a deleted file surfaces as `reference_missing` with
+`ready: false` instead of failing mid-render. Importing a voice into an
+audiobook copies the configuration, so edits inside a book cannot rewrite the
+shared entry.
 
 ### Everything else
 
@@ -171,6 +202,20 @@ Or in an `mcp.json`-style config:
 | `audiobook_suggest_split(id, chapter, words)` | Propose chapter break points |
 | `audiobook_apply_split(id, chapter, splits)` | Split a chapter |
 | `audiobook_render(id, ...)` | Render a chapter or the whole book |
+| `audiobook_sfx_library()` / `audiobook_adopt_effect(...)` | Find and reuse existing effects |
+| `audiobook_import_voice(id, voice_id)` | Copy a library voice into a project |
+
+**Voices, activity and story editing**
+
+| Tool | Purpose |
+|---|---|
+| `list_voices()` / `create_voice(...)` / `preview_voice(id)` | The shared voice library |
+| `list_activity()` / `stop_all_activity()` | See and stop everything running |
+| `story_translate(id, language)` | Add a translation |
+| `story_rewrite_passage(...)` / `story_apply_rewrite(...)` | Propose and apply a passage rewrite |
+| `story_insert_chapter(id, at, write?)` | Insert a chapter, optionally AI-written |
+| `story_analyze(id)` | Characters, dialogue map, timeline, plot holes |
+| `story_download_url(id, fmt, ...)` | Download path for md/txt/docx/pdf |
 
 **The escape hatch.** `api_request(method, path, body?)` reaches every
 `/api/v1` endpoint, and `api_request("GET", "/openapi.json")` returns the

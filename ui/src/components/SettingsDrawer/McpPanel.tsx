@@ -61,6 +61,20 @@ const TOOLS: Array<[string, string]> = [
   ['audiobook_suggest_split', 'Propose where a chapter should break'],
   ['audiobook_apply_split', 'Split a chapter at chosen break points'],
   ['audiobook_render', 'Render a chapter or the whole book'],
+  ['audiobook_sfx_library', 'Effects already in the workspace, reusable'],
+  ['audiobook_adopt_effect', 'Reuse an existing audio file as an effect'],
+  ['audiobook_import_voice', 'Copy a library voice into a project'],
+  ['list_voices', 'The shared workspace voice library'],
+  ['create_voice', 'Add a named voice, optionally from a recording'],
+  ['preview_voice', 'Audition a library voice'],
+  ['list_activity', 'Everything running, with how to stop it'],
+  ['stop_all_activity', 'Stop every running task'],
+  ['story_translate', 'Add a translation of a story'],
+  ['story_rewrite_passage', 'Propose a rewrite of an exact passage'],
+  ['story_apply_rewrite', 'Apply a reviewed rewrite'],
+  ['story_insert_chapter', 'Insert a chapter, optionally AI-written'],
+  ['story_analyze', 'Characters, dialogue, timeline, plot holes'],
+  ['story_download_url', 'Download path for md/txt/docx/pdf'],
 ]
 
 function CopyRow({ label, value }: { label: string; value: string }) {
