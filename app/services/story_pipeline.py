@@ -824,12 +824,24 @@ def list_stories(out_dir: str) -> list[dict]:
                     with _story_lock:
                         live = pid in _stories
                     if status in _ACTIVE_STORY_STATUSES and not live:
+                        # Say why, or the reader sees "crashed" and no reason.
+                        # This death is always the same one: the process went
+                        # away mid-run (restart, OOM kill), so the phase it
+                        # never came back from is the whole explanation.
+                        if not data.get("error"):
+                            data["error"] = (
+                                "The server stopped while this story was "
+                                f"'{data.get('phase') or status}', so the run was "
+                                "lost. Nothing is broken — extend it to carry on "
+                                "from the last finished chapter, or start over."
+                            )
                         data["status"] = status = "crashed"
                         _write_story_json_unlocked(filepath, data)
                 chapters = data.get("chapters") or []
                 results.append({
                     "id": pid,
                     "status": status,
+                    "error": data.get("error") or "",
                     "title": data.get("title") or "",
                     "premise": (data.get("premise") or "")[:200],
                     "created_at": data.get("created_at"),
@@ -3551,6 +3563,32 @@ def _self_check() -> None:
     assert _claim_story_operation(op_pid) and not operation_cancelled(op_pid)
     _release_story_operation(op_pid)
     del _stories[op_pid]
+
+    # 9. A story left active by a dead process is reported as crashed *with a
+    # reason*. "crashed" and an empty error is what a user cannot act on.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, f"{_STORY_FILE_PREFIX}dead.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"story_id": "dead", "status": "writing",
+                       "phase": "writing chapter 2 of 4", "title": "Half a book",
+                       "chapters": [{"status": "done", "word_count": 900}]}, handle)
+        summary = [s for s in list_stories(tmp) if s["id"] == "dead"]
+        assert len(summary) == 1, summary
+        assert summary[0]["status"] == "crashed", summary[0]
+        assert "writing chapter 2 of 4" in summary[0]["error"], summary[0]["error"]
+        assert "extend" in summary[0]["error"], "must say how to recover"
+        # Persisted, and a second read does not rewrite a different reason.
+        with open(path, encoding="utf-8") as handle:
+            stored = json.load(handle)
+        assert stored["status"] == "crashed" and stored["error"]
+        assert list_stories(tmp)[0]["error"] == stored["error"]
+        # An explicit error from a real exception is never overwritten.
+        stored.update(status="writing", error="CUDA out of memory")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(stored, handle)
+        assert list_stories(tmp)[0]["error"] == "CUDA out of memory"
 
     print("story_pipeline self-check: OK")
 
