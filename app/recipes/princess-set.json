@@ -1,0 +1,17 @@
+{
+  "recipe_version": 1,
+  "name": "Princess Set (6 scenes)",
+  "description": "Six princesses, six moments, one Forge. Each line of the prompt becomes its own image, so this fills a row of the gallery in one go. Delete or edit lines to change the cast.",
+  "kind": "generation",
+  "mode": "image",
+  "model_type": "flux2_klein_9b",
+  "loras": [],
+  "params": {
+    "resolution": "1024x1024",
+    "num_inference_steps": 4,
+    "guidance_scale": 1,
+    "negative_prompt": "",
+    "image_mode": 1
+  },
+  "prompt_example": "classic animated-film princess with long auburn hair in a green travelling cloak, kneeling in a snowy pine forest to feed a fawn from her hand, breath visible in the cold, soft cel shading, warm rim light, painterly storybook illustration, clean line work, rich colour\nclassic animated-film princess with dark braided hair in a yellow ball gown, spinning alone through a candlelit library, motion in the skirt, dust floating in the light beams, soft cel shading, warm rim light, painterly storybook illustration, clean line work, rich colour\nclassic animated-film princess with black hair and a red sash, fencing on a palace balcony at dawn, sword raised, hair loose, confident grin, soft cel shading, warm rim light, painterly storybook illustration, clean line work, rich colour\nclassic animated-film princess with silver-blonde hair in a blue winter dress, ice-skating along a frozen canal between old gabled houses, scarf streaming behind her, soft cel shading, warm rim light, painterly storybook illustration, clean line work, rich colour\nclassic animated-film princess with copper curls in a simple linen dress, elbow-deep in flour in a sunlit bakery, laughing, a cat watching from the windowsill, soft cel shading, warm rim light, painterly storybook illustration, clean line work, rich colour\nclassic animated-film princess with dark skin and tight black curls in a violet gown, reading star charts on a rooftop at night, brass telescope beside her, lantern-lit streets far below, soft cel shading, warm rim light, painterly storybook illustration, clean line work, rich colour"
+}

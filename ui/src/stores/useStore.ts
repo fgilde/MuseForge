@@ -4571,97 +4571,128 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
-    const newJob: GenerationJob = {
-      id: '',
-      status: 'queued',
-      progress: 0,
-      step: 0,
-      totalSteps: 0,
-      phase: '',
-      message: 'Submitting...',
-      outputFiles: [],
-      error: null,
-      oomInfo: null,
-    }
+    // One job per prompt line.
+    //
+    // The backend takes exactly one prompt per request: wgp's newline splitting
+    // lives in its Gradio queue builder, which neither this UI nor
+    // /api/v1/generate ever reaches. So a multi-line prompt used to render only
+    // its FIRST line and silently drop the rest — a blueprint with six scenes
+    // produced one image.
+    //
+    // Only for stills. Video modes give newlines their own meaning (per-window
+    // prompts, multi-clip), and the sub-mode branches above already set
+    // multi_prompts_gen_type accordingly; splitting there would fight them.
+    const wholePrompt = String(params.prompt ?? '')
+    const promptLines = (
+      state.generationMode === 'image' && params.multi_prompts_gen_type !== 2
+        ? wholePrompt.split(/\r?\n/).map(one => one.trim()).filter(Boolean)
+        : [wholePrompt]
+    )
+    const lines = promptLines.length > 1 ? promptLines : [wholePrompt]
 
-    set(s => ({
-      isGenerating: true,
-      jobs: [newJob, ...s.jobs],
-    }))
+    for (const [lineIndex, linePrompt] of lines.entries()) {
+      const jobParams = lines.length > 1
+        // A shared seed across lines would tie unrelated scenes to one noise
+        // pattern; -1 lets each pick its own.
+        ? { ...params, prompt: linePrompt, seed: -1 }
+        : params
 
-    try {
-      const { job_id } = await api.submitGeneration(params)
+      const newJob: GenerationJob = {
+        id: '',
+        status: 'queued',
+        progress: 0,
+        step: 0,
+        totalSteps: 0,
+        phase: '',
+        // Numbered when a multi-line prompt fans out, so the tiles are
+        // tellable apart while they queue.
+        message: lines.length > 1
+          ? `Submitting ${lineIndex + 1} of ${lines.length}...`
+          : 'Submitting...',
+        outputFiles: [],
+        error: null,
+        oomInfo: null,
+      }
 
-      // Update the job with its server-assigned ID
       set(s => ({
-        jobs: s.jobs.map(j => j === newJob ? { ...j, id: job_id, status: 'running', message: 'Queued...' } : j),
+        isGenerating: true,
+        jobs: [newJob, ...s.jobs],
       }))
 
-      // Poll for status on this specific job
-      const pollInterval = setInterval(async () => {
-        // Check if this job was removed (stopped)
-        if (!get().jobs.find(j => j.id === job_id)) {
-          clearInterval(pollInterval)
-          return
-        }
+      try {
+        const { job_id } = await api.submitGeneration(jobParams)
 
-        try {
-          const status = await api.fetchJobStatus(job_id)
+        // Update the job with its server-assigned ID
+        set(s => ({
+          jobs: s.jobs.map(j => j === newJob ? { ...j, id: job_id, status: 'running', message: 'Queued...' } : j),
+        }))
 
-          set(s => ({
-            jobs: s.jobs.map(j => j.id !== job_id ? j : {
-              ...j,
-              status: status.status,
-              progress: status.progress / 100,
-              step: status.step,
-              totalSteps: status.total_steps,
-              phase: status.phase,
-              message: status.message,
-              outputFiles: status.output_files,
-              error: status.error,
-              oomInfo: status.oom_info ?? null,
-            }),
-          }))
-
-          // Refresh gallery during generation to show sliding window progress
-          if (status.status === 'running') {
-            get().refreshOutputs()
+        // Poll for status on this specific job
+        const pollInterval = setInterval(async () => {
+          // Check if this job was removed (stopped)
+          if (!get().jobs.find(j => j.id === job_id)) {
+            clearInterval(pollInterval)
+            return
           }
 
-          if (status.status === 'completed') {
-            clearInterval(pollInterval)
-            // Completed job — remove the placeholder, real output now in gallery
-            set(s => {
-              const remaining = s.jobs.filter(j => j.id !== job_id)
-              return {
-                jobs: remaining,
-                isGenerating: remaining.some(j => j.status === 'running' || j.status === 'queued'),
-              }
-            })
-            get().loadOutputs()
-          } else if (status.status === 'failed' || status.status === 'cancelled') {
-            clearInterval(pollInterval)
-            // Keep the failed/cancelled job in the queue so its placeholder
-            // card stays visible with the error message. User dismisses via
-            // the X button on the tile.
+          try {
+            const status = await api.fetchJobStatus(job_id)
+
             set(s => ({
-              isGenerating: s.jobs.some(j => j.id !== job_id && (j.status === 'running' || j.status === 'queued')),
+              jobs: s.jobs.map(j => j.id !== job_id ? j : {
+                ...j,
+                status: status.status,
+                progress: status.progress / 100,
+                step: status.step,
+                totalSteps: status.total_steps,
+                phase: status.phase,
+                message: status.message,
+                outputFiles: status.output_files,
+                error: status.error,
+                oomInfo: status.oom_info ?? null,
+              }),
             }))
-          }
-        } catch (e) {
-          console.error('Status poll error:', e)
-        }
-      }, 2000)
 
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Generation failed'
-      // Submit itself failed (pre-queue). Convert the placeholder to a failed
-      // state in place so the user sees what happened, rather than making the
-      // tile disappear and leaving them to wonder.
-      set(s => ({
-        jobs: s.jobs.map(j => j === newJob ? { ...j, id: j.id || `submit-fail-${Date.now()}`, status: 'failed', message: msg, error: msg } : j),
-        isGenerating: s.jobs.some(j => j !== newJob && (j.status === 'running' || j.status === 'queued')),
-      }))
+            // Refresh gallery during generation to show sliding window progress
+            if (status.status === 'running') {
+              get().refreshOutputs()
+            }
+
+            if (status.status === 'completed') {
+              clearInterval(pollInterval)
+              // Completed job — remove the placeholder, real output now in gallery
+              set(s => {
+                const remaining = s.jobs.filter(j => j.id !== job_id)
+                return {
+                  jobs: remaining,
+                  isGenerating: remaining.some(j => j.status === 'running' || j.status === 'queued'),
+                }
+              })
+              get().loadOutputs()
+            } else if (status.status === 'failed' || status.status === 'cancelled') {
+              clearInterval(pollInterval)
+              // Keep the failed/cancelled job in the queue so its placeholder
+              // card stays visible with the error message. User dismisses via
+              // the X button on the tile.
+              set(s => ({
+                isGenerating: s.jobs.some(j => j.id !== job_id && (j.status === 'running' || j.status === 'queued')),
+              }))
+            }
+          } catch (e) {
+            console.error('Status poll error:', e)
+          }
+        }, 2000)
+
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Generation failed'
+        // Submit itself failed (pre-queue). Convert the placeholder to a failed
+        // state in place so the user sees what happened, rather than making the
+        // tile disappear and leaving them to wonder.
+        set(s => ({
+          jobs: s.jobs.map(j => j === newJob ? { ...j, id: j.id || `submit-fail-${Date.now()}`, status: 'failed', message: msg, error: msg } : j),
+          isGenerating: s.jobs.some(j => j !== newJob && (j.status === 'running' || j.status === 'queued')),
+        }))
+      }
     }
   },
 
