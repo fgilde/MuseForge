@@ -2360,6 +2360,11 @@ def generate_streaming(
             stream=True,
         )
         resp.raise_for_status()
+        # llama-server sends text/event-stream with no charset, and requests
+        # then falls back to ISO-8859-1 for text/* — so every non-ASCII
+        # character came back double-encoded ("ständige" -> "stÃ¤ndige").
+        # It is always UTF-8; say so before decoding a single line.
+        resp.encoding = "utf-8"
 
         import json as _json_mod
         for line in resp.iter_lines(decode_unicode=True):

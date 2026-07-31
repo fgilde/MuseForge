@@ -194,6 +194,8 @@ _LANGUAGE_NAMES = {
     "ko": "Korean", "zh": "Chinese", "ar": "Arabic", "he": "Hebrew",
     "hi": "Hindi", "id": "Indonesian", "vi": "Vietnamese", "th": "Thai",
 }
+_LANGUAGE_CODES_BY_NAME = {name.lower(): code
+                           for code, name in _LANGUAGE_NAMES.items()}
 # Long writing sessions must not unload the model between chapters —
 # reloading 16 GB of weights costs minutes per chapter.
 STORY_IDLE_TIMEOUT_S = 1800
@@ -377,9 +379,18 @@ ANALYZE_SUMMARY_SCHEMA = {
 # so a story saved before languages existed answers "en" instead of None.
 
 def _lang_code(value) -> str:
-    """Normalize a language tag ("DE", "de_DE" -> "de-de"). "" if unusable."""
+    """Normalize a language tag ("DE", "de_DE" -> "de-de"). "" if unusable.
+
+    A display name is accepted too, because that is what the language list
+    hands out and therefore what a caller passes back: "German" -> "de".
+    Rejecting it was worse than an error in one place — _params_language
+    falls back to English on anything unusable, so a story asked for in
+    German was quietly written in English instead.
+    """
     code = str(value or "").strip().lower().replace("_", "-")
-    return code if re.fullmatch(r"[a-z]{2,3}(-[a-z0-9]{2,8})*", code) else ""
+    if re.fullmatch(r"[a-z]{2,3}(-[a-z0-9]{2,8})*", code):
+        return code
+    return _LANGUAGE_CODES_BY_NAME.get(code, "")
 
 
 def language_name(code: str) -> str:
@@ -3564,7 +3575,16 @@ def _self_check() -> None:
     _release_story_operation(op_pid)
     del _stories[op_pid]
 
-    # 9. A story left active by a dead process is reported as crashed *with a
+    # 9. A display name works wherever a code does — it is what /story/languages
+    # hands out, so it is what comes back. Silent English was the old cost.
+    assert _lang_code("German") == "de"
+    assert _lang_code("german") == "de" and _lang_code(" Chinese ") == "zh"
+    assert _lang_code("de") == "de" and _lang_code("de_DE") == "de-de"
+    assert _lang_code("Klingon") == "" and _lang_code("") == ""
+    assert _params_language({"language": "German"}) == "de", "no silent English"
+    assert language_name("German") == "German"
+
+    # 10. A story left active by a dead process is reported as crashed *with a
     # reason*. "crashed" and an empty error is what a user cannot act on.
     import tempfile
 
