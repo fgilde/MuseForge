@@ -169,8 +169,9 @@ section for why.
 |---|---|
 | `GET /outputs/{name}/prompts` | Every prompt behind an output, oldest first: the clips of a multi-clip run and the chain it was extended from |
 | `GET /loras/{model_type}` | LoRAs this model can load — per architecture, so it is not the full set |
-| `GET /loras/installed` | Every installed LoRA with its directory and CivitAI metadata |
+| `GET /loras/installed` | Every installed LoRA with its directory, declared `base_model` and CivitAI metadata |
 | `GET /loras/directory-models` | `{directory: [model_type, …]}` — which models load from each LoRA directory. A directory mapping to `[]` is a dead end |
+| `POST /loras/relocate` | `{filename, directory, target?}` — move a misfiled LoRA into the folder its own `base_model` belongs in. Refused for read-only linked installs, and when the base model has no folder here at all |
 
 LoRAs are stored per architecture under `loras/<dir>`. A file downloaded
 while another model was selected therefore never appears for the current

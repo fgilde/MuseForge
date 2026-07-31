@@ -998,6 +998,34 @@ def list_loras(model_type: str) -> dict:
 
 
 @mcp.tool()
+def list_installed_loras() -> dict:
+    """Every installed LoRA with the directory it sits in, its declared
+    base_model and CivitAI metadata. Use this to see what is on disk;
+    list_loras(model_type) shows only what one model can load."""
+    return _get("/api/v1/loras/installed")
+
+
+@mcp.tool()
+def relocate_lora(filename: str, directory: str = "", target: str = "") -> dict:
+    """Move a misfiled LoRA into the folder its own base_model belongs in.
+
+    A download lands in the folder of whatever model was selected at the
+    time, so a good LoRA can sit where no model looks for it — it is
+    installed but never listed by list_loras(). Pass the filename (and
+    the directory it currently sits in, from list_installed_loras()).
+    Without target the destination comes from the declared base_model.
+
+    Refused for read-only linked installs, and when the base model has no
+    folder here at all — an SDXL LoRA has no home in a video studio.
+    """
+    return _post("/api/v1/loras/relocate", json={
+        "filename": filename,
+        "directory": directory,
+        **({"target": target} if target else {}),
+    })
+
+
+@mcp.tool()
 def civitai_search(query: str) -> dict:
     """Search CivitAI for LoRAs by text query. Returns CivitAI's model
     list (items with modelVersions containing download URLs and files).
