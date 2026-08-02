@@ -6,27 +6,76 @@ discover models, submit generation jobs, poll them, and fetch outputs.
 
 Transport: streamable HTTP, mounted into the main FastAPI app at /mcp by
 launch.py — same port as the UI/REST API, no extra process. Point an MCP
-client at:  http://<host>:7860/mcp
+client at the address the UI is reachable on, plus /mcp; under the shipped
+compose that is http://localhost:7861/mcp, because the container listens
+on 7860 and is published on 7861. GET /api/v1/mcp/info reports the URL it
+was itself reached at, so a client never has to guess.
 
 Implementation notes:
 - Tools are thin wrappers over the local REST API (self-HTTP against
   127.0.0.1). That keeps one canonical implementation of validation and
   defaults-hydration (the /api/v1 endpoints) instead of a second code
-  path into wgp internals. Tools are sync functions on purpose: FastMCP
-  runs sync tools in a worker thread, so blocking `requests` calls don't
-  stall the shared event loop.
+  path into wgp internals. Tools are sync functions, and _ThreadedFastMCP
+  below is what makes that safe: the SDK would otherwise await them on
+  the event loop, which cannot work when the call they make is served by
+  that same loop.
 - launch.py calls set_api_port() with the RESOLVED port before serving
   (the preferred port may be taken and fall forward), so self-calls
   always hit the right instance.
 """
 
 import base64
+import functools
+import inspect
 import os
 
+import anyio.to_thread
 import requests
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP(
+
+class _ThreadedFastMCP(FastMCP):
+    """FastMCP that runs sync tools off the event loop.
+
+    The SDK calls a sync tool straight from the coroutine that is serving
+    the MCP request::
+
+        if fn_is_async: return await fn(...)
+        else:           return fn(...)
+
+    Every tool here answers by calling this same server over HTTP, so on
+    the event loop that is a deadlock: the loop is blocked inside the tool
+    and cannot serve the request the tool is waiting for. It ends in
+    "127.0.0.1:<port> Read timed out" after 30s, for every single tool.
+
+    Registering an async wrapper instead hands the blocking work to a
+    worker thread and leaves the loop free to answer the self-call. The
+    wrapper keeps the wrapped signature (functools.wraps sets __wrapped__,
+    which inspect.signature follows), so the generated tool schema is
+    unchanged.
+    """
+
+    def tool(self, *args, **kwargs):
+        register = super().tool(*args, **kwargs)
+
+        def decorate(fn):
+            if inspect.iscoroutinefunction(fn):
+                return register(fn)
+
+            @functools.wraps(fn)
+            async def in_thread(**call_kwargs):
+                return await anyio.to_thread.run_sync(
+                    functools.partial(fn, **call_kwargs))
+
+            register(in_thread)
+            # Hand back the original: it stays directly callable and
+            # testable, and nothing in this module calls tools as tools.
+            return fn
+
+        return decorate
+
+
+mcp = _ThreadedFastMCP(
     "MuseForge",
     instructions=(
         "MuseForge is a local AI studio for video, images, audio, long-form "
@@ -1048,3 +1097,34 @@ def civitai_download(params: dict) -> dict:
     api_request("GET", "/api/v1/civitai/downloads").
     """
     return _post("/api/v1/civitai/download", json=params)
+
+
+def _self_check() -> None:
+    """The invariant that broke: no tool may be awaited on the event loop.
+
+    A sync tool registered as-is deadlocks against the server it calls, and
+    the failure is invisible until a client actually invokes one — listing
+    the tools looks perfectly healthy. So assert the wrapping directly.
+    """
+    import asyncio
+
+    registered = mcp._tool_manager._tools
+    assert len(registered) > 50, f"expected the full tool surface, got {len(registered)}"
+    blocking = [name for name, tool in registered.items() if not tool.is_async]
+    assert not blocking, f"these tools would block the event loop: {blocking[:5]}"
+
+    # The wrapper must not change the tool's public shape.
+    listed = {t.name: t for t in asyncio.run(mcp.list_tools())}
+    assert "generate" in listed and "list_models" in listed, sorted(listed)[:8]
+    relocate = listed["relocate_lora"].inputSchema["properties"]
+    assert set(relocate) == {"filename", "directory", "target"}, relocate
+    assert "misfiled" in (listed["relocate_lora"].description or "")
+
+    # And the plain functions stay callable, which is what makes them testable.
+    assert callable(relocate_lora) and not inspect.iscoroutinefunction(relocate_lora)
+
+    print(f"mcp_server self-check: OK ({len(registered)} tools, none blocking)")
+
+
+if __name__ == "__main__":
+    _self_check()

@@ -16533,13 +16533,22 @@ except Exception as _mcp_e:  # noqa: BLE001 — optional integration
 
 
 @api.get("/api/v1/mcp/info")
-def mcp_info():
-    """MCP endpoint status for the Settings UI. The URL is client-side
-    (window.location.origin + /mcp); this reports availability and
-    whether requests must carry a bearer token (MUSEFORGE_API_TOKEN)."""
+def mcp_info(request: Request):
+    """Everything a client needs to connect an agent to this instance.
+
+    The URL is derived from the request, not from the port the server
+    bound: behind Docker or a reverse proxy the reachable address is not
+    the internal one (the container listens on 7860 but is published on
+    7861), and guessing the internal port is exactly how an agent ends up
+    knocking on a closed door.
+    """
+    base = str(request.base_url).rstrip("/")
     return {
         "mounted": _mcp_mounted,
         "token_required": bool(os.environ.get("MUSEFORGE_API_TOKEN")),
+        "url": f"{base}/mcp",
+        "transport": "streamable-http",
+        "add_command": f"claude mcp add --transport http museforge {base}/mcp",
     }
 
 _ui_dist = os.path.normpath(os.path.join(_app_dir, "..", "ui", "dist"))

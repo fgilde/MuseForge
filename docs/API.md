@@ -191,6 +191,13 @@ Don't expose the port to untrusted networks.
 Endpoint: **`http://localhost:7861/mcp`** (streamable HTTP transport, same
 port as the UI — no extra process).
 
+Running it somewhere else? Use whatever address the UI answers on, with
+`/mcp` appended — not the port the server binds internally. Under the
+shipped compose the container listens on 7860 and is published on 7861,
+so 7860 is refused from outside. `GET /api/v1/mcp/info` settles it: it
+reports the URL it was itself reached at, whether a bearer token is
+required, and a ready `claude mcp add` line.
+
 Example client config (Claude Code):
 
 ```bash
