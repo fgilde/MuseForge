@@ -7,38 +7,90 @@
   drivable from a browser, a script or an AI agent.
 </p>
 
+<p align="center">
+  <a href="https://fgilde.github.io/MuseForge/">Website</a> ·
+  <a href="https://fgilde.github.io/MuseForge/docs/">Documentation</a> ·
+  <a href="docs/API.md">API &amp; MCP reference</a> ·
+  <a href="https://gilde.org">gilde.org</a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/studio.png" alt="MuseForge Studio" width="100%" />
+</p>
+
 ---
 
 > **Heritage:** MuseForge is a fork of [Maestro](https://github.com/Blizaine/Maestro) by
 > [@Blizaine](https://github.com/Blizaine), which itself builds on the
 > [Wan2GP](https://github.com/deepbeepmeep/Wan2GP) generation pipeline. Full credits
-> [below](#credits) — this README only covers what MuseForge does differently.
+> [below](#credits) — this README covers what MuseForge does differently.
+> The `VERSION` file tracks the upstream release the engine is level with
+> (currently **Maestro 1.6.5**), so you can tell at a glance how current it is.
 
 Deploy it anywhere with one `docker compose up`, then use it from the browser or
-let an agent drive it over MCP. Video, image and audio generation, an
-LLM-planned Director mode, a long-form Storywriter and an audiobook producer —
-all in a single Docker image.
+let an agent drive it over MCP. 193 generation models, an LLM-planned Director
+mode, a long-form Storywriter and a full audiobook producer — one Docker image.
 
 ## Why a separate tool?
 
-Maestro is a desktop-style app distributed through the Pinokio launcher and optimized
-for the person sitting in front of it. MuseForge takes the same generation engine in a
-different direction — **infrastructure instead of desktop app**:
+Maestro is a desktop-style app distributed through the Pinokio launcher, optimized
+for the person sitting in front of it. MuseForge points the same generation engine
+somewhere else — **infrastructure and long-form work instead of a desktop app**.
 
-- **Docker-first.** One `docker compose up` on any CUDA box — no launcher, no
-  Python setup, no per-machine install scripts. Prebuilt images ship from GHCR via CI;
+### Run it like a service
+
+- **Docker-first.** One `docker compose up` on any CUDA box. No launcher, no Python
+  setup, no per-machine install scripts. Prebuilt images ship from GHCR via CI, and
   all state (weights, LoRAs, outputs, settings) lives in named volumes.
-- **Agent-first.** Everything the UI can do is a versioned REST API, and a native
-  **MCP endpoint** (`/mcp`) makes MuseForge a first-class tool for AI agents: list
-  models, submit jobs, poll, fetch outputs, enhance prompts. Optional bearer-token
-  auth prepares for multi-user setups.
-- **Its own workflow language and face.** Aurora Glass UI (frosted panels, animated
-  dialogs, right-hand control dock), **Blueprints** for one-click reusable looks, and
-  a **Forge** button instead of yet another "Generate".
+- **Everything is an API.** 184 REST endpoints under `/api/v1` with interactive
+  OpenAPI docs — the UI is a client, not the only way in.
+- **Agents are first-class.** A native **MCP endpoint** at `/mcp` exposes **76
+  tools**: list models, submit and poll jobs, fetch outputs, write a story, build an
+  audiobook, manage voices and LoRAs. Optional bearer-token auth. An agent can be
+  handed a document and return a finished audiobook without a human touching the UI.
 
-If you want the original desktop experience with one-click Pinokio install, use
+### Do more than single clips
+
+| | What it is |
+|---|---|
+| **Storywriter** | Novel-length prose in chapters, with outline, continuity checks between chapters, translation into 28 languages and an audit pass that reports characters, timeline and plot holes. |
+| **Audiobook producer** | Import a document, split it into passages, give each one a voice and an emotion, mix in effects with ducking and loudness matching, render chapters or a chaptered M4B. Renders are cached per passage, so an edit re-voices only what changed. |
+| **Voice library** | Reusable voices across four TTS engines. Build one from a description and keep the take you like, or **adopt your own recording** as a cloning reference. |
+| **Blueprints** | 33 shipped recipes across five kinds — Image, Video, Story, Voice and Effect. Save any output's full recipe and re-apply it in one click. |
+| **LoRA workflow** | Browse CivitAI in-app, see what you already own, "Use now" wires a LoRA into the right model, and misfiled files can be relocated instead of silently never appearing. |
+| **Workspaces** | Separate output folders per project, switchable from the header. |
+
+### Fix what got in the way
+
+- Failures say what went wrong instead of stopping quietly.
+- Every long-running job — generations, story passes, **and downloads** — shows up in
+  the activity panel and actually stops when you stop it.
+- A multi-line prompt fans out into one job per line, so a six-scene blueprint
+  produces six scenes.
+
+If you want the original desktop experience with a one-click Pinokio install, use
 [Maestro](https://github.com/Blizaine/Maestro). If you want to run the engine as a
 service and integrate it, you're in the right place.
+
+## Screenshots
+
+| Director & Studio | Blueprints |
+|---|---|
+| [![Studio](docs/screenshots/studio.png)](docs/screenshots/studio.png) | [![Blueprints](docs/screenshots/blueprints.png)](docs/screenshots/blueprints.png) |
+| Model, prompt, LoRAs and advanced knobs in the right-hand dock; the gallery keeps queue and results together. | Reusable recipes, labelled by kind — image, video, story, voice, effect. |
+
+| Storywriter | Audiobook producer |
+|---|---|
+| [![Storywriter](docs/screenshots/storywriter.png)](docs/screenshots/storywriter.png) | [![Audiobook](docs/screenshots/audiobook.png)](docs/screenshots/audiobook.png) |
+| Chapters, premise, outline and per-chapter regeneration. | Passages, voices per speaker, effects, chapter rendering. |
+
+| Voice library | LoRA browser |
+|---|---|
+| [![Voices](docs/screenshots/voices.png)](docs/screenshots/voices.png) | [![LoRA browser](docs/screenshots/lora-browser.png)](docs/screenshots/lora-browser.png) |
+| Engines, seeds, auditioning, and your own recordings as references. | CivitAI search with ownership, compatibility and one-click use. |
+
+Retake them any time against a running instance:
+`python scripts/capture_screenshots.py`.
 
 ## Quick start (Docker)
 
@@ -80,15 +132,19 @@ the exact steps.
 
 ## Using it
 
-- **Studio** — direct control: pick a model (LTX, Wan, Hunyuan, Flux, Qwen, ACE-Step,
-  TTS, …), prompt, LoRAs, advanced knobs, hit **Forge**.
+- **Studio** — direct control: pick a model (LTX, Wan, Hunyuan, Flux, Qwen, MiniMax
+  H3, SCAIL-2, ACE-Step, TTS, …), prompt, LoRAs, advanced knobs, hit **Forge**.
 - **Director** — describe a music video or short film; a local LLM plans shots,
   writes prompts per model, generates start frames and runs the full multi-clip
   pipeline.
-- **Blueprints** — save any output's full recipe (model + LoRAs + settings) and
-  re-apply it with one click, or share it as a file.
-- **Settings → API & MCP** — endpoint URL, ready-made client configs, tool
-  reference and token status.
+- **Text → Story** — premise to finished chapters, then translate, audit or hand the
+  result straight to the audiobook producer.
+- **Audio → Book / Voices** — build the voices, then read the book with them.
+- **Blueprints / LoRAs** — buttons in the gallery header, reachable from anywhere.
+- **Settings → API & MCP** — endpoint URL, ready-made client configs, tool reference
+  and token status.
+
+Full documentation: **<https://fgilde.github.io/MuseForge/docs/>**
 
 ## API & MCP
 
@@ -98,6 +154,10 @@ at <http://localhost:7861/mcp> (streamable HTTP):
 ```bash
 claude mcp add --transport http museforge http://localhost:7861/mcp
 ```
+
+Running it elsewhere? Use whatever address the UI answers on plus `/mcp` — not the
+port the server binds internally. `GET /api/v1/mcp/info` reports the reachable URL,
+whether a token is required, and a ready-made `claude mcp add` line.
 
 Set `MUSEFORGE_API_TOKEN` (see docker-compose.yml) to require
 `Authorization: Bearer <token>` on `/mcp`. Details: [docs/API.md](docs/API.md).
@@ -125,8 +185,16 @@ a separate Python 3.12 env at `app/services/sam/env` with
 ## Updating / resetting
 
 Docker: `docker compose pull && docker compose up -d` (or rebuild). Reset: remove the
-named volumes you want to wipe (`docker volume ls | grep museforge`) — model weights
-live in `ckpts`, leave it unless you want to re-download.
+named volumes you want to wipe (`docker volume ls | grep amazevideogen`) — model
+weights live in `ckpts`, leave it unless you want to re-download.
+
+**Pulling in upstream Maestro releases.** MuseForge has real git ancestry with
+upstream, so this is an ordinary merge:
+
+```bash
+git remote add upstream https://github.com/Blizaine/Maestro.git   # once
+git fetch upstream && git merge upstream/main
+```
 
 ## License
 
@@ -150,3 +218,9 @@ from its own repository at build time rather than vendored here.
 ## Issues
 
 Bug reports and feature requests: this repository's GitHub issues.
+
+---
+
+<p align="center">
+  Built by <a href="https://gilde.org">gilde.org</a>
+</p>

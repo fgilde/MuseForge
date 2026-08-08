@@ -93,3 +93,8 @@ app/plugins/wan2gp-lora-multipliers-ui/
 # Python bytecode (anywhere)
 __pycache__/
 app/wgp_config.json.bak
+
+# Site assets are copied in by the pages workflow from docs/ — one copy in git.
+site/logo.png
+site/screenshots/
+site/.nojekyll

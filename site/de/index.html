@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MuseForge — dein eigenes KI-Medienstudio</title>
+<meta name="description" content="Selbst gehostetes KI-Studio für Video, Bilder, Audio, lange Texte und Hörbücher. Ein docker compose up, vollständige REST-API und ein natives MCP, damit Agenten es steuern können." />
+<meta property="og:title" content="MuseForge — dein eigenes KI-Medienstudio" />
+<meta property="og:description" content="Video, Bilder, Audio, Romane und Hörbücher auf der eigenen GPU. Docker-first, API-first, per MCP von Agenten steuerbar." />
+<meta property="og:image" content="../screenshots/blueprints.png" />
+<meta property="og:type" content="website" />
+<link rel="icon" href="../logo.png" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="../logo.png" alt="" /><span>MuseForge</span></a>
+    <nav class="top">
+      <a href="#was" class="hide-sm">Funktionen</a>
+      <a href="#start">Installation</a>
+      <a href="#agenten" class="hide-sm">Agenten</a>
+      <a href="docs/">Doku</a>
+      <a href="https://github.com/fgilde/MuseForge">GitHub</a>
+      <span class="lang"><a href="../">EN</a><a class="on" href="./">DE</a></span>
+    </nav>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="wrap">
+    <h1>Dein eigenes <em>KI-Medienstudio</em>,<br />auf deiner eigenen GPU.</h1>
+    <p class="lead">
+      Video, Bilder, Audio, Texte in Romanlänge und fertige Hörbücher — ein
+      Docker-Image, keine Cloud, keine Lizenz pro Platz. Im Browser bedienen, per
+      REST skripten oder einem KI-Agenten über MCP übergeben.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="#start">Loslegen</a>
+      <a class="btn ghost" href="docs/">Zur Dokumentation</a>
+      <a class="btn ghost" href="https://github.com/fgilde/MuseForge">Auf GitHub ansehen</a>
+    </div>
+    <div class="shot">
+      <img src="../screenshots/blueprints.png" alt="Die Blueprint-Galerie: wiederverwendbare Rezepte, beschriftet nach Art" />
+    </div>
+  </div>
+</div>
+
+<section id="zahlen">
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><b>193</b><span>Generierungsmodelle</span></div>
+      <div class="stat"><b>184</b><span>REST-Endpunkte</span></div>
+      <div class="stat"><b>76</b><span>MCP-Werkzeuge</span></div>
+      <div class="stat"><b>33</b><span>Blueprints</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="was">
+  <div class="wrap">
+    <h2>Mehr als ein Clip nach dem anderen</h2>
+    <p class="sub">
+      MuseForge fängt dort an, wo ein Prompt-Feld aufhört: ganze Geschichten, ganze
+      Bücher, und eine Stimme, die von Kapitel eins bis zum Schluss dieselbe Person
+      bleibt.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <span class="tag">Studio</span>
+        <h3>Erzeugen</h3>
+        <p>Video-, Bild- und Audiomodelle — LTX, Wan, Flux, Qwen, MiniMax H3,
+           SCAIL-2, ACE-Step und weitere. LoRAs, Sampling-Feineinstellungen,
+           Multi-Clip und Verlängern.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Director</span>
+        <h3>Einen ganzen Film planen</h3>
+        <p>Beschreibe ein Musikvideo oder einen Kurzfilm. Ein lokales LLM plant die
+           Einstellungen, schreibt Prompts pro Modell, erzeugt Startbilder und lässt
+           die Pipeline laufen.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Storywriter</span>
+        <h3>Einen Roman schreiben</h3>
+        <p>Outline, Kapitel, Kontinuitätsprüfung dazwischen, Übersetzung in 28
+           Sprachen und eine Analyse, die Figuren, Zeitachse und Logiklücken meldet.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Hörbuch</span>
+        <h3>Vorlesen lassen</h3>
+        <p>Dokument importieren, jeder Passage eine Stimme geben, Emotionen und
+           Effekte mit Ducking und Lautheitsanpassung mischen, Kapitel oder ein
+           M4B mit Kapitelmarken rendern.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Stimmen</span>
+        <h3>Eine Stimme behalten</h3>
+        <p>Eine Stimme aus einer Beschreibung bauen und den Take behalten, der
+           gefällt — oder die eigene Aufnahme als Klon-Referenz übernehmen. Jedes
+           Buch greift darauf zu.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Blueprints</span>
+        <h3>Gutes wiederholen</h3>
+        <p>Das komplette Rezept einer Ausgabe sichern — Modell, LoRAs, alle
+           Einstellungen — und mit einem Klick erneut anwenden. 33 sind bereits
+           dabei, in fünf Arten.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="agenten">
+  <div class="wrap">
+    <h2>Dafür gebaut, von einem Agenten gesteuert zu werden</h2>
+    <p class="sub">
+      Alles, was die Oberfläche kann, ist ein REST-Endpunkt, und ein natives
+      MCP stellt 76 davon als Werkzeuge bereit. Ein Agent kann ein Dokument
+      entgegennehmen und ein fertiges Hörbuch zurückgeben, ohne dass jemand die App
+      öffnet.
+    </p>
+    <div class="split">
+      <div>
+        <pre><code>claude mcp add --transport http \
+  museforge http://localhost:7861/mcp</code></pre>
+        <p style="color:var(--text-dim);font-size:15px">
+          Danach: <code>list_models</code> → <code>generate</code> →
+          <code>job_status</code> → <code>get_output_url</code>. Oder
+          <code>upload_document</code> → <code>audiobook_create</code> →
+          <code>audiobook_render</code>. Alles ohne eigenes Werkzeug ist über
+          <code>api_request</code> erreichbar.
+        </p>
+        <p style="color:var(--text-dim);font-size:15px">
+          Unklar, welche Adresse der Agent braucht? <code>GET /api/v1/mcp/info</code>
+          antwortet mit der Adresse, unter der es selbst erreicht wurde, und einem
+          fertigen Befehl.
+        </p>
+      </div>
+      <figure>
+        <img src="../screenshots/settings-api.png" alt="Die Einstellungsseite für API und MCP mit Endpunkt-URL und Client-Konfiguration" />
+        <figcaption>Einstellungen → API &amp; MCP: Endpunkt, Client-Konfiguration, Token-Status.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="galerie">
+  <div class="wrap">
+    <h2>Ein Rundgang</h2>
+    <p class="sub">Screenshots aus einer laufenden Instanz — mit einem Befehl neu aufnehmbar.</p>
+    <div class="split">
+      <figure>
+        <img src="../screenshots/storywriter.png" alt="Storywriter mit Kapiteln und Outline" />
+        <figcaption>Storywriter — von der Prämisse zu Kapiteln, einzeln neu erzeugbar.</figcaption>
+      </figure>
+      <figure>
+        <img src="../screenshots/audiobook.png" alt="Hörbuch-Editor mit Passagen und Stimmen" />
+        <figcaption>Hörbuch — Passagen, Stimmen, Effekte, Kapitel-Renders.</figcaption>
+      </figure>
+    </div>
+    <div class="split" style="margin-top:30px">
+      <figure>
+        <img src="../screenshots/voices.png" alt="Stimmen-Bibliothek" />
+        <figcaption>Stimmen-Bibliothek — Engines, Probehören, eigene Aufnahmen.</figcaption>
+      </figure>
+      <figure>
+        <img src="../screenshots/studio.png" alt="Das Studio" />
+        <figcaption>Studio — Galerie, Warteschlange und Steuerleiste in einer Ansicht.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <h2>Installation</h2>
+    <p class="sub">
+      Eine NVIDIA-GPU mit mindestens 6 GB VRAM, Docker mit dem NVIDIA Container
+      Toolkit und Plattenplatz für die Modellgewichte. Das ist die ganze Liste.
+    </p>
+    <pre><code>git clone https://github.com/fgilde/MuseForge.git
+cd MuseForge
+docker compose up -d</code></pre>
+    <p style="color:var(--text-dim)">
+      <code>http://localhost:7861</code> öffnen. Modelle werden bei der ersten
+      Nutzung geladen, nicht bei der Installation — das erste Video dauert deshalb,
+      spätere Läufe sind schnell.
+    </p>
+    <div class="note">
+      <strong>Port 7861 ist Absicht.</strong> Eine Maestro-Instanz auf derselben
+      Maschine behält 7860, damit beide nebeneinander laufen können. Im Container
+      lauscht die App weiterhin auf 7860.
+    </div>
+    <p><a class="btn primary" href="docs/">Vollständige Dokumentation</a></p>
+  </div>
+</section>
+
+<section id="herkunft">
+  <div class="wrap">
+    <h2>Woher es kommt</h2>
+    <p class="sub">
+      MuseForge ist ein Fork von <a href="https://github.com/Blizaine/Maestro">Maestro</a>
+      von @Blizaine, das wiederum auf der
+      <a href="https://github.com/deepbeepmeep/Wan2GP">Wan2GP</a>-Pipeline aufbaut.
+      Maestro ist eine Desktop-App, die über Pinokio installiert wird; MuseForge nimmt
+      dieselbe Engine und richtet sie auf Infrastruktur und Langformat aus. Wer die
+      Ein-Klick-Desktop-Erfahrung will, nimmt Maestro — darin ist es hervorragend.
+    </p>
+    <p style="color:var(--text-dim)">
+      Veröffentlicht unter der WanGP Non-Commercial Evaluation License 1.1. Frei für
+      nicht-kommerzielle Nutzung; die erzeugten Ausgaben gehören dir.
+    </p>
+  </div>
+</section>
+
+<footer class="site">
+  <div class="wrap">
+    <span>MuseForge</span>
+    <a href="docs/">Dokumentation</a>
+    <a href="https://github.com/fgilde/MuseForge">GitHub</a>
+    <a href="../">English</a>
+    <span class="spacer">Gebaut von <a href="https://gilde.org">gilde.org</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

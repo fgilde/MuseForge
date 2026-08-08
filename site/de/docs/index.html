@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MuseForge Dokumentation</title>
+<meta name="description" content="MuseForge installieren, benutzen und automatisieren: Studio, Director, Storywriter, Hörbücher, Stimmen, Blueprints, LoRAs, REST-API und MCP." />
+<link rel="icon" href="../../logo.png" />
+<link rel="stylesheet" href="../../assets/style.css" />
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="../"><img src="../../logo.png" alt="" /><span>MuseForge</span></a>
+    <nav class="top">
+      <a href="../">Startseite</a>
+      <a href="#api">API &amp; MCP</a>
+      <a href="https://github.com/fgilde/MuseForge">GitHub</a>
+      <span class="lang"><a href="../../docs/">EN</a><a class="on" href="./">DE</a></span>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap docs">
+  <aside>
+    <h4>Start</h4>
+    <a href="#install">Installation</a>
+    <a href="#first">Die erste Generierung</a>
+    <a href="#konzepte">Wie alles zusammenhängt</a>
+    <h4>Arbeiten</h4>
+    <a href="#studio">Studio</a>
+    <a href="#director">Director</a>
+    <a href="#story">Storywriter</a>
+    <a href="#hoerbuch">Hörbücher</a>
+    <a href="#stimmen">Stimmen</a>
+    <a href="#blueprints">Blueprints</a>
+    <a href="#loras">LoRAs</a>
+    <h4>Automatisierung</h4>
+    <a href="#api">REST-API</a>
+    <a href="#mcp">MCP für Agenten</a>
+    <a href="#beispiele">Durchgespielte Beispiele</a>
+    <h4>Betrieb</h4>
+    <a href="#speicher">Speicher &amp; Workspaces</a>
+    <a href="#updates">Aktualisieren</a>
+    <a href="#sicherheit">Erreichbarkeit &amp; Sicherheit</a>
+    <a href="#probleme">Fehlerbehebung</a>
+  </aside>
+
+  <article>
+
+  <h2 id="install">Installation</h2>
+  <p>
+    MuseForge kommt als einzelnes Docker-Image. Nötig sind eine NVIDIA-GPU mit
+    mindestens 6 GB VRAM, <a href="https://docs.docker.com/engine/install/">Docker</a>
+    mit dem
+    <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html">NVIDIA Container Toolkit</a>
+    und Platz für die Modellgewichte — plane 150 GB ein, mehr wenn du Modelle
+    sammelst. AMD-GPUs und macOS werden nicht unterstützt, die Pipeline ist
+    CUDA-only.
+  </p>
+<pre><code>git clone https://github.com/fgilde/MuseForge.git
+cd MuseForge
+docker compose up -d</code></pre>
+  <p>Danach <code>http://localhost:7861</code> öffnen.</p>
+
+  <div class="note">
+    <strong>Bei der Installation wird kein Modell geladen.</strong> Im Image steckt die
+    Anwendung, nicht die Gewichte. Beim ersten Einsatz eines Modells werden dessen
+    Dateien einmalig geholt — bei Videomodellen oft zweistellige Gigabyte —, bevor
+    überhaupt etwas erscheint. Spätere Läufe mit demselben Modell starten sofort.
+  </div>
+
+  <h3>Welches Image</h3>
+  <p>
+    Die Compose-Datei baut standardmäßig lokal. Für das fertige Image den
+    <code>build</code>-Block durch
+    <code>image: ghcr.io/fgilde/museforge:latest</code> in
+    <code>docker-compose.yml</code> ersetzen. Das veröffentlichte Image ist das
+    <em>runtime</em>-Ziel, also ohne kompilierte SageAttention-Kernel — voll
+    funktionsfähig, es fällt auf sdpa-Attention zurück.
+  </p>
+
+  <h3>Andere GPUs als 30xx/40xx</h3>
+  <p>
+    Der Standard-Build zielt auf die CUDA-Compute-Fähigkeiten 8.0, 8.6 und 8.9. Für
+    andere Karten eine eigene Liste übergeben:
+  </p>
+<pre><code>docker build --build-arg CUDA_ARCHITECTURES="8.6;8.9;12.0" -t museforge .</code></pre>
+
+  <h2 id="first">Die erste Generierung</h2>
+  <ol>
+    <li><code>http://localhost:7861</code> öffnen und den Willkommensdialog schließen.</li>
+    <li>Rechts in der Leiste einen Modus wählen: <strong>Image</strong> zeigt am
+        schnellsten ein Ergebnis.</li>
+    <li>Unten in der Leiste ein Modell wählen. Alles, was als nicht heruntergeladen
+        markiert ist, holt beim ersten Einsatz seine Gewichte.</li>
+    <li>Prompt eintippen und <strong>Forge</strong> drücken.</li>
+    <li>Die Job-Kachel in der Galerie beobachten. Fortschritt, aktueller Schritt und
+        etwaige Fehler stehen dort; die fertige Datei landet in der Galerie.</li>
+  </ol>
+  <p>
+    Ein mehrzeiliger Prompt im Bildmodus erzeugt <em>einen Job pro Zeile</em> — so
+    liefert ein Blueprint mit mehreren Szenen auch mehrere Bilder statt nur eines.
+  </p>
+
+  <h2 id="konzepte">Wie alles zusammenhängt</h2>
+  <div class="table-scroll">
+  <table>
+    <tr><th>Baustein</th><th>Wofür</th></tr>
+    <tr><td><strong>Studio</strong></td><td>Direkte Kontrolle über eine Generierung: Modell, Prompt, LoRAs, Sampling.</td></tr>
+    <tr><td><strong>Director</strong></td><td>Ein LLM plant ein mehrteiliges Stück und bedient das Studio für dich.</td></tr>
+    <tr><td><strong>Storywriter</strong></td><td>Lange Prosa in Kapiteln, mit Übersetzung und Analyse.</td></tr>
+    <tr><td><strong>Hörbuch</strong></td><td>Macht aus einem Dokument oder einer Story gesprochene Kapitel.</td></tr>
+    <tr><td><strong>Stimmen</strong></td><td>Die wiederverwendbaren Sprecher, aus denen Hörbücher schöpfen.</td></tr>
+    <tr><td><strong>Blueprints</strong></td><td>Gespeicherte Rezepte für all das.</td></tr>
+    <tr><td><strong>Workspaces</strong></td><td>Getrennte Ausgabeordner pro Projekt.</td></tr>
+  </table>
+  </div>
+
+  <h2 id="studio">Studio</h2>
+  <p>
+    Die rechte Leiste ist die Steuerfläche: oben die Modus-Reiter (Image, Video,
+    Audio, Edit, Tools, Text), darunter die Untermodi, dann Eingaben, Prompt und
+    unten die Modellauswahl mit <strong>Advanced</strong> und <strong>Forge</strong>.
+    Die Galerie links zeigt Warteschlange und alle fertigen Ausgaben, filterbar nach
+    Typ und durchsuchbar.
+  </p>
+  <h3>Erweiterte Einstellungen</h3>
+  <p>
+    Auflösung, Schritte, Guidance, Seed, Sliding-Window-Größen, LoRAs und deren
+    Multiplikatoren. LoRAs werden <em>pro Architektur</em> geführt: eine Datei, die
+    bei einem anderen Modell geladen wurde, taucht hier nicht auf, weil dieses Modell
+    sie tatsächlich nicht laden kann. Wie man das behebt, steht unter
+    <a href="#loras">LoRAs</a>.
+  </p>
+  <h3>Multi-Clip und Verlängern</h3>
+  <p>
+    Videomodi können Clips zu einer Timeline verketten oder ein vorhandenes Video
+    verlängern. <strong>Copy prompt</strong> bietet bei einem verlängerten Video
+    sowohl den Prompt des letzten Clips als auch den ursprünglichen an, mit dem die
+    Kette begann.
+  </p>
+
+  <h2 id="director">Director</h2>
+  <p>
+    Beschreibe ein Musikvideo oder einen Kurzfilm in einem Satz. Ein lokales LLM
+    erstellt eine Shotliste, schreibt pro Einstellung einen auf das rendernde Modell
+    zugeschnittenen Prompt, erzeugt wo sinnvoll Startbilder und lässt anschließend
+    die gesamte Multi-Clip-Pipeline laufen. Alles Geplante bleibt änderbar, bevor du
+    dich aufs Rendern festlegst.
+  </p>
+  <p>
+    Das LLM läuft lokal (Gemma-Klasse, rund 5 GB, wird beim ersten Director-Einsatz
+    geladen). Nichts geht in eine Cloud, solange du unter Einstellungen → Services
+    keine externe API einrichtest.
+  </p>
+
+  <h2 id="story">Storywriter</h2>
+  <p><strong>Text → Story.</strong> Prämisse, Genre, Tonfall, Erzählperspektive und
+     Länge angeben; die Pipeline plant ein Outline und schreibt dann Kapitel für
+     Kapitel, mit einer Kontinuitätsprüfung dazwischen, damit Kapitel vier noch weiß,
+     was in Kapitel zwei geschah.</p>
+  <div class="table-scroll">
+  <table>
+    <tr><th>Aktion</th><th>Was passiert</th></tr>
+    <tr><td>Extend</td><td>Setzt beim letzten fertigen Kapitel fort.</td></tr>
+    <tr><td>Kapitel neu erzeugen</td><td>Schreibt ein Kapitel gegen die aktuelle Synopsis neu.</td></tr>
+    <tr><td>Übersetzen</td><td>Legt eine Übersetzung neben das Original; das Original wird nie ersetzt. 28 Sprachen, per Code (<code>de</code>) oder Name (<code>German</code>).</td></tr>
+    <tr><td>Analysieren</td><td>Meldet Figuren mit Rollen, eine Zeitachse und Probleme — Logiklücken, Kontinuitätsbrüche, Tempo — jeweils mit Kapitel und Schweregrad.</td></tr>
+    <tr><td>Exportieren</td><td>Markdown, reiner Text, EPUB und mehr.</td></tr>
+    <tr><td>Als neues Hörbuch</td><td>Übergibt die Geschichte direkt an den Hörbuch-Bereich.</td></tr>
+  </table>
+  </div>
+  <p>
+    Lange Durchläufe erscheinen unten links im Aktivitätsbereich und lassen sich dort
+    stoppen. Ein Abbruch der Analyse lässt die Geschichte selbst unangetastet.
+  </p>
+
+  <h2 id="hoerbuch">Hörbücher</h2>
+  <p>
+    Ein Dokument (oder eine Story) importieren; es wird in Kapitel, Blöcke und
+    <em>Runs</em> zerlegt — ein Run ist ein Textstück, das von einer Stimme gesprochen
+    wird. Erzähler zuweisen, einzelne Runs überschreiben, wo eine Figur spricht, und
+    rendern.
+  </p>
+  <h3>Emotion</h3>
+  <p>
+    Jeder Run kann eine Emotion tragen. Wie sie beim Modell ankommt, hängt von der
+    Engine ab: IndexTTS2 bekommt seine nativen Tags pro Zeile (<code>[sad]</code> vor
+    jeder Zeile, weil es Emotion pro Satz anwendet), Qwen3-Stimmen bekommen sie in
+    ihre gesprochene Anweisung eingearbeitet, und Engines ohne Emotionskanal bekommen
+    einen Temperatur-Anstupser — das ist keine Emotionssteuerung, sondern der einzige
+    verfügbare Hebel.
+  </p>
+  <h3>Effekte</h3>
+  <p>
+    Passagen können Hintergrundbetten und einzelne Effekte tragen. Der Mixer senkt
+    das Bett unter der Sprache ab und gleicht die Lautheit an, damit ein Kapitel
+    zwischen Passagen nicht in der Lautstärke springt.
+  </p>
+  <h3>Rendern und der Cache</h3>
+  <p>
+    Beim Rendern wird jeder Run vertont und anschließend das Kapitel gemischt.
+    Vertonte Runs werden zwischengespeichert: ein unverändertes Kapitel erneut zu
+    rendern dauert kaum, und wer eine Passage ändert, vertont nur diese neu. Ausgabe
+    ist MP3 oder WAV pro Kapitel oder ein M4B mit Kapitelmarken fürs ganze Buch.
+  </p>
+  <div class="note">
+    <strong>Vor dem Rendern planen.</strong> Der Plan-Schritt zeigt, wovon jeder Run
+    gesprochen wird, und meldet keine Bereitschaft, solange etwas fehlt — so findest
+    du eine fehlende Stimme in Sekunden statt nach einem ganzen Kapitel Wartezeit.
+  </div>
+
+  <h2 id="stimmen">Stimmen</h2>
+  <p><strong>Audio → Voices.</strong> Eine Stimme ist eine Engine samt Einstellungen,
+     unter einem Namen gespeichert und von jedem Hörbuch nutzbar.</p>
+  <div class="table-scroll">
+  <table>
+    <tr><th>Engine</th><th>Referenzclip</th><th>Anmerkung</th></tr>
+    <tr><td>Qwen3 Custom Voice</td><td>wird nicht genutzt</td><td>Neun feste Sprecher-Presets. Verlässliche Identität, kein Klonen.</td></tr>
+    <tr><td>Qwen3 Voice Design</td><td>wird nicht genutzt</td><td>Stimme aus einer schriftlichen Beschreibung.</td></tr>
+    <tr><td>IndexTTS2</td><td>erforderlich</td><td>Klonen, dazu native Emotions-Tags pro Zeile.</td></tr>
+    <tr><td>KugelAudio 7B</td><td>optional</td><td>Klont, wenn ein Clip vorliegt.</td></tr>
+    <tr><td>Chatterbox</td><td>optional</td><td>Mehrsprachig, mit Exaggeration-Regler.</td></tr>
+  </table>
+  </div>
+  <h3>Eine Stimme behalten</h3>
+  <p>
+    Eine beschreibungsgetriebene Engine erfindet bei jedem Render einen neuen
+    Sprecher — dieselbe Beschreibung liefert nicht zweimal dieselbe Person. Also so
+    lange probehören, bis eine gefällt, dann <strong>Keep this take</strong>: dieser
+    Render wird zum Referenzclip der Stimme, und jede Passage wird damit gesprochen.
+    Einen Seed festzunageln reicht dafür <em>nicht</em>; gemessen ergaben drei Renders
+    mit demselben festen Seed drei verschiedene Stimmen.
+  </p>
+  <h3>Die eigene Stimme</h3>
+  <p>
+    <strong>Voice from a recording</strong> macht aus beliebigem Audio — im Browser
+    aufgenommen, hochgeladen oder eine vorhandene Ausgabe — eine Klon-Stimme. Der Clip
+    wird in den eigenen Speicher der Bibliothek kopiert, sodass das spätere Löschen
+    der ursprünglichen Ausgabe die Stimme nicht kaputt macht.
+  </p>
+
+  <h2 id="blueprints">Blueprints</h2>
+  <p>
+    Ein Blueprint ist ein gespeichertes Rezept. Dreiunddreißig sind dabei, beschriftet
+    nach Art:
+  </p>
+  <div class="table-scroll">
+  <table>
+    <tr><th>Art</th><th>Beim Anwenden</th></tr>
+    <tr><td>Bild / Video</td><td>Setzt Modell, LoRAs, Prompt und sämtliche Generierungseinstellungen.</td></tr>
+    <tr><td>Story</td><td>Füllt Prämisse, Genre, Tonfall und Länge im Storywriter.</td></tr>
+    <tr><td>Stimme</td><td>Legt eine Stimme mit dieser Engine und Konfiguration an.</td></tr>
+    <tr><td>Effekt</td><td>Lädt ein SFX-/Mixer-Preset.</td></tr>
+  </table>
+  </div>
+  <p>
+    Erreichbar über die Schaltfläche <strong>Blueprints</strong> in der Kopfzeile der
+    Galerie; eigene lassen sich aus jeder Ausgabe oder aus der Mehrfachauswahl
+    speichern.
+  </p>
+
+  <h2 id="loras">LoRAs</h2>
+  <p>
+    Die Schaltfläche <strong>LoRAs</strong> öffnet einen eingebauten CivitAI-Browser.
+    Bereits vorhandene Einträge sind markiert, und <strong>Use now</strong> trägt eine
+    LoRA in ein passendes Modell ein und wechselt dorthin.
+  </p>
+  <h3>Warum eine LoRA manchmal nicht nutzbar ist</h3>
+  <p>
+    LoRAs liegen pro Architektur unter <code>loras/&lt;arch&gt;</code>. Eine Datei, die
+    bei einem anderen ausgewählten Modell geladen wurde, landet in dessen Ordner, wo
+    sonst niemand nachsieht — installiert und unsichtbar zugleich. Zwei Dinge schützen
+    vor der Verwirrung, die das früher stiftete:
+  </p>
+  <ul>
+    <li>Eine LoRA, deren angegebenes Basismodell hier überhaupt kein Zuhause hat (ein
+        SDXL-Adapter in einem Videostudio), wird <em>vor</em> dem Download markiert.</li>
+    <li>Eine falsch abgelegte Datei lässt sich in den Ordner ihres Basismodells
+        verschieben — im Browser oder über die API mit
+        <code>POST /loras/relocate</code>.</li>
+  </ul>
+  <p>
+    Eine Generierung mit einer LoRA, die für das gewählte Modell nicht installiert
+    ist, wird sofort abgelehnt, mitsamt Liste dessen, was tatsächlich installiert ist
+    — statt dass die Generierung stillschweigend nichts produziert.
+  </p>
+
+  <h2 id="api">REST-API</h2>
+  <p>
+    Alles, was die Oberfläche tut, läuft über <code>/api/v1</code>. Die interaktive
+    Dokumentation mit vollständigem Schema für alle 184 Endpunkte liefert die App
+    selbst unter <code>http://localhost:7861/docs</code>; die kuratierte Referenz steht
+    in <a href="https://github.com/fgilde/MuseForge/blob/main/docs/API.md">docs/API.md</a>.
+  </p>
+<pre><code># Generierung abschicken
+curl -X POST http://localhost:7861/api/v1/generate \
+  -H "Content-Type: application/json" \
+  -d '{"model_type":"t2v","prompt":"a lighthouse at dusk","video_length":81}'
+
+# Status abfragen
+curl http://localhost:7861/api/v1/status/&lt;job_id&gt;
+
+# Ergebnis herunterladen
+curl -O http://localhost:7861/api/v1/file/&lt;dateiname&gt;</code></pre>
+
+  <h2 id="mcp">MCP für Agenten</h2>
+  <p>
+    MuseForge spricht das Model Context Protocol über streamable HTTP unter
+    <code>/mcp</code>, im selben Prozess wie die Oberfläche — kein zweiter Dienst.
+    Sechsundsiebzig Werkzeuge decken Generierung, Jobs, Ausgaben, Geschichten,
+    Hörbücher, Stimmen, LoRAs und Blueprints ab.
+  </p>
+<pre><code>claude mcp add --transport http museforge http://localhost:7861/mcp</code></pre>
+  <p>Oder in einer Konfiguration im <code>mcp.json</code>-Stil:</p>
+<pre><code>{
+  "mcpServers": {
+    "museforge": { "type": "http", "url": "http://localhost:7861/mcp" }
+  }
+}</code></pre>
+  <div class="note warn">
+    <strong>Die Adresse nehmen, unter der die Oberfläche antwortet — nicht den Port,
+    auf dem der Server bindet.</strong> Unter Docker lauscht der Container auf 7860
+    und wird auf 7861 veröffentlicht; 7860 wird von außen abgelehnt.
+    <code>GET /api/v1/mcp/info</code> meldet die Adresse, unter der es selbst erreicht
+    wurde, ob ein Token nötig ist, und eine fertige
+    <code>claude mcp add</code>-Zeile.
+  </div>
+  <p>
+    <code>MUSEFORGE_API_TOKEN</code> setzen, um
+    <code>Authorization: Bearer &lt;token&gt;</code> auf <code>/mcp</code> zu
+    verlangen. Die REST-Aufrufe der Oberfläche bleiben tokenfrei.
+  </p>
+
+  <h2 id="beispiele">Durchgespielte Beispiele</h2>
+  <h3>Dokument rein, Hörbuch raus</h3>
+  <p>Vollständig über MCP, ohne Oberfläche:</p>
+  <ol>
+    <li><code>upload_document</code> — Datei übergeben.</li>
+    <li><code>audiobook_create</code>, dann <code>audiobook_import</code> — Projekt und Text.</li>
+    <li><code>list_voices</code> und <code>audiobook_import_voice</code> — Erzähler wählen.</li>
+    <li><code>audiobook_plan</code> — prüfen, dass jeder Run eine Stimme hat.</li>
+    <li><code>audiobook_render</code> — danach <code>job_status</code> abfragen.</li>
+  </ol>
+  <h3>Erst die Geschichte, dann vorlesen</h3>
+  <p>
+    <code>story_start</code> → <code>story_status</code> abfragen →
+    <code>audiobook_from_story</code>, was die ersten beiden Schritte ersetzt.
+  </p>
+  <h3>Alles ohne eigenes Werkzeug</h3>
+  <p>
+    <code>api_request("GET", "/openapi.json")</code> liefert das vollständige Schema,
+    und <code>api_request</code> kann jeden Endpunkt direkt aufrufen.
+  </p>
+
+  <h2 id="speicher">Speicher &amp; Workspaces</h2>
+  <p>
+    Aller Zustand liegt in benannten Docker-Volumes, ein Neubau des Images rührt die
+    Daten also nicht an:
+  </p>
+  <div class="table-scroll">
+  <table>
+    <tr><th>Volume</th><th>Inhalt</th></tr>
+    <tr><td><code>ckpts</code></td><td>Modellgewichte. Das große — in Ruhe lassen, außer man will neu laden.</td></tr>
+    <tr><td><code>outputs</code></td><td>Erzeugte Medien, Geschichten, Hörbuchprojekte, Stimm-Referenzen.</td></tr>
+    <tr><td><code>loras</code>, <code>loras_i2v</code>, <code>loras_metadata</code></td><td>LoRA-Dateien pro Architektur und ihre Sidecars.</td></tr>
+    <tr><td><code>settings</code>, <code>config</code></td><td>Einstellungen und App-Konfiguration.</td></tr>
+    <tr><td><code>hf-cache</code></td><td>Download-Cache von Hugging Face.</td></tr>
+    <tr><td><code>uploads</code></td><td>Hochgeladene Eingabedateien.</td></tr>
+  </table>
+  </div>
+  <p>
+    <strong>Workspaces</strong> unterteilen <code>outputs</code> pro Projekt und werden
+    in der Kopfzeile der Galerie gewechselt. <code>default</code> ist der
+    Ausgabeordner selbst und nicht löschbar.
+  </p>
+
+  <h2 id="updates">Aktualisieren</h2>
+<pre><code>git pull
+docker compose up -d --build</code></pre>
+  <p>
+    Ein Upstream-Release von Maestro holt man per Merge — MuseForge hat echte
+    Git-Abstammung mit upstream, das ist also ein gewöhnlicher Drei-Wege-Merge:
+  </p>
+<pre><code>git remote add upstream https://github.com/Blizaine/Maestro.git   # einmalig
+git fetch upstream &amp;&amp; git merge upstream/main</code></pre>
+  <p>
+    Die Datei <code>VERSION</code> hält fest, auf welchem Upstream-Release die Engine
+    steht.
+  </p>
+
+  <h2 id="sicherheit">Erreichbarkeit &amp; Sicherheit</h2>
+  <div class="note warn">
+    Die REST-API hat außer dem optionalen MCP-Token keine Authentifizierung. Behandle
+    eine MuseForge-Instanz als Software für vertrauenswürdige Netze.
+  </div>
+  <ul>
+    <li>Nur auf Loopback binden, indem das Port-Mapping auf
+        <code>127.0.0.1:7861:7860</code> geändert wird.</li>
+    <li><code>MUSEFORGE_API_TOKEN</code> setzen, wenn Agenten <code>/mcp</code> von
+        außerhalb erreichen.</li>
+    <li>Einen Reverse Proxy mit echter Authentifizierung davorsetzen, bevor die
+        Instanz in einem nicht kontrollierten Netz erreichbar wird.</li>
+  </ul>
+
+  <h2 id="probleme">Fehlerbehebung</h2>
+  <h3>Eine Generierung endet ohne Datei</h3>
+  <p>
+    Die Meldung auf der Job-Kachel lesen — Fehlschläge nennen inzwischen den Grund.
+    Häufigste Ursache war früher eine LoRA, die sich nicht laden ließ; das wird jetzt
+    vorab abgelehnt, unter Nennung der Datei und dessen, was stattdessen installiert
+    ist.
+  </p>
+  <h3>Meine geladene LoRA erscheint nicht unter Advanced</h3>
+  <p>
+    Sie liegt im Ordner einer anderen Architektur. Im LoRA-Browser unter den
+    installierten Einträgen suchen und verschieben. Siehe <a href="#loras">LoRAs</a>.
+  </p>
+  <h3>Ein MCP-Aufruf läuft in einen Timeout</h3>
+  <p>
+    Zuerst die Adresse prüfen: Sie muss die sein, unter der die Oberfläche antwortet,
+    plus <code>/mcp</code>. Die Instanz selbst fragen mit
+    <code>GET /api/v1/mcp/info</code>.
+  </p>
+  <h3>Eine Geschichte steht auf „crashed"</h3>
+  <p>
+    Der Prozess ist mitten im Lauf verschwunden — ein Neustart oder ein
+    Speicher-Abbruch. Die Meldung nennt die Phase, aus der er nicht zurückkam. Fertige
+    Kapitel bleiben erhalten, <strong>Extend</strong> setzt beim letzten fort.
+  </p>
+  <h3>Etwas läuft und soll aufhören</h3>
+  <p>
+    Der Aktivitätsbereich unten links listet jeden laufenden Vorgang — Generierungen,
+    Story-Durchläufe und Modell-Downloads — jeweils mit Stopp-Schaltfläche.
+  </p>
+  <h3>VRAM reicht nicht</h3>
+  <p>
+    Auflösung oder Sliding-Window-Größe senken oder eine kleinere Modellvariante
+    wählen. Die Auto-Tune-Funktion vermisst die GPU beim ersten Start und wählt
+    Offload- und Quantisierungseinstellungen; Karten mit wenig VRAM funktionieren,
+    nur langsam.
+  </p>
+
+  </article>
+</div>
+
+<footer class="site">
+  <div class="wrap">
+    <span>MuseForge Dokumentation</span>
+    <a href="../">Startseite</a>
+    <a href="https://github.com/fgilde/MuseForge">GitHub</a>
+    <a href="../../docs/">English</a>
+    <span class="spacer">Gebaut von <a href="https://gilde.org">gilde.org</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

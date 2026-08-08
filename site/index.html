@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MuseForge — self-hosted AI media studio</title>
+<meta name="description" content="Self-hosted AI studio for video, images, audio, long-form text and audiobooks. One docker compose up, a full REST API and a native MCP endpoint so agents can drive it." />
+<meta property="og:title" content="MuseForge — self-hosted AI media studio" />
+<meta property="og:description" content="Video, images, audio, novels and audiobooks on your own GPU. Docker-first, API-first, agent-drivable over MCP." />
+<meta property="og:image" content="screenshots/blueprints.png" />
+<meta property="og:type" content="website" />
+<link rel="icon" href="logo.png" />
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="logo.png" alt="" /><span>MuseForge</span></a>
+    <nav class="top">
+      <a href="#what" class="hide-sm">Features</a>
+      <a href="#start">Install</a>
+      <a href="#agents" class="hide-sm">Agents</a>
+      <a href="docs/">Docs</a>
+      <a href="https://github.com/fgilde/MuseForge">GitHub</a>
+      <span class="lang"><a class="on" href="./">EN</a><a href="de/">DE</a></span>
+    </nav>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="wrap">
+    <h1>Your own <em>AI media studio</em>,<br />running on your own GPU.</h1>
+    <p class="lead">
+      Video, images, audio, novel-length text and finished audiobooks — one Docker
+      image, no cloud, no per-seat pricing. Use it in the browser, script it over
+      REST, or hand it to an AI agent over MCP.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="#start">Get started</a>
+      <a class="btn ghost" href="docs/">Read the docs</a>
+      <a class="btn ghost" href="https://github.com/fgilde/MuseForge">View on GitHub</a>
+    </div>
+    <div class="shot">
+      <img src="screenshots/blueprints.png" alt="The Blueprints gallery: reusable recipes labelled by kind" />
+    </div>
+  </div>
+</div>
+
+<section id="stats">
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><b>193</b><span>generation models</span></div>
+      <div class="stat"><b>184</b><span>REST endpoints</span></div>
+      <div class="stat"><b>76</b><span>MCP tools</span></div>
+      <div class="stat"><b>33</b><span>blueprints</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="what">
+  <div class="wrap">
+    <h2>More than one clip at a time</h2>
+    <p class="sub">
+      MuseForge starts where a prompt box stops: whole stories, whole books, and a
+      voice that stays the same person from chapter one to the end.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <span class="tag">Studio</span>
+        <h3>Generate</h3>
+        <p>Video, image and audio models — LTX, Wan, Flux, Qwen, MiniMax H3, SCAIL-2,
+           ACE-Step and more. LoRAs, advanced sampling, multi-clip and extend.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Director</span>
+        <h3>Plan a whole film</h3>
+        <p>Describe a music video or short film. A local LLM plans the shots, writes
+           per-model prompts, renders start frames and runs the pipeline.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Storywriter</span>
+        <h3>Write a novel</h3>
+        <p>Outline, chapters, continuity checks between them, translation into 28
+           languages, and an audit that reports characters, timeline and plot holes.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Audiobook</span>
+        <h3>Read it aloud</h3>
+        <p>Import a document, assign a voice per passage, add emotion and effects with
+           ducking and loudness matching, render chapters or a chaptered M4B.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Voices</span>
+        <h3>Keep a voice</h3>
+        <p>Build a voice from a description and keep the take you like, or adopt your
+           own recording as a cloning reference. Reused by every book.</p>
+      </div>
+      <div class="card">
+        <span class="tag">Blueprints</span>
+        <h3>Repeat a good result</h3>
+        <p>Save any output's full recipe — model, LoRAs, every setting — and re-apply
+           it in one click. 33 ship with the app across five kinds.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="agents">
+  <div class="wrap">
+    <h2>Built to be driven by an agent</h2>
+    <p class="sub">
+      Every capability in the UI is a REST endpoint, and a native MCP server exposes
+      76 of them as tools. An agent can be handed a document and give back a finished
+      audiobook without a human opening the app.
+    </p>
+    <div class="split">
+      <div>
+        <pre><code>claude mcp add --transport http \
+  museforge http://localhost:7861/mcp</code></pre>
+        <p style="color:var(--text-dim);font-size:15px">
+          Then: <code>list_models</code> → <code>generate</code> →
+          <code>job_status</code> → <code>get_output_url</code>. Or
+          <code>upload_document</code> → <code>audiobook_create</code> →
+          <code>audiobook_render</code>. Anything without a dedicated tool is
+          reachable through <code>api_request</code>.
+        </p>
+        <p style="color:var(--text-dim);font-size:15px">
+          Not sure which URL to give it? <code>GET /api/v1/mcp/info</code> answers with
+          the address it was reached at and a ready-made command.
+        </p>
+      </div>
+      <figure>
+        <img src="screenshots/settings-api.png" alt="The API &amp; MCP settings panel showing the endpoint URL and client configuration" />
+        <figcaption>Settings → API &amp; MCP: endpoint, client config and token status.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="gallery">
+  <div class="wrap">
+    <h2>A look around</h2>
+    <p class="sub">Screenshots from a running instance — retakeable with one command.</p>
+    <div class="split">
+      <figure>
+        <img src="screenshots/storywriter.png" alt="Storywriter with chapters and outline" />
+        <figcaption>Storywriter — premise to chapters, with regeneration per chapter.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/audiobook.png" alt="Audiobook producer with passages and voices" />
+        <figcaption>Audiobook producer — passages, voices, effects, chapter renders.</figcaption>
+      </figure>
+    </div>
+    <div class="split" style="margin-top:30px">
+      <figure>
+        <img src="screenshots/voices.png" alt="Voice library" />
+        <figcaption>Voice library — engines, auditioning, your own recordings.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/studio.png" alt="The Studio workspace" />
+        <figcaption>Studio — gallery, queue and the control dock in one view.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <h2>Install</h2>
+    <p class="sub">
+      An NVIDIA GPU with 6 GB VRAM or more, Docker with the NVIDIA Container Toolkit,
+      and disk space for model weights. That is the whole list.
+    </p>
+    <pre><code>git clone https://github.com/fgilde/MuseForge.git
+cd MuseForge
+docker compose up -d</code></pre>
+    <p style="color:var(--text-dim)">
+      Open <code>http://localhost:7861</code>. Models download on first use, not at
+      install time — the first video can take a while, later runs are fast.
+    </p>
+    <div class="note">
+      <strong>Port 7861 is deliberate.</strong> A Maestro instance on the same machine
+      keeps 7860, so both can run side by side. Inside the container the app still
+      listens on 7860.
+    </div>
+    <p><a class="btn primary" href="docs/">Full documentation</a></p>
+  </div>
+</section>
+
+<section id="heritage">
+  <div class="wrap">
+    <h2>Where it comes from</h2>
+    <p class="sub">
+      MuseForge is a fork of <a href="https://github.com/Blizaine/Maestro">Maestro</a>
+      by @Blizaine, which builds on the
+      <a href="https://github.com/deepbeepmeep/Wan2GP">Wan2GP</a> generation pipeline.
+      Maestro is a desktop app installed through Pinokio; MuseForge takes the same
+      engine and points it at infrastructure and long-form work. If you want the
+      one-click desktop experience, use Maestro — it is excellent at being that.
+    </p>
+    <p style="color:var(--text-dim)">
+      Released under the WanGP Non-Commercial Evaluation License 1.1. Free for
+      non-commercial use; your generated outputs are yours.
+    </p>
+  </div>
+</section>
+
+<footer class="site">
+  <div class="wrap">
+    <span>MuseForge</span>
+    <a href="docs/">Documentation</a>
+    <a href="https://github.com/fgilde/MuseForge">GitHub</a>
+    <a href="de/">Deutsch</a>
+    <span class="spacer">Built by <a href="https://gilde.org">gilde.org</a></span>
+  </div>
+</footer>
+
+</body>
+</html>
