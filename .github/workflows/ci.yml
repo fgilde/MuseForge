@@ -19,7 +19,28 @@ jobs:
         run: python scripts/verify_clean_repo.py
 
       - name: Python syntax check
+        # compileall only compiles (never imports), so it needs no deps and
+        # skips heavy vendored model code. Covers the surface we edit.
         run: python -m compileall -q app/services app/launch.py scripts
+
+      # From upstream: the 28 files under tests/ were never actually run
+      # here, which made them decoration. They are dependency-light on
+      # purpose, so this stays a fast job.
+      - name: Install lightweight test dependencies
+        run: >-
+          python -m pip install
+          "starlette==0.46.1"
+          "numpy==2.2.6"
+          "opencv-python-headless==4.12.0.88"
+          "Pillow==11.3.0"
+          "requests==2.32.4"
+
+      - name: Python unit tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: JSON grammar regression tests
+        # Standalone test functions, not picked up by unittest discovery.
+        run: python tests/test_call_llm_json_grammar.py
 
       - uses: actions/setup-node@v4
         with:
