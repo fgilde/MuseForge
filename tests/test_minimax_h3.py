@@ -886,7 +886,9 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("<d>[English] Exact words.</d>", dialect_guide)
         self.assertIn("Never invent extra speech", dialect_guide)
         self.assertIn("proper names", dialect_guide)
-        self.assertIn("Maestro maps the exact per-shot", ref2va_dialect_guide)
+        # Brand-free on purpose: this guide names the product, and asserting
+        # the name made a rebrand look like a broken prompt guide.
+        self.assertIn("maps the exact per-shot", ref2va_dialect_guide)
         self.assertIn("Do not guess reference numbers", ref2va_dialect_guide)
         self.assertIn("subject_definitions, summary, retention_analysis", ref2va_dialect_guide)
         self.assertIn("proper names", ref2va_dialect_guide)
