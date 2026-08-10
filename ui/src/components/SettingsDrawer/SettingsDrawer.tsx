@@ -1,8 +1,14 @@
-import { X } from 'lucide-react'
+import { X, Github, BookOpen, Globe } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { SystemSettingsPanel } from './SystemSettingsPanel'
 import { ServicesSettingsPanel } from './ServicesSettingsPanel'
 import { McpPanel } from './McpPanel'
+
+export const PROJECT_LINKS = {
+  repo: 'https://github.com/fgilde/MuseForge',
+  docs: 'https://fgilde.github.io/MuseForge/docs/',
+  author: 'https://gilde.org',
+} as const
 
 /**
  * Settings dialog — global panel for hardware/perf and external-service
@@ -89,6 +95,36 @@ export function SettingsDrawer() {
           {settingsTab === 'api' && (
             <McpPanel />
           )}
+        </div>
+
+        {/* Where to go when the app itself cannot answer: the source, the
+            documentation, and who built it. Sits below the tabs so it is
+            reachable from every one of them. */}
+        <div className="shrink-0 border-t border-border px-5 py-3 flex items-center gap-4 text-[11px] text-text-muted">
+          <a
+            href={PROJECT_LINKS.repo}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 hover:text-text-primary transition-colors"
+          >
+            <Github size={13} /> Source
+          </a>
+          <a
+            href={PROJECT_LINKS.docs}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 hover:text-text-primary transition-colors"
+          >
+            <BookOpen size={13} /> Documentation
+          </a>
+          <a
+            href={PROJECT_LINKS.author}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto flex items-center gap-1.5 hover:text-text-primary transition-colors"
+          >
+            <Globe size={13} /> gilde.org
+          </a>
         </div>
       </div>
     </div>

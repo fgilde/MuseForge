@@ -23,6 +23,11 @@ jobs:
         # skips heavy vendored model code. Covers the surface we edit.
         run: python -m compileall -q app/services app/launch.py scripts
 
+      # Store templates are the files nobody revisits, and the only thing
+      # between a user and a broken install.
+      - name: App store templates
+        run: python scripts/check_packaging.py
+
       # From upstream: the 28 files under tests/ were never actually run
       # here, which made them decoration. They are dependency-light on
       # purpose, so this stays a fast job.

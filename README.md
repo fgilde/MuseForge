@@ -125,6 +125,12 @@ Build notes:
 - The first generation on each model downloads its weights (the default video model
   is ~18 GB); only requested models are fetched.
 
+**NAS app stores.** Ready-made templates live in
+[packaging/](packaging/): a Community Applications template for **Unraid**,
+and a community-app-store layout for **Umbrel**. Read
+[packaging/README.md](packaging/README.md) first — the GHCR package has to be
+public before either can install anything.
+
 Manual (non-Docker) install: Python 3.10 venv + torch 2.10/cu128 +
 `app/requirements.txt`, clone the seed-vc component, build `ui/`, run
 `python launch.py` — the [Dockerfile](Dockerfile) is the executable reference for

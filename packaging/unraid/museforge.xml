@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>MuseForge</Name>
+  <Repository>ghcr.io/fgilde/museforge:latest</Repository>
+  <Registry>https://github.com/fgilde/MuseForge/pkgs/container/museforge</Registry>
+  <GitHub>https://github.com/fgilde/MuseForge</GitHub>
+  <Project>https://fgilde.github.io/MuseForge/</Project>
+  <Support>https://github.com/fgilde/MuseForge/issues</Support>
+  <TemplateURL>https://raw.githubusercontent.com/fgilde/MuseForge/main/packaging/unraid/museforge.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/fgilde/MuseForge/main/docs/logo.png</Icon>
+  <Beta>False</Beta>
+  <Category>MediaApp:Video MediaApp:Music Productivity:</Category>
+  <Network>bridge</Network>
+  <Networking>
+    <Mode>bridge</Mode>
+  </Networking>
+  <Privileged>False</Privileged>
+  <Shell>bash</Shell>
+  <WebUI>http://[IP]:[PORT:7860]/</WebUI>
+
+  <Overview>
+    Self-hosted AI media studio: video, images, audio, long-form text and complete audiobooks, all generated locally on your own GPU. Nothing is sent to a cloud service.
+
+    Besides direct generation it includes a Director mode that plans a whole music video or short film from one sentence, a Storywriter for novel-length prose with translation and a continuity audit, and an audiobook producer that turns a document into spoken chapters with a voice per character.
+
+    Everything the web interface can do is also a REST API, and a built-in MCP endpoint lets AI agents drive it directly.
+
+    REQUIREMENTS - please read before installing:
+    * An NVIDIA GPU with at least 6 GB VRAM. There is no AMD or CPU-only mode.
+    * The Unraid "Nvidia-Driver" plugin, installed and working.
+    * Roughly 150 GB of free space for model weights. Point the appdata paths below at a fast pool, not at spinning disks.
+
+    Model weights are NOT contained in the image. The first time you use a given model its files download once - often tens of gigabytes for a video model - before anything appears. Later runs on that model start immediately.
+  </Overview>
+
+  <Description>
+    Self-hosted AI studio for video, images, audio, long-form text and audiobooks. Runs entirely on your own NVIDIA GPU. Requires the Nvidia-Driver plugin and about 150 GB for model weights.
+  </Description>
+
+  <ExtraParams>--runtime=nvidia</ExtraParams>
+  <PostArgs/>
+  <DonateText/>
+  <DonateLink/>
+
+  <Config Type="Port" Name="WebUI" Target="7860" Default="7861" Mode="tcp"
+          Description="Web interface and REST API. 7861 avoids clashing with a Maestro instance on the same machine."
+          Display="always" Required="true" Mask="false">7861</Config>
+
+  <Config Type="Variable" Name="NVIDIA_VISIBLE_DEVICES" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode=""
+          Description="Which GPU to use. 'all', or paste a specific GPU UUID from Tools -> System Devices."
+          Display="always" Required="true" Mask="false">all</Config>
+
+  <Config Type="Variable" Name="NVIDIA_DRIVER_CAPABILITIES" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode=""
+          Description="Driver capabilities exposed to the container. 'all' is required - compute alone is not enough for the video pipeline."
+          Display="advanced" Required="true" Mask="false">all</Config>
+
+  <Config Type="Variable" Name="HF_HOME" Target="HF_HOME" Default="/data/huggingface" Mode=""
+          Description="Where the Hugging Face download cache lives inside the container. Leave as is."
+          Display="advanced" Required="false" Mask="false">/data/huggingface</Config>
+
+  <Config Type="Variable" Name="MuseForge API token" Target="MUSEFORGE_API_TOKEN" Default="" Mode=""
+          Description="Optional. When set, the MCP endpoint requires 'Authorization: Bearer &lt;token&gt;'. Set this before reaching MuseForge from outside your LAN."
+          Display="advanced" Required="false" Mask="true"/>
+
+  <Config Type="Variable" Name="Hugging Face token" Target="HF_TOKEN" Default="" Mode=""
+          Description="Optional. Not needed for the default models, but lifts anonymous rate limits and unlocks gated repositories."
+          Display="advanced" Required="false" Mask="true"/>
+
+  <Config Type="Path" Name="Model weights (large!)" Target="/workspace/app/ckpts" Default="/mnt/user/appdata/museforge/ckpts" Mode="rw"
+          Description="Downloaded model weights. This is the big one - plan for 150 GB or more, and put it on a fast pool."
+          Display="always" Required="true" Mask="false">/mnt/user/appdata/museforge/ckpts</Config>
+
+  <Config Type="Path" Name="Outputs" Target="/workspace/app/outputs" Default="/mnt/user/appdata/museforge/outputs" Mode="rw"
+          Description="Generated video, images, audio, stories and audiobook projects. Point this at a share if you want the results on the array."
+          Display="always" Required="true" Mask="false">/mnt/user/appdata/museforge/outputs</Config>
+
+  <Config Type="Path" Name="Hugging Face cache" Target="/data/huggingface" Default="/mnt/user/appdata/museforge/huggingface" Mode="rw"
+          Description="Download cache. Keeping it means a reinstall does not re-download everything."
+          Display="always" Required="true" Mask="false">/mnt/user/appdata/museforge/huggingface</Config>
+
+  <Config Type="Path" Name="Config" Target="/data/config" Default="/mnt/user/appdata/museforge/config" Mode="rw"
+          Description="Application configuration and the saved queue."
+          Display="always" Required="true" Mask="false">/mnt/user/appdata/museforge/config</Config>
+
+  <Config Type="Path" Name="Settings" Target="/workspace/app/settings" Default="/mnt/user/appdata/museforge/settings" Mode="rw"
+          Description="Per-model settings."
+          Display="advanced" Required="true" Mask="false">/mnt/user/appdata/museforge/settings</Config>
+
+  <Config Type="Path" Name="LoRAs (text-to-video)" Target="/workspace/app/loras" Default="/mnt/user/appdata/museforge/loras" Mode="rw"
+          Description="LoRA adapters for text-to-video models."
+          Display="advanced" Required="true" Mask="false">/mnt/user/appdata/museforge/loras</Config>
+
+  <Config Type="Path" Name="LoRAs (image-to-video)" Target="/workspace/app/loras_i2v" Default="/mnt/user/appdata/museforge/loras_i2v" Mode="rw"
+          Description="LoRA adapters for image-to-video models."
+          Display="advanced" Required="true" Mask="false">/mnt/user/appdata/museforge/loras_i2v</Config>
+
+  <Config Type="Path" Name="LoRA metadata" Target="/workspace/app/loras_metadata" Default="/mnt/user/appdata/museforge/loras_metadata" Mode="rw"
+          Description="Sidecar metadata for downloaded LoRAs."
+          Display="advanced" Required="true" Mask="false">/mnt/user/appdata/museforge/loras_metadata</Config>
+
+  <Config Type="Path" Name="Uploads" Target="/workspace/app/uploads" Default="/mnt/user/appdata/museforge/uploads" Mode="rw"
+          Description="Reference images, videos and audio you upload as inputs."
+          Display="advanced" Required="true" Mask="false">/mnt/user/appdata/museforge/uploads</Config>
+</Container>

@@ -1,0 +1,37 @@
+version: "3.7"
+
+services:
+
+  app_proxy:
+    environment:
+      # <app-id>_<service-name>_1, per the Umbrel app-proxy convention.
+      APP_HOST: gilde-museforge_server_1
+      APP_PORT: 7860
+
+  server:
+    image: ghcr.io/fgilde/museforge:latest
+    restart: on-failure
+    stop_grace_period: 1m
+    environment:
+      - HF_HOME=/data/huggingface
+      # Uncomment to require "Authorization: Bearer <token>" on /mcp before
+      # reaching MuseForge from outside the Umbrel host.
+      # - MUSEFORGE_API_TOKEN=change-me
+    volumes:
+      - ${APP_DATA_DIR}/data/config:/data/config
+      - ${APP_DATA_DIR}/data/huggingface:/data/huggingface
+      - ${APP_DATA_DIR}/data/settings:/workspace/app/settings
+      # Model weights: 50-300 GB depending on which models you use.
+      - ${APP_DATA_DIR}/data/ckpts:/workspace/app/ckpts
+      - ${APP_DATA_DIR}/data/loras:/workspace/app/loras
+      - ${APP_DATA_DIR}/data/loras_i2v:/workspace/app/loras_i2v
+      - ${APP_DATA_DIR}/data/loras_metadata:/workspace/app/loras_metadata
+      - ${APP_DATA_DIR}/data/outputs:/workspace/app/outputs
+      - ${APP_DATA_DIR}/data/uploads:/workspace/app/uploads
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

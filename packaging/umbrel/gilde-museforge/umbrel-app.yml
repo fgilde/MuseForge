@@ -1,0 +1,62 @@
+manifestVersion: 1.1
+id: gilde-museforge
+category: ai
+name: MuseForge
+version: "1.6.5"
+tagline: Self-hosted AI studio for video, images, audio and audiobooks
+description: >-
+  MuseForge generates video, images, audio, long-form text and complete
+  audiobooks on your own hardware. Nothing is sent to a cloud service.
+
+
+  Beyond single generations it includes a Director mode that plans a whole
+  music video or short film from one sentence, a Storywriter for
+  novel-length prose with translation and a continuity audit, and an
+  audiobook producer that turns a document into spoken chapters with a
+  voice per character.
+
+
+  Everything the web interface can do is also a REST API, and a built-in
+  MCP endpoint lets AI agents drive it directly — hand an agent a document
+  and get back a finished audiobook.
+
+
+  ⚠️ Hardware requirements, please read before installing:
+
+
+  - An NVIDIA GPU with at least 6 GB of VRAM, with the NVIDIA Container
+    Toolkit installed on the host. There is no AMD, Apple Silicon or
+    CPU-only mode — this will not run on a Raspberry Pi.
+
+  - Roughly 150 GB of free disk space for model weights.
+
+  - Model weights are not part of the image. The first use of any model
+    downloads its files once, often tens of gigabytes for a video model,
+    before anything appears. Later runs start immediately.
+releaseNotes: >-
+  Level with Maestro 1.6.5: MiniMax H3 with native audio-video and
+  VRAM-aware sliding windows, SCAIL-2 Repaint and multi-character Recast,
+  and LTX-2.3 Outpaint.
+
+
+  On top of that this release makes every MCP tool actually callable — the
+  endpoint listed its tools correctly but deadlocked on invocation — and
+  stops non-ASCII text from being mangled, which affected every story and
+  translation outside English.
+developer: Florian Gilde
+website: https://gilde.org
+dependencies: []
+repo: https://github.com/fgilde/MuseForge
+support: https://github.com/fgilde/MuseForge/issues
+port: 7861
+gallery:
+  - 1.png
+  - 2.png
+  - 3.png
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+permissions:
+  - GPU
+submitter: Florian Gilde
+submission: https://github.com/fgilde/MuseForge
