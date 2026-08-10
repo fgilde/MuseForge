@@ -39,12 +39,31 @@ def _yaml(path: str) -> dict:
     except ImportError:
         pass
     data: dict = {}
+    pending = ""                       # last top-level key, for list items
     with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            if line.startswith((" ", "#", "\n", "-")):
+        for raw in handle:
+            line = raw.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
                 continue
-            key, _, value = line.partition(":")
-            data[key.strip()] = value.strip().strip('"').strip("'")
+            stripped = line.strip()
+            # A list item belongs to the key above it. Missing this is what
+            # made the check pass locally (PyYAML present) and fail in CI.
+            if stripped.startswith("- "):
+                if pending:
+                    # "key:" was already stored as "" by the branch below;
+                    # setdefault would have kept that and swallowed the list.
+                    if not isinstance(data.get(pending), list):
+                        data[pending] = []
+                    data[pending].append(stripped[2:].strip().strip('"').strip("'"))
+                continue
+            if line[:1].isspace():     # nested mapping — not needed here
+                continue
+            key, sep, value = line.partition(":")
+            if not sep:
+                continue
+            pending = key.strip()
+            value = value.strip().strip('"').strip("'")
+            data[pending] = value if value else ""
     return data
 
 
