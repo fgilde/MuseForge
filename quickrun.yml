@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://fgilde.github.io/QuickRun/quickrun.schema.json
+name: MuseForge
+description: "The local AI studio, started the way its README does it. The first start builds the image and pulls model weights, which takes a while."
+
+requires:
+  - tool: docker
+    install: https://docs.docker.com/get-docker/
+
+tasks:
+  - name: app
+    run: docker compose up -d
+    readyWhen: {http: "http://localhost:7861"}
+    open: true
+
+stop:
+  - docker compose down
