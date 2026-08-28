@@ -1,11 +1,13 @@
-import { useRef, useState, useEffect } from 'react'
+import { useRef, useState, useEffect, useMemo } from 'react'
 import { Film, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, Layers, ChevronDown, ChevronUp } from 'lucide-react'
 import { TabFilter } from './TabFilter'
 import { MediaGrid } from './MediaGrid'
 import { ChatView } from './ChatView'
 import { AudiobookEditor } from './AudiobookEditor'
 import { VoicesView } from './VoicesView'
+import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
+import { useIsMobile } from '../../lib/useIsMobile'
 import type { GenerationJob } from '../../types'
 
 function WorkspaceSelector() {
@@ -380,6 +382,7 @@ function PipelinePlaceholder() {
 }
 
 export function MainContent() {
+  const isMobile = useIsMobile()
   const outputs = useStore(s => s.filteredOutputs())
   // Unfiltered count, to tell "no generations yet" apart from "the filter
   // hides them all" — the first-run text is wrong for the second case.
@@ -390,6 +393,13 @@ export function MainContent() {
   const audioSubMode = useStore(s => s.audioSubMode)
   const stopGeneration = useStore(s => s.stopGeneration)
   const dismissJob = useStore(s => s.dismissJob)
+  // Waiting work now lives in the universal top-bar queue. Keep the gallery
+  // focused on media plus useful live/error cards instead of large blank
+  // placeholders for every job that has not started yet.
+  const galleryJobs = useMemo(
+    () => jobs.filter(job => job.status !== 'held' && job.status !== 'queued'),
+    [jobs],
+  )
 
   // The virtualizer that used to live here is gone: measured heights, an
   // offset table, an IntersectionObserver for the active item and a two-phase
@@ -424,7 +434,7 @@ export function MainContent() {
       <div className="px-2 md:px-6 py-2 md:py-3 border-b border-border flex items-center justify-between gap-2">
         <TabFilter />
         <div className="flex items-center gap-2 shrink-0">
-          <div className="text-[10px] md:text-xs text-text-muted hidden md:block">
+          <div className="hidden text-xs text-text-muted xl:block">
             {outputsTotal > outputs.length
               ? `${outputs.length} / ${outputsTotal} items`
               : `${outputs.length} ${outputs.length === 1 ? 'item' : 'items'}`}
@@ -452,6 +462,7 @@ export function MainContent() {
             <span className="hidden md:inline">LoRAs</span>
           </button>
           <WorkspaceSelector />
+          {!isMobile && <GlobalQueuePopover />}
         </div>
       </div>
 
@@ -462,7 +473,7 @@ export function MainContent() {
         {jobs.length > 0 ? (
           <div className="shrink-0 space-y-3 border-b border-border px-3 py-3 md:px-5">
             <PipelinePlaceholder />
-            {jobs.map((j, i) => (
+            {galleryJobs.map((j, i) => (
               <JobPlaceholder
                 key={j.id || `pending-${i}`}
                 job={j}

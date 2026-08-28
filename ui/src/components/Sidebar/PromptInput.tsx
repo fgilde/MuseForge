@@ -1,12 +1,38 @@
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { Sparkles, Loader2, ChevronDown, ChevronUp, Brain, PenLine, RefreshCw } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import {
+  effectiveH3OmniSequenceFrames,
+  h3OmniSequenceWindowCount,
+  h3TimelineFrames,
+} from '../../lib/h3Memory'
 
 const placeholders: Record<string, string> = {
   image: 'Describe your image...',
   video: 'Describe your video...',
   audio: 'Enter text to speak or describe audio...',
   avatar: 'Describe your avatar animation...',
+}
+
+function useAutoGrowingTextarea(value: string) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const fitToContent = () => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    // scrollHeight includes padding but not the two one-pixel borders used
+    // by these border-box textareas. Include them so the final line is visible.
+    textarea.style.height = `${textarea.scrollHeight + 2}px`
+  }
+
+  useLayoutEffect(fitToContent, [value])
+  useEffect(() => {
+    window.addEventListener('resize', fitToContent)
+    return () => window.removeEventListener('resize', fitToContent)
+  }, [])
+
+  return textareaRef
 }
 
 function H3WindowPromptTextarea({
@@ -22,22 +48,7 @@ function H3WindowPromptTextarea({
   title: string
   active: boolean
 }) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
-
-  const fitToContent = () => {
-    const textarea = textareaRef.current
-    if (!textarea) return
-    textarea.style.height = 'auto'
-    // scrollHeight includes padding but not the two one-pixel borders used
-    // by this border-box textarea. Include them so the final line never clips.
-    textarea.style.height = `${textarea.scrollHeight + 2}px`
-  }
-
-  useLayoutEffect(fitToContent, [value])
-  useEffect(() => {
-    window.addEventListener('resize', fitToContent)
-    return () => window.removeEventListener('resize', fitToContent)
-  }, [])
+  const textareaRef = useAutoGrowingTextarea(value)
 
   return (
     <textarea
@@ -109,17 +120,29 @@ function useEnhanceStatus(isEnhancing: boolean) {
 
 export function PromptInput() {
   const prompt = useStore(s => s.params.prompt)
+  const promptTextareaRef = useAutoGrowingTextarea(prompt)
   const setParam = useStore(s => s.setParam)
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
   const enhancePrompt = useStore(s => s.enhancePrompt)
   const isEnhancing = useStore(s => s.isEnhancing)
+  const promptEnhanceError = useStore(s => s.promptEnhanceError)
   const durationSeconds = useStore(s => s.durationSeconds)
   const slidingWindowSeconds = useStore(s => s.slidingWindowSeconds)
   const slidingWindowOverlap = useStore(s => s.slidingWindowOverlap)
+  const slidingWindowLocked = useStore(s => s.slidingWindowLocked)
   const modelOptions = useStore(s => s.modelOptions)
+  const resolution = useStore(s => s.params.resolution)
+  const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const imageMode = useStore(s => s.params.image_mode)
+  const h3CameraCoverage = useStore(s => s.params.minimax_h3_camera_coverage || 'auto')
+  const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
   const h3WindowPlanningEnabled = useStore(s => s.params.minimax_h3_window_storyboard !== false)
+  const h3ReferenceSequenceEnabled = useStore(s => s.params.minimax_h3_reference_sequence === true)
+  const h3ManualSequencePrompts = useStore(s => s.params.minimax_h3_sequence_prompt_mode === 'manual')
+  const h3NativeSequence = useStore(s => s.params.minimax_h3_sequence_continuity !== false)
+  const ltxMultiWindow = useStore(s => s.params.ltx_multi_window === true)
+  const ltxManualWindowPrompts = useStore(s => s.params.ltx_window_prompt_mode === 'manual')
   const h3WindowPlan = useStore(s => s.h3WindowPlan)
   const updateH3WindowPrompt = useStore(s => s.updateH3WindowPrompt)
   const activeH3JobPhase = useStore(s => {
@@ -160,7 +183,16 @@ export function PromptInput() {
   const discardSec = discardFrames / fps
   const stride = slidingWindowSeconds - discardSec - overlapSec
   const supportsSlidingWindows = modelOptions?.sliding_window === true
-  const windowCount = supportsSlidingWindows && stride > 0 && durationSeconds > slidingWindowSeconds
+  const isH3FirstLast = (
+    String(modelOptions?.architecture || '').startsWith('minimax_h3')
+    && modelOptions?.omni_reference !== true
+  )
+  const isLtxSequence = modelOptions?.multi_window_sequence_controls === true
+  const windowCount = supportsSlidingWindows
+    && (!isH3FirstLast || h3FirstLastMultiWindow)
+    && (!isLtxSequence || ltxMultiWindow)
+    && stride > 0
+    && durationSeconds > slidingWindowSeconds
     ? 1 + Math.ceil((durationSeconds - slidingWindowSeconds + discardSec) / stride)
     : 1
   const usesWindows = generationMode === 'video' && supportsSlidingWindows && windowCount > 1 && imageMode !== 2
@@ -169,18 +201,92 @@ export function PromptInput() {
     && modelOptions?.sliding_window_auto_prompt_pacing === true
     && h3WindowPlanningEnabled
   )
+  const nativeMaximumFrames = modelOptions?.frames_maximum ?? null
+  const sequenceClipFrames = nativeMaximumFrames != null
+    ? effectiveH3OmniSequenceFrames({
+        policy: modelOptions?.omni_sequence_memory_policy,
+        resolution,
+        totalVramGb,
+        minimumFrames: modelOptions?.frames_minimum ?? 124,
+        maximumFrames: nativeMaximumFrames,
+        frameStep: modelOptions?.frames_steps ?? 17,
+        selectedFrames: Math.round(slidingWindowSeconds * fps),
+        manualOverride: slidingWindowLocked,
+      }).frames
+    : null
+  const h3SequenceEnabled = (
+    generationMode === 'video'
+    && modelOptions?.omni_reference === true
+    && h3ReferenceSequenceEnabled
+    && sequenceClipFrames != null
+  )
+  const h3SequenceTotalFrames = h3TimelineFrames(
+    durationSeconds,
+    fps,
+    modelOptions?.frames_maximum,
+  )
+  const h3SequenceNeedsMultiplePasses = (
+    h3SequenceEnabled
+    && sequenceClipFrames != null
+    && h3SequenceTotalFrames > sequenceClipFrames
+  )
+  const usesH3ManualSequence = h3SequenceEnabled && h3ManualSequencePrompts
+  const usesH3ManualFirstLast = (
+    usesWindows
+    && isH3FirstLast
+    && h3FirstLastMultiWindow
+    && !h3WindowPlanningEnabled
+  )
+  const usesH3ManualPrompts = usesH3ManualSequence || usesH3ManualFirstLast
+  const usesLtxManualPrompts = (
+    usesWindows
+    && isLtxSequence
+    && ltxMultiWindow
+    && ltxManualWindowPrompts
+  )
+  const usesManualWindowPrompts = usesH3ManualPrompts || usesLtxManualPrompts
+  const usesH3SequencePlanner = h3SequenceNeedsMultiplePasses && !h3ManualSequencePrompts
+  const sequenceClipCount = h3SequenceEnabled && sequenceClipFrames
+    ? h3OmniSequenceWindowCount({
+        totalFrames: h3SequenceTotalFrames,
+        windowFrames: sequenceClipFrames,
+        overlapFrames: slidingWindowOverlap,
+        nativeContinuation: h3NativeSequence,
+      })
+    : 1
+  const manualPromptLineCount = prompt.split('\n').filter(line => line.trim()).length
+  const manualPromptCount = (usesH3ManualFirstLast || usesLtxManualPrompts)
+    ? windowCount
+    : sequenceClipCount
+  const manualPromptUnit = (usesH3ManualFirstLast || usesLtxManualPrompts)
+    ? 'window'
+    : (h3NativeSequence ? 'window' : 'clip')
+  const usesH3Plan = usesH3WindowPlanner || usesH3SequencePlanner
+  const expectedPlanCount = usesH3SequencePlanner ? sequenceClipCount : windowCount
+  const expectedWindowFrames = usesH3SequencePlanner
+    ? Math.max(1, Number(sequenceClipFrames || 1))
+    : Math.max(1, Math.round(slidingWindowSeconds * fps))
   const h3PlanIsStale = !!h3WindowPlan && (
     h3WindowPlan.source_prompt.trim() !== prompt.trim()
-    || h3WindowPlan.window_count !== windowCount
+    || h3WindowPlan.window_count !== expectedPlanCount
     || h3WindowPlan.total_frames !== Math.max(1, Math.round(durationSeconds * fps))
-    || h3WindowPlan.window_frames !== Math.max(1, Math.round(slidingWindowSeconds * fps))
+    || h3WindowPlan.window_frames !== expectedWindowFrames
+    || (h3WindowPlan.camera_coverage || 'auto') !== h3CameraCoverage
+    || (usesH3SequencePlanner
+      ? h3WindowPlan.plan_kind !== 'reference_sequence'
+      : h3WindowPlan.plan_kind === 'reference_sequence')
+    || (usesH3SequencePlanner
+      && !!h3WindowPlan.native_continuation !== h3NativeSequence)
+    || (usesH3SequencePlanner
+      && h3NativeSequence
+      && Number(h3WindowPlan.overlap_frames || 0) !== slidingWindowOverlap)
   )
   const matchingActiveH3Phase = (
     h3WindowPlan?.signature === activeH3JobPlanSignature
       ? activeH3JobPhase
       : ''
   )
-  const activeWindowMatch = matchingActiveH3Phase.match(/Sliding Window\s+(\d+)\/(\d+)/i)
+  const activeWindowMatch = matchingActiveH3Phase.match(/(?:Sliding Window|Clip)\s+(\d+)\/(\d+)/i)
   const activeH3Window = activeWindowMatch ? Number(activeWindowMatch[1]) : null
   const modePlaceholder = generationMode === 'avatar' && editSubMode === 'recast'
     ? 'Describe the finished video and replacement characters...'
@@ -202,15 +308,14 @@ export function PromptInput() {
   // effectively invisible once an expensive generation had started. Open a
   // newly planned storyboard once; the user can still collapse it afterward.
   useEffect(() => {
-    if (usesH3WindowPlanner && h3WindowPlan?.signature) {
+    if (usesH3Plan && h3WindowPlan?.signature) {
       setWindowPlanOpen(true)
     }
-  }, [usesH3WindowPlanner, h3WindowPlan?.signature])
+  }, [usesH3Plan, h3WindowPlan?.signature])
 
-  // grow shrink-0: fill spare vertical space when the sidebar is roomy, but
-  // never shrink below the textarea's min-height. Dropping the old
-  // `flex-1 min-h-0` stops the wrapper from collapsing under the textarea
-  // (which made it overflow and overlap the section below).
+  // Keep the prompt area at the bottom when the sidebar has spare room. The
+  // textarea itself grows to its complete content height, and the sidebar's
+  // outer scroller handles prompts taller than the viewport.
   return (
     <div className="relative grow shrink-0 flex flex-col">
       {/* Enhance status indicator */}
@@ -234,7 +339,15 @@ export function PromptInput() {
           )}
         </div>
       )}
-      {usesH3WindowPlanner && h3WindowPlan && (
+      {!isEnhancing && promptEnhanceError && (
+        <div
+          role="alert"
+          className="mb-1.5 rounded-lg border border-indicator-error/40 bg-indicator-error/10 px-2.5 py-1.5 text-[10px] text-indicator-error"
+        >
+          {promptEnhanceError}
+        </div>
+      )}
+      {usesH3Plan && h3WindowPlan && (
         <div className="mb-1.5">
           <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border bg-bg-tertiary/70">
             <button
@@ -245,7 +358,7 @@ export function PromptInput() {
             >
               {windowPlanOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
               <span className="text-[10px] font-medium text-text-secondary truncate">
-                Exact H3 prompts · {h3WindowPlan.window_count} windows
+                Exact H3 prompts · {h3WindowPlan.window_count} {usesH3SequencePlanner && !h3NativeSequence ? 'clips' : 'windows'}
               </span>
               {h3PlanIsStale && (
                 <span className="text-[9px] text-amber-400">Needs update</span>
@@ -258,7 +371,7 @@ export function PromptInput() {
               type="button"
               onClick={() => enhancePrompt()}
               disabled={isEnhancing}
-              title="Rebuild the H3 window plan from the current idea and timing."
+              title={`Rebuild the H3 ${usesH3SequencePlanner ? 'reference sequence' : 'window plan'} from the current idea and timing.`}
               className="p-1 text-text-muted hover:text-accent-blue disabled:opacity-50"
             >
               <RefreshCw size={11} className={isEnhancing ? 'animate-spin' : ''} />
@@ -275,7 +388,7 @@ export function PromptInput() {
                     activeH3Window === window.index ? 'text-accent-blue' : 'text-text-muted'
                   }`}>
                     <span>
-                      Window {window.index}: {window.title || `Beat ${window.index}`}
+                      {usesH3SequencePlanner && !h3NativeSequence ? 'Clip' : 'Window'} {window.index}: {window.title || `Beat ${window.index}`}
                       {activeH3Window === window.index ? ' · Generating now' : ''}
                     </span>
                     <span>{window.start_seconds.toFixed(1)}–{window.end_seconds.toFixed(1)}s</span>
@@ -295,18 +408,32 @@ export function PromptInput() {
           )}
         </div>
       )}
-      <textarea
-        value={prompt}
-        onChange={e => setParam('prompt', e.target.value)}
-        placeholder={usesH3WindowPlanner
-          ? `Describe the complete video idea—MuseForge will plan ${windowCount} H3 windows.`
-          : usesWindows
-            ? `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`
-          : modePlaceholder}
-        className="w-full flex-1 bg-bg-tertiary border border-border rounded-lg px-3 py-2 pr-10 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
-        style={{ resize: 'none', minHeight: 112 }}
-      />
-      {prompt.trim() && (
+      {usesManualWindowPrompts && (
+        <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] text-text-muted">
+          <span>One non-empty line per {manualPromptUnit}</span>
+          <span className={manualPromptLineCount === manualPromptCount ? 'text-text-secondary' : 'text-amber-400'}>
+            {manualPromptLineCount}/{manualPromptCount} prompts
+          </span>
+        </div>
+      )}
+      <div className="relative mt-auto">
+        <textarea
+          ref={promptTextareaRef}
+          rows={1}
+          value={prompt}
+          onChange={e => setParam('prompt', e.target.value)}
+          placeholder={usesManualWindowPrompts
+            ? `Line 1 = ${manualPromptUnit} 1, line 2 = ${manualPromptUnit} 2... (${manualPromptCount} total)`
+            : usesH3Plan
+            ? `Describe the complete video idea—MuseForge will plan ${expectedPlanCount} H3 ${usesH3SequencePlanner ? 'reference clips' : 'windows'}.`
+            : usesWindows
+              ? (isLtxSequence
+                  ? `Describe the complete video idea - MuseForge will plan ${windowCount} LTX windows.`
+                  : `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`)
+            : modePlaceholder}
+          className="block w-full min-h-[112px] resize-none overflow-hidden bg-bg-tertiary border border-border rounded-lg px-3 py-2 pr-10 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
+        />
+        {prompt.trim() && !usesManualWindowPrompts && (
         isAudioOnly ? (
           /* TTS: mode-aware split button. Main button uses default mode based
              on voice-slot count; dropdown exposes both Speech and Dialogue
@@ -387,7 +514,8 @@ export function PromptInput() {
             )}
           </button>
         )
-      )}
+        )}
+      </div>
     </div>
   )
 }

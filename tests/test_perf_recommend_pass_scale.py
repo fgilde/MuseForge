@@ -27,6 +27,7 @@ if _APP_DIR not in sys.path:
 
 from services.perf_recommend import (  # noqa: E402
     compute_h3_weight_budget,
+    compute_music3_weight_budget,
     compute_per_job_coefficient,
 )
 
@@ -180,9 +181,14 @@ class TestPassOverheadResolutionScaling(unittest.TestCase):
 
 class TestMiniMaxH3ActivationBudget(unittest.TestCase):
     def test_long_540p_job_restores_known_good_4090_headroom(self):
-        budget = compute_h3_weight_budget(24.0, "960x544", 336)
-        self.assertLessEqual(budget["weight_budget_gb"], 17.1)
-        self.assertGreaterEqual(budget["activation_reserve_gb"], 6.9)
+        budget = compute_h3_weight_budget(
+            24.0,
+            "960x544",
+            336,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertLessEqual(budget["weight_budget_gb"], 14.0)
+        self.assertGreaterEqual(budget["activation_reserve_gb"], 10.0)
 
     def test_portrait_and_landscape_have_the_same_budget(self):
         landscape = compute_h3_weight_budget(24.0, "960x544", 336)
@@ -200,21 +206,47 @@ class TestMiniMaxH3ActivationBudget(unittest.TestCase):
         self.assertAlmostEqual(budget["weight_budget_gb"], 7.0, places=2)
 
     def test_lower_vram_card_streams_more_transformer_weights(self):
-        budget = compute_h3_weight_budget(16.0, "960x544", 345)
-        self.assertAlmostEqual(budget["activation_reserve_gb"], 7.0, places=2)
-        self.assertAlmostEqual(budget["weight_budget_gb"], 9.0, places=2)
+        budget = compute_h3_weight_budget(
+            16.0,
+            "960x544",
+            345,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertAlmostEqual(budget["activation_reserve_gb"], 11.0, places=2)
+        self.assertAlmostEqual(budget["weight_budget_gb"], 5.0, places=2)
 
-    def test_fixed_mmgp_workspace_is_not_double_counted_at_native_size(self):
+    def test_native_full_window_residency_honors_runtime_workspace(self):
         budget = compute_h3_weight_budget(
             24.0,
             "960x544",
             345,
             runtime_workspace_gb=10.0,
         )
-        self.assertFalse(budget["runtime_scaling_active"])
-        self.assertEqual(budget["scaled_runtime_workspace_gb"], 0.0)
-        self.assertAlmostEqual(budget["activation_reserve_gb"], 7.0, places=2)
-        self.assertAlmostEqual(budget["weight_budget_gb"], 17.0, places=2)
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertAlmostEqual(budget["scaled_runtime_workspace_gb"], 10.0, places=2)
+        self.assertAlmostEqual(budget["activation_reserve_gb"], 11.0, places=2)
+        self.assertAlmostEqual(budget["weight_budget_gb"], 13.0, places=2)
+
+    def test_runtime_workspace_blend_has_no_large_threshold_jump(self):
+        below = compute_h3_weight_budget(
+            24.0,
+            "960x544",
+            310,
+            runtime_workspace_gb=10.0,
+        )
+        above = compute_h3_weight_budget(
+            24.0,
+            "960x544",
+            311,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertLess(
+            abs(
+                above["activation_reserve_gb"]
+                - below["activation_reserve_gb"]
+            ),
+            0.1,
+        )
 
     def test_pruned_768p_full_window_preserves_step_zero_headroom_on_4090(self):
         budget = compute_h3_weight_budget(
@@ -302,6 +334,48 @@ class TestMiniMaxH3ActivationBudget(unittest.TestCase):
             budget["scaled_runtime_workspace_gb"] + 1.75,
             places=6,
         )
+
+    def test_measured_pruned_1080p_158_frame_pass_keeps_streaming_headroom(self):
+        budget = compute_h3_weight_budget(
+            24.0,
+            "1920x1088",
+            158,
+            runtime_workspace_gb=10.0,
+        )
+        self.assertTrue(budget["runtime_scaling_active"])
+        self.assertGreater(budget["activation_reserve_gb"], 19.0)
+        self.assertLess(budget["activation_reserve_gb"], 19.5)
+        self.assertGreater(budget["weight_budget_gb"], 4.5)
+        self.assertLess(budget["weight_budget_gb"], 5.0)
+
+
+class TestMiniMaxMusic3SemanticBudget(unittest.TestCase):
+    def test_120_second_job_keeps_the_optimized_planner_viable_on_20gb_card(self):
+        budget = compute_music3_weight_budget(20.0, 120)
+        self.assertGreater(budget["kv_cache_gb"], 1.1)
+        self.assertGreater(budget["runtime_reserve_gb"], 7.8)
+        self.assertLess(budget["weight_budget_gb"], 12.2)
+        self.assertGreater(budget["weight_budget_gb"], 12.0)
+
+    def test_24gb_card_can_retain_the_complete_qwen_checkpoint(self):
+        budget = compute_music3_weight_budget(24.0, 120)
+        self.assertEqual(budget["weight_budget_gb"], 16.0)
+        self.assertGreaterEqual(budget["runtime_reserve_gb"], 7.8)
+
+    def test_longer_music_reserves_more_cache_and_streams_more_weights(self):
+        short = compute_music3_weight_budget(20.0, 30)
+        long = compute_music3_weight_budget(20.0, 300)
+        self.assertGreater(long["kv_cache_gb"], short["kv_cache_gb"])
+        self.assertGreater(
+            long["runtime_reserve_gb"],
+            short["runtime_reserve_gb"],
+        )
+        self.assertLess(long["weight_budget_gb"], short["weight_budget_gb"])
+
+    def test_16gb_card_keeps_a_viable_streaming_budget(self):
+        budget = compute_music3_weight_budget(16.0, 120)
+        self.assertGreater(budget["weight_budget_gb"], 8.0)
+        self.assertLess(budget["weight_budget_gb"], 8.2)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,8 @@ import { VoiceRefSection } from './VoiceRefSection'
 import { ToolsPanel } from './ToolsPanel'
 import { TextPanel } from './TextPanel'
 import { HardwareStatusBar } from './HardwareStatusBar'
-import { MiniMaxH3TurboToggle } from './MiniMaxH3TurboToggle'
+import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
+import { H3MultiWindowControls } from './H3MultiWindowControls'
 
 export function Sidebar() {
   const toggleSettings = useStore(s => s.toggleSettings)
@@ -180,7 +181,6 @@ export function Sidebar() {
             start/end anchors — so the generic Duration slider and
             start/end ImageUpload don't apply there. */}
         {isVideo && !isBlend && <DurationSlider />}
-        {isVideo && <MiniMaxH3TurboToggle />}
         {/* Frames (image_mode 0) AND Extend (image_mode 3) both use the unified
             InputsPanel. In Extend mode its first tile is the source video to
             continue from; otherwise it's the start frame. */}
@@ -195,6 +195,8 @@ export function Sidebar() {
           </div>
         )}
         {isOmniReference && <OmniReferenceSection />}
+        {isVideo && <MiniMaxH3Optimizations />}
+        {isVideo && <H3MultiWindowControls />}
         {isBlend && <BlendControls />}
 
         {/* Image mode: reference images */}

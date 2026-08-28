@@ -21,6 +21,7 @@ import glob
 import json
 import urllib.parse
 import math
+import re
 import time
 import uuid
 import asyncio
@@ -59,6 +60,43 @@ sys.argv = _wgp_argv
 # download progress for the UI's downloads-in-progress banner.
 print("[MuseForge] Installing download stall protection...")
 from services import safe_download  # noqa: F401 (side-effect import)
+from services.checkpoint_compatibility import (
+    CheckpointCompatibilityError,
+    checkpoint_targets_for_base,
+    checkpoint_template_model_type,
+    ensure_allowed_checkpoint_target,
+    quarantine_incompatible_checkpoint_definitions,
+    suggested_checkpoint_architecture,
+    unsupported_checkpoint_reason,
+    validate_checkpoint_file,
+)
+
+# Protect upgraded installations before WanGP builds its model registry.  Old
+# CivitAI imports could pair any checkpoint with any Maestro architecture; hide
+# those invalid definitions without deleting the user's downloaded weights.
+try:
+    _checkpoint_quarantine_changes = (
+        quarantine_incompatible_checkpoint_definitions(_app_dir)
+    )
+except Exception as _checkpoint_quarantine_error:
+    _checkpoint_quarantine_changes = []
+    print(
+        "[CivitAI] Could not audit legacy checkpoint registrations: "
+        f"{_checkpoint_quarantine_error}"
+    )
+for _checkpoint_change in _checkpoint_quarantine_changes:
+    if not _checkpoint_change["compatible"] and _checkpoint_change["applied"]:
+        print(
+            "[CivitAI] Disabled incompatible checkpoint "
+            f"'{_checkpoint_change['model_type']}': "
+            f"{_checkpoint_change['reason']}"
+        )
+    elif not _checkpoint_change["compatible"]:
+        print(
+            "[CivitAI] WARNING: Could not disable incompatible checkpoint "
+            f"'{_checkpoint_change['model_type']}': "
+            f"{_checkpoint_change.get('error', 'unknown filesystem error')}"
+        )
 
 # HuggingFace token-path robustness (fixes the "Permission denied:
 # .../HF_AUTH/token" crash on machines that never logged into HF).
@@ -97,11 +135,8 @@ if _hf_token_path:
 print("[MuseForge] Importing WanGP engine...")
 import wgp
 from models.minimax_h3.turbo import (
-    MINIMAX_H3_TURBO_LORA_FILENAME,
-    MINIMAX_H3_TURBO_LORA_REPO_ID,
-    MINIMAX_H3_TURBO_LORA_REVISION,
-    MINIMAX_H3_TURBO_LORA_SHA256,
-    MINIMAX_H3_TURBO_LORA_SIZE,
+    MINIMAX_H3_TURBO_MANIFEST,
+    MINIMAX_H3_TURBO_PRESETS,
 )
 print(f"[MuseForge] WanGP loaded: {len(wgp.displayed_model_types)} models available")
 # Base save path always comes from server_config["save_path"] (never from wgp.save_path which gets workspace-modified)
@@ -244,6 +279,7 @@ from services.job_lifecycle import (
     is_cancel_requested,
     record_job_outputs,
     register_abort_state,
+    release_held,
     request_cancel,
     snapshot_job,
     try_requeue,
@@ -344,8 +380,15 @@ def _init_pipeline():
 # API Routes: /api/v1/*
 # ============================================================================
 
-def _variant_group_filenames(urls) -> list:
-    """Flatten one weight group (list of variant URLs / dict entries) to file names."""
+def _variant_group_filenames(urls, model_type: str | None = None) -> list:
+    """Flatten one weight group to canonical and load-compatible filenames.
+
+    Some linked WanGP installs contain a different supported serialization of
+    the same architecture (for example H3 Pruned INT8 ConvRot versus
+    Maestro's legacy scaled-FP8 file). Generation already resolves those
+    aliases; model readiness, deletion, and storage accounting must use the
+    same view or the UI can claim a usable linked model is missing.
+    """
     names = []
     for url_entry in urls:
         url_str = url_entry
@@ -355,15 +398,41 @@ def _variant_group_filenames(urls) -> list:
         if not isinstance(url_str, str) or not url_str:
             continue
         names.append(url_str.rstrip("/").split("/")[-1])
-    return names
+
+    compatibility = {}
+    if model_type:
+        model_def = wgp.get_model_def(model_type) or {}
+        compatibility = model_def.get("compatible_model_paths", {}) or {}
+
+    # Walk aliases transitively. Bidirectional migration mappings are
+    # deliberate, so dedupe while traversing rather than only at the end.
+    pending = list(names)
+    unique = []
+    seen = set()
+    while pending:
+        filename = pending.pop(0)
+        key = os.path.normcase(filename)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(filename)
+        aliases = compatibility.get(os.path.basename(str(filename)), [])
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        pending.extend(
+            os.path.basename(str(alias))
+            for alias in aliases
+            if str(alias)
+        )
+    return unique
 
 
-def _variant_group_downloaded(urls) -> bool:
+def _variant_group_downloaded(urls, model_type: str | None = None) -> bool:
     """True when ANY variant (full bf16 vs quantized int8...) of one weight
     group exists locally. Resolves through the files locator so checkpoints
     in linked model folders (Settings -> System -> Linked Model Folders)
     light up too — a hardcoded ckpts_dir check misses every secondary root."""
-    for filename in _variant_group_filenames(urls):
+    for filename in _variant_group_filenames(urls, model_type=model_type):
         if wgp.fl.locate_file(filename, error_if_none=False) is not None:
             return True
     return False
@@ -419,7 +488,7 @@ def _check_model_downloaded(model_type: str) -> bool:
         groups = _model_weight_groups(model_type)
         if not groups:
             return False
-        if not all(_variant_group_downloaded(g) for g in groups):
+        if not all(_variant_group_downloaded(g, model_type=model_type) for g in groups):
             return False
         # Some edit pipelines split required conditioning weights out of the
         # main transformer/text-encoder groups. Krea 2 Edit cannot run without
@@ -438,6 +507,13 @@ def _check_model_downloaded(model_type: str) -> bool:
         # read-only roots like the generation path does.
         for url in wgp.get_model_recursive_prop(model_type, "loras", return_list=True):
             if not os.path.isfile(wgp.resolve_lora_path(model_type, url.split("/")[-1])):
+                return False
+        # Component-folder models may use a tiny root manifest as their
+        # primary URL while the actual weights are downloaded by the family
+        # handler. Do not call a partial/interrupted install ready merely
+        # because that manifest arrived first.
+        for relative_path in model_def.get("required_model_assets", []):
+            if wgp.fl.locate_file(relative_path, error_if_none=False) is None:
                 return False
         return True
     except Exception:
@@ -506,6 +582,45 @@ def list_models():
 
 _MODEL_VISIBILITY_CONFIG_KEY = "maestro_model_visibility"
 _MODEL_VISIBILITY_WRITE_LOCK = threading.RLock()
+_H3_WINDOW_OVERRIDES_CONFIG_KEY = "maestro_h3_window_overrides"
+
+
+def _persist_model_visibility_config():
+    """Backward-compatible wrapper for the original visibility writer."""
+    _persist_server_config()
+
+
+def _normalize_h3_window_overrides(values):
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise ValueError("H3 window overrides must be an object.")
+    normalized = {}
+    for raw_key, raw_frames in values.items():
+        if not isinstance(raw_key, str):
+            raise ValueError("H3 window override keys must be strings.")
+        key = raw_key.strip()
+        if not key or len(key) > 300 or "::" not in key:
+            raise ValueError("An H3 window override key is invalid.")
+        try:
+            frames = int(raw_frames)
+        except (TypeError, ValueError) as error:
+            raise ValueError("H3 window override values must be integers.") from error
+        if frames < 1 or frames > 345:
+            raise ValueError("H3 window override values must be between 1 and 345 frames.")
+        normalized[key] = frames
+    if len(normalized) > 500:
+        raise ValueError("Too many H3 window overrides.")
+    return normalized
+
+
+def _h3_window_overrides_response():
+    raw = wgp.server_config.get(_H3_WINDOW_OVERRIDES_CONFIG_KEY, {})
+    try:
+        overrides = _normalize_h3_window_overrides(raw)
+    except ValueError:
+        overrides = {}
+    return {"overrides": overrides}
 
 
 def _normalize_model_visibility_ids(values):
@@ -567,8 +682,8 @@ def _model_visibility_response():
     }
 
 
-def _persist_model_visibility_config():
-    """Atomically persist visibility across Pinokio's changing UI ports."""
+def _persist_server_config():
+    """Atomically persist Maestro UI preferences across changing ports."""
     config_path = os.path.abspath(wgp.server_config_filename)
     temp_path = (
         f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -628,6 +743,31 @@ async def update_model_visibility(request: Request):
         return _model_visibility_response()
 
 
+@api.get("/api/v1/h3-window-overrides")
+def get_h3_window_overrides():
+    """Return durable H3 model/resolution native-pass preferences."""
+    return _h3_window_overrides_response()
+
+
+@api.put("/api/v1/h3-window-overrides")
+async def update_h3_window_overrides(request: Request):
+    """Persist H3 native-pass preferences independently of browser origin."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="H3 window override payload must be an object.",
+        )
+    try:
+        overrides = _normalize_h3_window_overrides(body.get("overrides"))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    with _MODEL_VISIBILITY_WRITE_LOCK:
+        wgp.server_config[_H3_WINDOW_OVERRIDES_CONFIG_KEY] = overrides
+        _persist_server_config()
+        return _h3_window_overrides_response()
+
+
 @api.get("/api/v1/models/{model_type}/debug")
 def debug_model(model_type: str):
     """Debug: show raw model definition and download check."""
@@ -665,7 +805,7 @@ def delete_model(model_type: str):
     # shared base transformer for the base model's own delete button.
     filenames = []
     for group in _model_weight_groups(model_type, owned_only=True):
-        filenames.extend(_variant_group_filenames(group))
+        filenames.extend(_variant_group_filenames(group, model_type=model_type))
     deleted = []
     skipped_linked = []
     errors = []
@@ -820,7 +960,14 @@ def _download_model_files(model_type: str):
             wgp.download_models(text_encoder_filename, model_type, 2, -1, force_path=text_encoder_folder)
             done += 1
             _update_model_download(model_type, files_done=done)
-            if wgp.get_local_model_filename(text_encoder_filename, extra_paths=text_encoder_folder) is None:
+            # Upstream's compatibility-aware lookup: a linked checkpoint alias
+            # can satisfy this file, which the plain name lookup missed.
+            if wgp.get_compatible_local_model_filename(
+                text_encoder_filename,
+                model_type,
+                file_type=2,
+                extra_paths=text_encoder_folder,
+            ) is None:
                 raise Exception(f"Text encoder '{os.path.basename(text_encoder_filename)}' could not be located after download.")
     finally:
         safe_download.set_download_context(None)
@@ -1253,6 +1400,34 @@ def _normalize_video_prompt_type(body: dict) -> None:
         body["video_prompt_type"] = new_vpt
 
 
+def _h3_injected_keyframes_from_body(body: dict) -> list[dict]:
+    """Return the stable path/position contract used by H3 prompt planning."""
+
+    explicit = body.get("injected_keyframes")
+    if isinstance(explicit, list):
+        return [
+            {
+                "path": str(item.get("path") or "").strip(),
+                "position": str(item.get("position") or "").strip(),
+            }
+            for item in explicit
+            if isinstance(item, dict)
+            and str(item.get("path") or "").strip()
+            and str(item.get("position") or "").strip()
+        ]
+    if "F" not in str(body.get("video_prompt_type") or ""):
+        return []
+    refs = body.get("image_refs")
+    if not isinstance(refs, (list, tuple)):
+        return []
+    positions = str(body.get("frames_positions") or "").replace(",", " ").split()
+    return [
+        {"path": str(path), "position": str(position)}
+        for path, position in zip(refs, positions)
+        if path and position
+    ]
+
+
 # ── image_prompt_type normalization ──────────────────────────────────
 # Sibling to video_prompt_type. wgp's image_prompt_type controls whether
 # I2V (image-to-video) start/end frames are expected. When "S" is set
@@ -1678,7 +1853,11 @@ def delete_lora_file(directory: str, filename: str):
         raise HTTPException(status_code=423, detail="The file is locked by another process. Try again in a moment.")
     base = os.path.splitext(target)[0]
     extras_removed = []
-    extras = [base + ".civitai.json", base + ".guide.md"]
+    extras = [
+        base + ".civitai.json",
+        base + ".guide.md",
+        target + ".maestro-managed.json",
+    ]
     extras += [base + f"_preview1{ext}" for ext in (".mp4", ".png", ".jpg", ".webp")]
     for extra in extras:
         try:
@@ -1708,23 +1887,44 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         return None
 
     from models.minimax_h3.turbo import (
-        MINIMAX_H3_TURBO_LORA_FILENAME,
-        MINIMAX_H3_TURBO_PRESET_STEPS,
-        MINIMAX_H3_TURBO_PRESET_WEIGHT,
+        MINIMAX_H3_TURBO_DEFAULT_PRESET_ID,
+        MINIMAX_H3_TURBO_MANIFEST,
+        MINIMAX_H3_TURBO_PRESETS,
+        minimax_h3_turbo_preset,
     )
 
+    default_preset = minimax_h3_turbo_preset()
+    presets = [
+        {
+            "id": str(preset["id"]),
+            "label": str(preset["label"]),
+            "status": str(preset["status"]),
+            "filename": str(preset["filename"]),
+            "steps": int(preset["steps"]),
+            "weight": float(preset["weight"]),
+            "weight_min": float(preset.get("weight_min", 0.0)),
+            "weight_max": float(preset.get("weight_max", 2.0)),
+            "description": str(preset.get("description") or ""),
+            "revision": str(preset["revision"]),
+        }
+        for preset in MINIMAX_H3_TURBO_PRESETS
+    ]
+    upstream = MINIMAX_H3_TURBO_MANIFEST.get("upstream_watch") or {}
     return {
-        "filename": MINIMAX_H3_TURBO_LORA_FILENAME,
+        "filename": str(default_preset["filename"]),
         "label": "Turbo mode",
         "experimental": True,
-        "steps": MINIMAX_H3_TURBO_PRESET_STEPS,
-        "weight": MINIMAX_H3_TURBO_PRESET_WEIGHT,
+        "preset_id": MINIMAX_H3_TURBO_DEFAULT_PRESET_ID,
+        "version_label": str(default_preset["label"]),
+        "steps": int(default_preset["steps"]),
+        "weight": float(default_preset["weight"]),
+        "presets": presets,
+        "upstream_url": str(upstream.get("model_card_url") or ""),
         "guide": (
             "Experimental MiniMax H3 accelerator for Full and Pruned "
-            "checkpoints. Maestro's one-click preset uses 6 steps and starts "
-            "at strength 0.50. Adjust its active LoRA strength in Advanced; "
-            "the managed adapter and small compatibility data download "
-            "automatically on first use. Pruned is recommended on 16 GB GPUs."
+            "checkpoints. Choose a pinned Maestro-validated version or an "
+            "explicit candidate; mutable Hugging Face main is never loaded "
+            "silently. Adjust the selected adapter strength in Advanced."
         ),
     }
 
@@ -1760,7 +1960,9 @@ def list_loras(model_type: str):
     # filename in the catalog makes it discoverable on a fresh install; the
     # generation preflight below performs the verified one-time download.
     if turbo_option:
-        names.add(turbo_option["filename"])
+        names.update(
+            preset["filename"] for preset in turbo_option.get("presets", [])
+        )
     loras = sorted(names)
 
     return {
@@ -1920,34 +2122,36 @@ def list_loras_details(model_type: str):
         loras.append(info)
 
     if turbo_option:
-        filename = turbo_option["filename"]
-        info = next((item for item in loras if item["filename"] == filename), None)
-        if info is None:
-            info = {
-                "filename": filename,
-                "trained_words": [],
-                "preview_url": None,
-                "civitai_model_id": None,
-                "recommended_weights": None,
-                "has_guide": False,
-                "nsfw": False,
-                "downloaded_at": None,
-                "released_at": None,
-                "lora_id": f"managed:{filename}",
-            }
-            loras.append(info)
-        info.update({
-            "managed": True,
-            "recommended_weights": {
-                "source": "default",
-                "default": turbo_option["weight"],
-                "min": 0.50,
-                "max": 1.00,
-            },
-            "has_guide": True,
-            "guide": turbo_option["guide"],
-            "update_status": "current",
-        })
+        for preset in turbo_option.get("presets", []):
+            filename = preset["filename"]
+            info = next((item for item in loras if item["filename"] == filename), None)
+            if info is None:
+                info = {
+                    "filename": filename,
+                    "trained_words": [],
+                    "preview_url": None,
+                    "civitai_model_id": None,
+                    "recommended_weights": None,
+                    "has_guide": False,
+                    "nsfw": False,
+                    "downloaded_at": None,
+                    "released_at": None,
+                    "lora_id": f"managed:{filename}",
+                }
+                loras.append(info)
+            info.update({
+                "managed": True,
+                "managed_channel": preset["status"],
+                "recommended_weights": {
+                    "source": "default",
+                    "default": preset["weight"],
+                    "min": preset["weight_min"],
+                    "max": preset["weight_max"],
+                },
+                "has_guide": True,
+                "guide": preset["description"],
+                "update_status": "current",
+            })
         loras.sort(key=lambda item: item["filename"])
     return {
         "loras": loras,
@@ -2566,52 +2770,6 @@ _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULTS_DIR = os.path.join(_APP_DIR, "defaults")
 _FINETUNES_DIR = os.path.join(_APP_DIR, "finetunes")
 
-# Best-guess default for the architecture picker, keyed by CivitAI baseModel.
-# Only needed where CIVIT_TO_LOCAL_ARCH's lora-DIR value isn't itself a real
-# model architecture (e.g. "LTXV 2.3" → lora dir "ltx2", but the model arch
-# is "ltx2_22B"). The UI picker lets the user override this guess.
-_CIVIT_BASE_TO_ARCH_HINT = {
-    "LTXV 2.3": "ltx2_22B",
-    "LTXV2": "ltx2_22B",
-    "Flux.2 Klein 9B": "flux2_klein_9b",
-    "Flux.2 Klein 9B-base": "flux2_klein_9b",
-    "Flux.2 Klein 4B": "flux2_klein_4b",
-    "Flux.2 Klein 4B-base": "flux2_klein_4b",
-    "Flux.2 D": "flux2_dev",
-    "Flux.1 D": "flux",
-    "Flux.1 Krea": "flux",
-    "Qwen": "qwen_image_20B",
-}
-
-# Architecture families we never offer for checkpoint import (the picker is
-# for video/image generators; audio/LLM checkpoints aren't Civitai "Checkpoint"
-# uploads and their pipelines don't take a swapped transformer this way).
-_CKPT_EXCLUDED_FAMILY_HINTS = ("audio", "llm", "language", "speech", "music")
-
-
-def _scan_defaults_by_arch() -> dict:
-    """Build {architecture: defaults_json_path} from the shipped defaults.
-
-    The path is the *settings template* we clone when registering a checkpoint
-    for that architecture (so inference defaults, handler-critical companion
-    weights, etc. come along). Prefer the def whose filename == architecture
-    (the canonical base) when several defaults share one arch."""
-    index: dict = {}
-    for path in glob.glob(os.path.join(_DEFAULTS_DIR, "*.json")):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                jd = json.load(f)
-        except Exception:
-            continue
-        arch = (jd.get("model") or {}).get("architecture")
-        if not arch:
-            continue
-        model_type = os.path.basename(path)[:-5]
-        if arch not in index or model_type == arch:
-            index[arch] = path
-    return index
-
-
 def _ckpt_family_for_arch(arch: str, model_type: str) -> str:
     """Best-effort UI family label for an architecture (for grouping/filtering
     in the picker). Falls back to empty string when WGP can't resolve it."""
@@ -2625,44 +2783,39 @@ def _ckpt_family_for_arch(arch: str, model_type: str) -> str:
     return ""
 
 
-def _list_checkpoint_architectures() -> list:
-    """Supported architectures for checkpoint import, with display name +
-    family, excluding audio/LLM families. Powers the UI architecture picker."""
+def _list_checkpoint_architectures(base_model: str) -> list:
+    """Return only verified targets for this exact CivitAI base model.
+
+    The old picker exposed every Maestro architecture and defaulted unknown
+    checkpoints to the first one.  That let Flux 1 and SDXL weights be
+    registered as Flux 2 models.  Keep this list as an explicit allowlist and
+    verify that every mapped template still describes the expected pipeline.
+    """
     out = []
-    for arch, path in _scan_defaults_by_arch().items():
-        model_type = os.path.basename(path)[:-5]
+    for target in checkpoint_targets_for_base(base_model):
+        path = os.path.join(_DEFAULTS_DIR, f"{target.template_model_type}.json")
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                jd = json.load(f)
-            name = (jd.get("model") or {}).get("name", arch)
-        except Exception:
-            name = arch
-        family = _ckpt_family_for_arch(arch, model_type)
-        fam_l = family.lower()
-        if any(h in fam_l for h in _CKPT_EXCLUDED_FAMILY_HINTS):
+            with open(path, "r", encoding="utf-8") as handle:
+                definition = json.load(handle)
+        except (OSError, ValueError):
             continue
-        out.append({
-            "architecture": arch,
-            "name": name,
-            "family": family,
-            "template_model_type": model_type,
-        })
-    out.sort(key=lambda e: (e["family"], e["name"]))
+        template_architecture = (definition.get("model") or {}).get("architecture")
+        if template_architecture != target.architecture:
+            print(
+                "[CivitAI] Ignoring invalid checkpoint mapping "
+                f"{base_model!r} -> {target.template_model_type!r}: template "
+                f"uses architecture {template_architecture!r}."
+            )
+            continue
+        out.append(
+            target.as_dict(
+                _ckpt_family_for_arch(
+                    target.architecture, target.template_model_type
+                )
+            )
+        )
+    out.sort(key=lambda entry: (entry["family"], entry["name"]))
     return out
-
-
-def _guess_arch_for_base(base_model: str, arch_index: dict) -> str | None:
-    """Best-guess local architecture for a CivitAI baseModel string."""
-    if not base_model:
-        return None
-    hint = _CIVIT_BASE_TO_ARCH_HINT.get(base_model)
-    if hint and hint in arch_index:
-        return hint
-    # Fall back to the lora-dir mapping when it happens to equal a real arch.
-    d = CIVIT_TO_LOCAL_ARCH.get(base_model)
-    if d and d in arch_index:
-        return d
-    return None
 
 
 def _ckpt_slugify(text: str) -> str:
@@ -2694,17 +2847,38 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
     main transformer `URLs` at the LOCAL downloaded file. Because the URL is a
     bare filename (not http), WGP's get_local_model_filename() resolves it from
     ckpts/ and never tries to download it — the Civitai updater owns the file."""
-    arch_index = _scan_defaults_by_arch()
-    template_path = arch_index.get(target_architecture)
-    if template_path is None:
-        raise RuntimeError(f"Unsupported target architecture '{target_architecture}'")
+    base_model = str(sidecar_data.get("baseModel") or "")
+    filename = os.path.basename(save_path)
+    compatibility = validate_checkpoint_file(
+        save_path,
+        base_model,
+        target_architecture,
+        filename=filename,
+    )
+    template_model_type = checkpoint_template_model_type(
+        base_model, target_architecture
+    )
+    if not template_model_type:
+        raise CheckpointCompatibilityError(
+            f"No verified Maestro template exists for CivitAI base "
+            f"'{base_model}' and architecture '{target_architecture}'."
+        )
+    template_path = os.path.join(_DEFAULTS_DIR, f"{template_model_type}.json")
+    if not os.path.isfile(template_path):
+        raise RuntimeError(
+            f"Required checkpoint template '{template_model_type}' is missing"
+        )
     with open(template_path, "r", encoding="utf-8") as f:
         template = json.load(f)
+    if (template.get("model") or {}).get("architecture") != target_architecture:
+        raise RuntimeError(
+            f"Checkpoint template '{template_model_type}' does not use "
+            f"architecture '{target_architecture}'"
+        )
 
     tmpl_model = dict(template.get("model") or {})
     settings = {k: v for k, v in template.items() if k != "model"}
 
-    filename = os.path.basename(save_path)
     name = sidecar_data.get("name") or os.path.splitext(filename)[0]
     model_id = sidecar_data.get("modelId")
     version_id = sidecar_data.get("versionId")
@@ -2726,8 +2900,9 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
         "modelId": model_id,
         "versionId": version_id,
         "modelType": "Checkpoint",
-        "baseModel": sidecar_data.get("baseModel", ""),
+        "baseModel": base_model,
         "filename": filename,
+        "compatibility": compatibility,
     }
     if auto_quantize:
         # Load-time int8 quantization via mmgp. Lets one large bf16/fp16
@@ -2745,8 +2920,17 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
     base_slug = _ckpt_slugify(f"civitai_{model_id}_{name}") if model_id else _ckpt_slugify(name)
     slug = base_slug[:80].strip("_") or "checkpoint"
     out_path = os.path.join(_FINETUNES_DIR, f"{slug}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(finetune_def, f, indent=4)
+    temporary_path = f"{out_path}.maestro-{os.getpid()}.tmp"
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as f:
+            json.dump(finetune_def, f, indent=4)
+        os.replace(temporary_path, out_path)
+    finally:
+        if os.path.isfile(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
     print(f"[CivitAI] Registered checkpoint finetune '{slug}' "
           f"(arch={target_architecture}) -> {out_path}")
     return slug, out_path
@@ -3025,7 +3209,7 @@ def _validate_safetensors_payload(path: str):
     file_size = os.path.getsize(path)
     if file_size < 100 * 1024:
         raise ValueError(
-            f"file is only {file_size} bytes — too small to be a real LoRA"
+            f"file is only {file_size} bytes — too small to be a real model asset"
         )
     with open(path, "rb") as handle:
         raw_len = handle.read(8)
@@ -3195,7 +3379,10 @@ def _civitai_headers() -> dict:
 #       }
 #     }
 #   }
-LORA_MANIFEST_VERSION = 1
+# v2 invalidates cached v1 comparisons, which always followed the first
+# CivitAI version even when the installed file belonged to another base-model
+# branch (for example Z-Image Turbo instead of Z-Image Base).
+LORA_MANIFEST_VERSION = 2
 LORA_MANIFEST_FILENAME = ".lora_update_manifest.json"
 LORA_MANIFEST_STALE_HOURS = 24
 LORA_CHANGELOG_MAX_LEN = 800
@@ -3274,6 +3461,57 @@ def _civitai_fetch_model(model_id: int, timeout: float = 15.0) -> tuple[dict | N
         return None, None
 
 
+def _select_latest_compatible_civitai_version(
+    versions: list,
+    current_version_id: int | None,
+) -> dict | None:
+    """Choose the newest release for the installed model variant.
+
+    A single CivitAI model page can contain versions trained for different
+    bases (for example Z-Image Base and Z-Image Turbo).  The API returns the
+    newest version first, but that may belong to a different base and cannot
+    update the file the user installed.  Follow the current version's
+    ``baseModel`` and, when supplied, ``baseModelType`` branch instead.
+    CivitAI already orders each compatible subset newest-first.
+    """
+
+    valid = [version for version in versions if isinstance(version, dict)]
+    if not valid:
+        return None
+    if current_version_id is None:
+        return valid[0]
+
+    try:
+        current_id = int(current_version_id)
+    except (TypeError, ValueError):
+        return valid[0]
+
+    current = None
+    for version in valid:
+        try:
+            if int(version.get("id")) == current_id:
+                current = version
+                break
+        except (TypeError, ValueError):
+            continue
+    if current is None:
+        return valid[0]
+
+    compatible = valid
+    for field in ("baseModel", "baseModelType"):
+        current_value = str(current.get(field) or "").strip().casefold()
+        if not current_value:
+            continue
+        matches = [
+            version
+            for version in compatible
+            if str(version.get(field) or "").strip().casefold() == current_value
+        ]
+        if matches:
+            compatible = matches
+    return compatible[0] if compatible else current
+
+
 def _build_manifest_entry(
     model_id: int,
     current_version_id: int | None,
@@ -3311,7 +3549,7 @@ def _build_manifest_entry(
     if not isinstance(versions, list) or not versions:
         entry["status"] = "unknown"
         return entry
-    latest = versions[0] if isinstance(versions[0], dict) else None
+    latest = _select_latest_compatible_civitai_version(versions, current_version_id)
     if not latest:
         entry["status"] = "unknown"
         return entry
@@ -3344,12 +3582,29 @@ def civitai_base_models():
 
 @api.get("/api/v1/civitai/checkpoint-architectures")
 def civitai_checkpoint_architectures(base_model: str = ""):
-    """List architectures a checkpoint can be imported as (video/image models
-    we already support), plus a best-guess default for the given CivitAI
-    baseModel so the UI picker can pre-select it."""
-    architectures = _list_checkpoint_architectures()
-    guess = _guess_arch_for_base(base_model, {a["architecture"]: True for a in architectures})
-    return {"architectures": architectures, "suggested_architecture": guess}
+    """List only checkpoint pipelines verified for this CivitAI base label."""
+    architectures = _list_checkpoint_architectures(base_model)
+    guess = suggested_checkpoint_architecture(base_model)
+    available = {entry["architecture"] for entry in architectures}
+    if guess not in available:
+        guess = None
+    supported = bool(architectures)
+    if supported:
+        reason = None
+    elif checkpoint_targets_for_base(base_model):
+        reason = (
+            "Maestro recognizes this checkpoint family, but its required "
+            "pipeline definition is unavailable in this installation. Update "
+            "Maestro and try again."
+        )
+    else:
+        reason = unsupported_checkpoint_reason(base_model)
+    return {
+        "architectures": architectures,
+        "suggested_architecture": guess,
+        "supported": supported,
+        "unsupported_reason": reason,
+    }
 
 
 @api.post("/api/v1/models/reload")
@@ -3654,14 +3909,34 @@ async def civitai_download(request: Request):
 
     # Resolve target directory.
     if kind == "checkpoint":
-        # Checkpoints are full transformer weights — validate the requested
-        # architecture against the supported set and route into ckpts/ (where
-        # WGP loads model weights from), NOT the loras tree.
-        arch_index = _scan_defaults_by_arch()
-        if not target_architecture or target_architecture not in arch_index:
+        # Checkpoints are full transformer weights.  CivitAI's generic
+        # Checkpoint category includes unrelated families (notably SDXL), so
+        # require an exact verified base-model mapping instead of accepting
+        # any architecture that happens to exist in defaults/.
+        try:
+            ensure_allowed_checkpoint_target(base_model, target_architecture)
+        except CheckpointCompatibilityError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        available_targets = {
+            entry["architecture"]
+            for entry in _list_checkpoint_architectures(base_model)
+        }
+        if target_architecture not in available_targets:
             raise HTTPException(
                 status_code=400,
-                detail="A supported target_architecture is required for checkpoint imports",
+                detail=(
+                    "The verified pipeline definition for this checkpoint is "
+                    "not available. Update Maestro and try again."
+                ),
+            )
+        if os.path.splitext(filename)[1].casefold() not in {".safetensors", ".sft"}:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Checkpoint import currently supports individual "
+                    ".safetensors files only; archives and Diffusers folders "
+                    "cannot be registered as a single model."
+                ),
             )
         target_dir = _checkpoint_download_dir()
     else:
@@ -3835,16 +4110,36 @@ def _run_civitai_download(download_id: str):
         # `.safetensors` file and later crashes mmgp's loader with
         # `OverflowError: cannot fit 'int' into an index-sized integer`
         # — much harder to diagnose than failing here at download time.
-        if filename.lower().endswith((".safetensors", ".sft")):
+        is_checkpoint = dl.get("_kind") == "checkpoint"
+        file_extension = os.path.splitext(filename)[1].casefold()
+        if is_checkpoint and file_extension not in {".safetensors", ".sft"}:
+            raise RuntimeError(
+                "CivitAI returned an archive or non-SafeTensor checkpoint. "
+                "Maestro can import only an individual .safetensors file."
+            )
+        if file_extension in {".safetensors", ".sft"}:
             try:
                 _validate_safetensors_payload(partial_path)
             except Exception as _validate_exc:
+                asset_name = "checkpoint" if is_checkpoint else "LoRA"
                 raise RuntimeError(
-                    f"CivitAI returned an invalid LoRA payload: {_validate_exc}. "
+                    f"CivitAI returned an invalid {asset_name} payload: "
+                    f"{_validate_exc}. "
                     f"This is usually a missing/expired CivitAI API key, a rate-limit, "
                     f"or a model that requires special access. Check Settings → Services → "
                     f"CivitAI API Key."
                 )
+
+        checkpoint_compatibility = None
+        if is_checkpoint:
+            dl["message"] = "Verifying checkpoint architecture..."
+            checkpoint_compatibility = validate_checkpoint_file(
+                partial_path,
+                dl.get("_base_model", ""),
+                dl.get("_target_architecture", ""),
+                filename=filename,
+            )
+            dl["_checkpoint_compatibility"] = checkpoint_compatibility
 
         # Publish only a fully-received (and, for safetensors, validated)
         # payload. A failed stream leaves no truncated model at save_path.
@@ -3871,14 +4166,10 @@ def _run_civitai_download(download_id: str):
             _update_download_record(download_id, filename=filename)
             print(f"[CivitAI] Extracted {len(extracted_files)} file(s)")
 
-        # NOTE: A previous version did dim-based architecture verification
-        # here (peeking the safetensors header and warning if the file's
-        # attention tensors didn't match the target directory's expected
-        # hidden dim). It was removed because the dim assumptions were
-        # wrong — Klein 9B uses the same 4096 hidden / 12288 QKV dims as
-        # Flux 2 Pro/Dev, so the check false-positived on legitimate
-        # Klein-trained LoRAs. The file-integrity gate above (size > 100KB
-        # AND parseable safetensors header) is the actual safety net.
+        # LoRAs intentionally remain metadata-routed because adapter formats
+        # vary. Full checkpoints are stricter: the header-only verification
+        # above matches several architecture-specific tensor shapes before the
+        # multi-GB file is published or added to Maestro's model registry.
 
         sidecar_data = {
             "modelId": dl["_model_id"],
@@ -3898,6 +4189,7 @@ def _run_civitai_download(download_id: str):
             sidecar_data["publishedAt"] = dl["_published_at"]
         if dl.get("_kind") == "checkpoint":
             sidecar_data["modelType"] = "Checkpoint"
+            sidecar_data["compatibility"] = checkpoint_compatibility
 
         # Write sidecar and generate guide for each extracted file (or the single download)
         files_to_process = extracted_files if extracted_files else [save_path]
@@ -5472,6 +5764,18 @@ def get_model_options(model_type: str):
         if _h3_encoder_variants
         else None
     )
+    _sol_attention_status = None
+    if md.get("sol_attention", False):
+        try:
+            from shared.attention import get_sol_attention_status
+
+            _sol_attention_status = get_sol_attention_status()
+        except Exception as error:
+            _sol_attention_status = {
+                "installed": False,
+                "supported": False,
+                "reason": f"Sol Engine runtime detection failed: {error}",
+            }
 
     return {
         "model_type": model_type,
@@ -5486,6 +5790,8 @@ def get_model_options(model_type: str):
         "flow_shift": bool(md.get("flow_shift", False)),
         "tea_cache": md.get("tea_cache", False),
         "first_block_cache": md.get("first_block_cache", False),
+        "sol_attention": md.get("sol_attention", False),
+        "sol_attention_status": _sol_attention_status,
         "skip_steps_multiplier_choices": [
             [str(choice[0]), float(choice[1])]
             for choice in md.get("skip_steps_multiplier_choices", [])
@@ -5506,6 +5812,9 @@ def get_model_options(model_type: str):
         "returns_audio": md.get("returns_audio", False),
         "any_audio_prompt": md.get("any_audio_prompt", False),
         "audio_scale_name": md.get("audio_scale_name", ""),
+        "infer_audio_prompt_from_guide": md.get(
+            "infer_audio_prompt_from_guide", False
+        ),
         "lock_inference_steps": md.get("lock_inference_steps", False),
         "lock_guidance_scale": md.get("lock_guidance_scale", False),
         "no_negative_prompt": md.get("no_negative_prompt", False),
@@ -5513,6 +5822,7 @@ def get_model_options(model_type: str):
         "t2v_class": md.get("t2v_class", False),
         "image_outputs": md.get("image_outputs", False),
         "supports_end_frame": "E" in md.get("image_prompt_types_allowed", ""),
+        "custom_frames_injection": md.get("custom_frames_injection", False),
         "omni_reference": md.get("omni_reference", False),
         "omni_reference_limits": md.get("omni_reference_limits"),
         "omni_reference_detail_choices": md.get("omni_reference_detail_choices"),
@@ -5531,8 +5841,19 @@ def get_model_options(model_type: str):
             for key, value in _h3_encoder_variants.items()
         ] or None,
         "minimax_h3_text_encoder_default": _h3_encoder_default,
+        "ltx25_video_vae_choices": md.get("ltx25_video_vae_choices"),
+        "ltx25_video_vae_default": md.get(
+            "ltx25_video_vae_default",
+            "fast",
+        ),
         "minimax_h3_turbo": _minimax_h3_turbo_option(md),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
+        "minimax_h3_media_sources": md.get(
+            "minimax_h3_media_sources", False
+        ),
+        "video_to_video_inpaint": md.get(
+            "video_to_video_inpaint", False
+        ),
         "resolution_presets": md.get("resolution_presets"),
         "resolution_preset_order": md.get("resolution_preset_order"),
         "supports_auto_aspect": md.get("supports_auto_aspect", False),
@@ -5540,6 +5861,7 @@ def get_model_options(model_type: str):
         # Choice configs
         "guide_preprocessing": extract_choice("guide_preprocessing"),
         "guide_custom_choices": extract_choice("guide_custom_choices"),
+        "mask_preprocessing": extract_choice("mask_preprocessing"),
         "image_ref_choices": extract_choice("image_ref_choices"),
         "audio_prompt_type_sources": extract_choice("audio_prompt_type_sources"),
 
@@ -5564,9 +5886,21 @@ def get_model_options(model_type: str):
         "sliding_window_memory_policy": md.get(
             "sliding_window_memory_policy"
         ),
+        "omni_sequence_memory_policy": md.get(
+            "omni_sequence_memory_policy"
+        ),
         "director_memory_policy": md.get("director_memory_policy"),
         "sliding_window_auto_prompt_pacing": md.get(
             "sliding_window_auto_prompt_pacing", False
+        ),
+        "multi_window_sequence_controls": md.get(
+            "multi_window_sequence_controls", False
+        ),
+        "sliding_window_end_image_at_final": md.get(
+            "sliding_window_end_image_at_final", False
+        ),
+        "sliding_window_audio_history": md.get(
+            "sliding_window_audio_history", False
         ),
 
         # Timing
@@ -5593,6 +5927,14 @@ def get_model_options(model_type: str):
         "pause_between_sentences": md.get("pause_between_sentences", False),
         "temperature_enabled": md.get("temperature", False),
         "custom_settings_def": md.get("custom_settings"),
+        "music3_structured_caption": md.get(
+            "music3_structured_caption", False
+        ),
+        "music_caption_label": md.get(
+            "music_caption_label", "Style / Music Caption"
+        ),
+        "music_caption_help": md.get("music_caption_help", ""),
+        "music_lyrics_help": md.get("music_lyrics_help", ""),
         # Voice-count-driven audio mode (KugelAudio + Scenema): the UI hides
         # the manual Audio Mode ChoiceControl when this is True, since the
         # voice-slot buttons are the sole source of truth for audio_prompt_type.
@@ -6327,6 +6669,22 @@ def _mask_key(key: str) -> str:
 _PUBLIC_LLM_PROVIDERS = {"openai", "anthropic"}
 
 
+def _llm_api_key_for_provider(services: dict, provider: str) -> str:
+    """Return the credential owned by the selected LLM provider.
+
+    This remains as a compatibility boundary for callers that import the
+    launch helper directly. Runtime request paths use the shared service
+    implementation so Director and Studio follow the same mapping.
+    """
+
+    key_name = {
+        "remote": "llm_remote_api_key",
+        "openai": "openai_api_key",
+        "anthropic": "anthropic_api_key",
+    }.get(str(provider or "").lower())
+    return str(services.get(key_name, "") or "") if key_name else ""
+
+
 def _llm_default_device() -> str:
     """Default LLM device — CUDA when the system has it, else CPU.
 
@@ -6365,6 +6723,8 @@ def get_services_config():
         "llm_device": services.get("llm_device", _llm_default_device()),
         "llm_provider": provider,
         "llm_remote_url": services.get("llm_remote_url", ""),
+        "llm_remote_api_key": _mask_key(services.get("llm_remote_api_key", "")),
+        "llm_remote_api_key_set": bool(services.get("llm_remote_api_key", "")),
         "enhance_llm_model_id": services.get("enhance_llm_model_id", ""),
         "enhance_llm_device": services.get("enhance_llm_device", "cuda"),
         "google_api_key": _mask_key(services.get("google_api_key", "")),
@@ -6452,7 +6812,7 @@ async def update_services_config(request: Request):
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
         "enhance_llm_model_id", "enhance_llm_device",
-        "google_api_key", "openai_api_key", "anthropic_api_key",
+        "google_api_key", "llm_remote_api_key", "openai_api_key", "anthropic_api_key",
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
         "civitai_api_key", "voice_reference_enabled", "ltx_progressive_pipeline",
         "show_experimental", "auto_performance", "storage_allow_linked_removal",
@@ -6574,9 +6934,12 @@ def delete_workspace(name: str):
     if not os.path.isdir(ws_dir):
         raise HTTPException(status_code=404, detail=f"Workspace not found: {name}")
 
-    busy = any(j.get("status") in ("queued", "running") for j in _jobs.values())
+    busy = any(
+        j.get("status") in ("held", "queued", "running")
+        for j in _jobs.values()
+    )
     if busy or _active_gen_states:
-        raise HTTPException(status_code=409, detail="A generation is queued or running. Wait for it to finish before deleting a workspace.")
+        raise HTTPException(status_code=409, detail="A generation is held, queued, or running. Remove it or wait for it to finish before deleting a workspace.")
     # Director pipelines are alive between their generation jobs (LLM
     # planning, review pauses) with no _jobs entry — but their next step
     # would resurrect the folder via _workspace_dir().
@@ -6919,7 +7282,7 @@ def storage_usage():
         seen_paths = set()
         try:
             for group in _model_weight_groups(mt):
-                for fname in _variant_group_filenames(group):
+                for fname in _variant_group_filenames(group, model_type=mt):
                     p = wgp.fl.locate_file(fname, error_if_none=False)
                     if not p:
                         continue
@@ -6939,7 +7302,7 @@ def storage_usage():
             # removes owned files only (a finetune's alias never deletes
             # the shared base) — mirror that here or the button lies.
             for group in _model_weight_groups(mt, owned_only=True):
-                for fname in _variant_group_filenames(group):
+                for fname in _variant_group_filenames(group, model_type=mt):
                     p = wgp.fl.locate_file(fname, error_if_none=False)
                     if p and not wgp.fl.is_protected_path(p):
                         try:
@@ -7039,11 +7402,7 @@ async def llm_load(request: Request):
     device = body.get("device", services.get("llm_device", _llm_default_device()))
     provider = body.get("provider", services.get("llm_provider", "local"))
     remote_url = body.get("remote_url", services.get("llm_remote_url", ""))
-    api_key = ""
-    if provider == "openai":
-        api_key = services.get("openai_api_key", "")
-    elif provider == "anthropic":
-        api_key = services.get("anthropic_api_key", "")
+    api_key = llm_service.provider_api_key(provider, services)
 
     try:
         llm_service.load_model(model_id=model_id, device=device, provider=provider, remote_url=remote_url, api_key=api_key)
@@ -7068,11 +7427,7 @@ def list_llm_models(provider: str = ""):
     services = wgp.server_config.get("services", {})
     p = provider or services.get("llm_provider", "local")
     remote_url = services.get("llm_remote_url", "")
-    api_key = ""
-    if p == "openai":
-        api_key = services.get("openai_api_key", "")
-    elif p == "anthropic":
-        api_key = services.get("anthropic_api_key", "")
+    api_key = llm_service.provider_api_key(p, services)
     return {"models": llm_service.get_available_models(provider=p, remote_url=remote_url, api_key=api_key)}
 
 
@@ -9585,11 +9940,10 @@ def _ensure_llm_loaded(model_id: str = None):
     desired_device = services.get("llm_device", _llm_default_device())
     desired_provider = services.get("llm_provider", "local")
     desired_remote_url = services.get("llm_remote_url", "")
-    desired_api_key = ""
-    if desired_provider == "openai":
-        desired_api_key = services.get("openai_api_key", "")
-    elif desired_provider == "anthropic":
-        desired_api_key = services.get("anthropic_api_key", "")
+    desired_api_key = llm_service.provider_api_key(
+        desired_provider,
+        services,
+    )
 
     if llm_service.is_loaded():
         status = llm_service.get_status()
@@ -9649,7 +10003,51 @@ _SONG_WRITER_FALLBACK_INSTRUMENTAL = (
 )
 
 
-def _parse_song_output(raw, instrumental):
+_MUSIC3_SONG_WRITER_FALLBACK = (
+    "You are writing for MiniMax-Music3. Output exactly [STYLE] and [LYRICS]. "
+    "STYLE must contain the headings ### Global Metadata, ### Vocal Details, "
+    "and ### Arrangement. Begin STYLE with genre, BPM, key, then one coherent "
+    "instrument palette, followed by a concrete section-by-section arrangement. "
+    "LYRICS must be original and use bare canonical tags such as [Verse], "
+    "[Chorus], [Bridge], [Guitar Solo], and [Outro] alone on their lines. Put "
+    "all production and stage directions in STYLE, never inside lyric tags."
+)
+_MUSIC3_SONG_WRITER_FALLBACK_INSTRUMENTAL = (
+    "You are writing an instrumental track for MiniMax-Music3. Output exactly "
+    "[STYLE] and [LYRICS]. STYLE must contain ### Global Metadata, ### Vocal "
+    "Details, and ### Arrangement, beginning with genre, BPM, key, then a "
+    "coherent instrument palette. Vocal Details must explicitly say the track "
+    "is instrumental and name the lead melodic texture. Return "
+    "[LYRICS]\n[Instrumental]."
+)
+
+
+def _music3_writer_duration_instruction(duration_seconds) -> str:
+    """Return the hard runtime contract supplied to the Music3 song writer."""
+    try:
+        duration = float(duration_seconds)
+    except (TypeError, ValueError):
+        duration = 120.0
+    if not math.isfinite(duration):
+        duration = 120.0
+    duration = min(300.0, max(5.0, duration))
+    duration_label = f"{duration:g}"
+    return (
+        "TARGET RUNTIME CONTRACT:\n"
+        f"- The generated track will be {duration_label} seconds long. Treat "
+        "this as a hard creative constraint.\n"
+        "- Scale the section count, lyric density, repetitions, instrumental "
+        "space, transitions, and arrangement detail to this exact runtime.\n"
+        "- For a short target, write a complete short cue rather than a full "
+        "song that would be rushed or cut off. For a long target, supply enough "
+        "evolving material to avoid empty or repetitive stretches.\n"
+        "- In ### Arrangement, use approximate time ranges beginning at 0:00 "
+        f"and ending near {duration_label} seconds. Never plan material beyond "
+        "the target runtime."
+    )
+
+
+def _parse_song_output(raw, instrumental, *, music3=False):
     """Split the song-writer LLM output into (style, lyrics)."""
     import re as _re
     text = str(raw or "").strip()
@@ -9665,13 +10063,19 @@ def _parse_song_output(raw, instrumental):
         lyrics = text
     if instrumental:
         lyrics = "[Instrumental]"
+    if music3:
+        from models.TTS.minimax_music3.prompting import (
+            normalize_generated_music3_song,
+        )
+
+        style, lyrics = normalize_generated_music3_song(style, lyrics)
     return style, lyrics
 
 
 @api.post("/api/v1/llm/write-song")
 async def llm_write_song(request: Request):
     """Music-mode Simple writer: from a free-text description, produce a Music
-    Caption (style tags) + structured lyrics for ACE-Step. Returns
+    Caption (style tags) + structured lyrics for the selected model. Returns
     {style, lyrics, raw}."""
     from services import llm_service
     body = await request.json()
@@ -9679,6 +10083,15 @@ async def llm_write_song(request: Request):
     if not description:
         raise HTTPException(status_code=400, detail="description is required")
     instrumental = bool(body.get("instrumental"))
+    model_type = str(body.get("model_type") or "").strip()
+    try:
+        selected_model = wgp.get_model_def(model_type) if model_type else None
+    except Exception:
+        selected_model = None
+    selected_architecture = str(
+        (selected_model or {}).get("architecture") or model_type
+    )
+    is_minimax_music3 = selected_architecture == "minimax_music3"
 
     # Optional reference image → the vision LLM lets the visuals inform the
     # STYLE (e.g. neon cityscape → synthwave). Degrades gracefully: if the
@@ -9690,15 +10103,32 @@ async def llm_write_song(request: Request):
 
     _ensure_llm_loaded()
     from services.guide_loader import load_guide
-    if instrumental:
+    if is_minimax_music3 and instrumental:
+        system_prompt = (
+            load_guide("music", "song_writer_minimax_music3_instrumental")
+            or _MUSIC3_SONG_WRITER_FALLBACK_INSTRUMENTAL
+        )
+    elif is_minimax_music3:
+        system_prompt = (
+            load_guide("music", "song_writer_minimax_music3")
+            or _MUSIC3_SONG_WRITER_FALLBACK
+        )
+    elif instrumental:
         system_prompt = load_guide("music", "song_writer_instrumental") or _SONG_WRITER_FALLBACK_INSTRUMENTAL
     else:
         system_prompt = load_guide("music", "song_writer") or _SONG_WRITER_FALLBACK
+    if is_minimax_music3:
+        system_prompt = (
+            f"{system_prompt.rstrip()}\n\n"
+            f"{_music3_writer_duration_instruction(body.get('duration_seconds'))}"
+        )
     try:
         raw = llm_service.generate(
             prompt=description,
             system_prompt=system_prompt,
-            max_new_tokens=body.get("max_new_tokens", 1024),
+            max_new_tokens=body.get(
+                "max_new_tokens", 1536 if is_minimax_music3 else 1024
+            ),
             temperature=body.get("temperature", 0.85),
             top_p=body.get("top_p", 0.9),
             seed=body.get("seed"),
@@ -9706,12 +10136,16 @@ async def llm_write_song(request: Request):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    style, lyrics = _parse_song_output(raw, instrumental)
+    style, lyrics = _parse_song_output(
+        raw,
+        instrumental,
+        music3=is_minimax_music3,
+    )
     return {"style": style, "lyrics": lyrics, "raw": raw}
 
 
 def _build_music_gen_params(model_type: str, lyrics: str, style: str, duration_seconds, seed) -> dict:
-    """Build an ACE-Step generation params dict by seeding from the model's
+    """Build music-generation params by seeding from the selected model's
     OWN default settings — the exact same source the Studio Music UI starts
     from (served via /api/v1/models/{model_type} → wgp.get_default_settings).
     This guarantees parity: every model-specific field the ACE-Step pipeline
@@ -9766,9 +10200,15 @@ async def director_generate_music(request: Request):
     duration_seconds = body.get("duration_seconds")
     seed = body.get("seed")
     workspace = body.get("workspace") or _get_active_workspace()
+    progress_id = str(body.get("progress_id") or "").strip()
+    if progress_id and not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", progress_id):
+        raise HTTPException(status_code=400, detail="Invalid music progress id")
 
-    if wgp.get_model_def(model_type) is None:
+    selected_model = wgp.get_model_def(model_type)
+    if selected_model is None:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_type}")
+    selected_architecture = str(selected_model.get("architecture") or model_type)
+    is_minimax_music3 = selected_architecture == "minimax_music3"
 
     image_paths = body.get("image_paths") or []
     if not image_paths and body.get("reference_image_path"):
@@ -9783,16 +10223,33 @@ async def director_generate_music(request: Request):
         from services import llm_service
         from services.guide_loader import load_guide
         _ensure_llm_loaded()
-        if instrumental:
+        if is_minimax_music3 and instrumental:
+            system_prompt = (
+                load_guide("music", "song_writer_minimax_music3_instrumental")
+                or _MUSIC3_SONG_WRITER_FALLBACK_INSTRUMENTAL
+            )
+        elif is_minimax_music3:
+            system_prompt = (
+                load_guide("music", "song_writer_minimax_music3")
+                or _MUSIC3_SONG_WRITER_FALLBACK
+            )
+        elif instrumental:
             system_prompt = load_guide("music", "song_writer_instrumental") or _SONG_WRITER_FALLBACK_INSTRUMENTAL
         else:
             system_prompt = load_guide("music", "song_writer") or _SONG_WRITER_FALLBACK
+        if is_minimax_music3:
+            system_prompt = (
+                f"{system_prompt.rstrip()}\n\n"
+                f"{_music3_writer_duration_instruction(duration_seconds)}"
+            )
         try:
             raw = await asyncio.to_thread(
                 llm_service.generate,
                 prompt=description,
                 system_prompt=system_prompt,
-                max_new_tokens=body.get("max_new_tokens", 1024),
+                max_new_tokens=body.get(
+                    "max_new_tokens", 1536 if is_minimax_music3 else 1024
+                ),
                 temperature=body.get("temperature", 0.85),
                 top_p=body.get("top_p", 0.9),
                 seed=body.get("seed"),
@@ -9800,7 +10257,11 @@ async def director_generate_music(request: Request):
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Song writing failed: {e}")
-        w_style, w_lyrics = _parse_song_output(raw, instrumental)
+        w_style, w_lyrics = _parse_song_output(
+            raw,
+            instrumental,
+            music3=is_minimax_music3,
+        )
         style = style or w_style
         lyrics = lyrics or w_lyrics
 
@@ -9818,9 +10279,25 @@ async def director_generate_music(request: Request):
     # item assignment". Every other _submit_and_wait caller calls this first.
     _init_pipeline()
     from services.director_pipeline import _submit_and_wait
+    generation_timeout_s = 1800
+    if is_minimax_music3:
+        try:
+            # Long-form Music3 tracks can legitimately take much longer than
+            # the previous fixed 30-minute ACE-Step ceiling. Budget up to one
+            # wall-clock minute per requested audio second.
+            generation_timeout_s = max(
+                generation_timeout_s,
+                int(float(duration_seconds or 120) * 60),
+            )
+        except (TypeError, ValueError):
+            generation_timeout_s = 7200
     try:
         output_files = await asyncio.to_thread(
-            _submit_and_wait, gen_params, timeout_s=1800, out_dir=out_dir
+            _submit_and_wait,
+            gen_params,
+            timeout_s=generation_timeout_s,
+            out_dir=out_dir,
+            job_id=progress_id or None,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Music generation failed: {e}")
@@ -9829,7 +10306,13 @@ async def director_generate_music(request: Request):
 
     filename = output_files[0]
     audio_path = os.path.join(out_dir, filename)
-    return {"audio_path": audio_path, "filename": filename, "style": style, "lyrics": lyrics}
+    return {
+        "audio_path": audio_path,
+        "filename": filename,
+        "style": style,
+        "lyrics": lyrics,
+        "job_id": progress_id or None,
+    }
 
 
 @api.post("/api/v1/llm/plan-h3-windows")
@@ -9845,18 +10328,34 @@ async def llm_plan_h3_windows(request: Request):
     if not str(model_def.get("architecture") or "").startswith("minimax_h3"):
         raise HTTPException(status_code=400, detail="H3 window planning requires a MiniMax H3 model.")
     if model_def.get("omni_reference"):
-        raise HTTPException(status_code=400, detail="MiniMax H3 Omni does not use sliding windows.")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "MiniMax H3 Omni uses the Reference Sequence planner; "
+                "this endpoint is for First / Last models."
+            ),
+        )
 
+    sliding_defaults = model_def.get("sliding_window_defaults") or {}
     planning_inputs = {
         "model_type": model_type,
         "resolution": body.get("resolution") or "864x480",
         "video_length": body.get("total_frames") or body.get("video_length") or 124,
         "sliding_window_size": body.get("window_frames") or body.get("sliding_window_size") or 345,
-        "sliding_window_overlap": body.get("overlap_frames", body.get("sliding_window_overlap", 1)),
+        "sliding_window_overlap": body.get(
+            "overlap_frames",
+            body.get(
+                "sliding_window_overlap",
+                sliding_defaults.get("overlap_default", 18),
+            ),
+        ),
         "sliding_window_discard_last_frames": body.get("discard_frames", body.get("sliding_window_discard_last_frames", 0)),
         "sliding_window_memory_override": bool(body.get("sliding_window_memory_override", False)),
     }
-    from models.minimax_h3.minimax_h3_handler import apply_h3_window_memory_policy
+    from models.minimax_h3.minimax_h3_handler import (
+        apply_h3_window_memory_policy,
+        normalize_h3_overlap_frames,
+    )
 
     adjustment = apply_h3_window_memory_policy(
         planning_inputs,
@@ -9865,6 +10364,10 @@ async def llm_plan_h3_windows(request: Request):
     )
     if adjustment and adjustment.get("unsupported"):
         raise HTTPException(status_code=400, detail=adjustment["message"])
+    planning_inputs["sliding_window_overlap"] = normalize_h3_overlap_frames(
+        planning_inputs.get("sliding_window_overlap"),
+        window_frames=planning_inputs.get("sliding_window_size"),
+    )
 
     from services import llm_service
     from services.h3_window_planner import plan_h3_sliding_windows
@@ -9883,6 +10386,11 @@ async def llm_plan_h3_windows(request: Request):
         path for path in (body.get("image_paths") or [])
         if isinstance(path, str) and path and os.path.isfile(path)
     ]
+    injected_keyframes = _h3_injected_keyframes_from_body(body)
+    for keyframe in injected_keyframes:
+        path = keyframe["path"]
+        if os.path.isfile(path) and path not in image_paths:
+            image_paths.append(path)
     total_frames = int(planning_inputs["video_length"])
     window_frames = int(planning_inputs["sliding_window_size"])
     overlap_frames = int(planning_inputs["sliding_window_overlap"] or 0)
@@ -9901,9 +10409,134 @@ async def llm_plan_h3_windows(request: Request):
             has_start_image=bool(body.get("has_start_image")),
             has_end_image=bool(body.get("has_end_image")),
             image_paths=image_paths or None,
+            injected_keyframes=injected_keyframes or None,
             nsfw=bool(nsfw),
+            camera_coverage=str(body.get("camera_coverage") or "auto"),
         )
         result["effective_window_frames"] = window_frames
+        return result
+    except Exception as error:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@api.post("/api/v1/llm/plan-h3-sequence")
+async def llm_plan_h3_sequence(request: Request):
+    """Expand one H3 Omni concept into reference-driven windows."""
+
+    body = await request.json()
+    prompt = str(body.get("prompt") or "").strip()
+    model_type = str(body.get("model_type") or "")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    model_def = wgp.get_model_def(model_type) or {}
+    if not (
+        str(model_def.get("architecture") or "").startswith("minimax_h3")
+        and model_def.get("omni_reference")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="H3 reference-sequence planning requires a MiniMax H3 Omni model.",
+        )
+
+    from models.minimax_h3.ref2va import validate_reference_manifest
+    from models.minimax_h3.minimax_h3_handler import (
+        apply_h3_omni_sequence_memory_policy,
+        normalize_h3_overlap_frames,
+    )
+    from services.h3_sequence_planner import plan_h3_reference_sequence
+
+    try:
+        references = validate_reference_manifest(
+            body.get("references") or body.get("minimax_h3_references") or [],
+            require_files=False,
+            require_visual=False,
+            allow_empty=True,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    sequence_inputs = {
+        "resolution": body.get("resolution") or "864x480",
+        "video_length": body.get("total_frames") or 124,
+        "minimax_h3_sequence_clip_frames": body.get(
+            "sequence_clip_frames"
+        ) or body.get("minimax_h3_sequence_clip_frames"),
+        "minimax_h3_sequence_memory_override": bool(
+            body.get("sequence_memory_override", False)
+            or body.get("minimax_h3_sequence_memory_override", False)
+        ),
+    }
+    sequence_adjustment = apply_h3_omni_sequence_memory_policy(
+        sequence_inputs,
+        model_def,
+        _get_cached_hardware(),
+    )
+    if sequence_adjustment and sequence_adjustment.get("unsupported"):
+        raise HTTPException(
+            status_code=400,
+            detail=sequence_adjustment["message"],
+        )
+    effective_clip_frames = int(
+        sequence_inputs.get("minimax_h3_sequence_clip_frames")
+        or model_def.get("frames_maximum")
+        or 345
+    )
+    native_continuation = body.get("sequence_continuity", True) is not False
+    overlap_frames = (
+        normalize_h3_overlap_frames(
+            body.get(
+                "overlap_frames",
+                body.get(
+                    "sliding_window_overlap",
+                    (model_def.get("sliding_window_defaults") or {}).get(
+                        "overlap_default",
+                        18,
+                    ),
+                ),
+            ),
+            window_frames=effective_clip_frames,
+        )
+        if native_continuation
+        else 0
+    )
+    try:
+        _ensure_llm_loaded()
+    except Exception as load_error:
+        print(
+            "[MiniMax H3 Omni] Sequence planner LLM unavailable; "
+            f"using fallback: {load_error}"
+        )
+    services = wgp.server_config.get("services", {})
+    provider = services.get("llm_provider", "local")
+    nsfw = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
+    image_paths = [
+        item.get("path")
+        for item in references
+        if item.get("type") == "image"
+        and isinstance(item.get("path"), str)
+        and os.path.isfile(item["path"])
+    ]
+    try:
+        result = await asyncio.to_thread(
+            plan_h3_reference_sequence,
+            prompt,
+            model_type=model_type,
+            resolution=str(sequence_inputs["resolution"]),
+            total_frames=int(body.get("total_frames") or 124),
+            references=references,
+            min_clip_frames=int(model_def.get("frames_minimum") or 124),
+            max_clip_frames=effective_clip_frames,
+            frame_step=int(model_def.get("frames_steps") or 17),
+            fps=float(model_def.get("fps") or 24),
+            camera_coverage=str(body.get("camera_coverage") or "auto"),
+            image_paths=image_paths or None,
+            nsfw=bool(nsfw),
+            overlap_frames=overlap_frames,
+            native_continuation=native_continuation,
+        )
+        result["effective_window_frames"] = effective_clip_frames
+        if sequence_adjustment:
+            result["sequence_memory"] = sequence_adjustment
         return result
     except Exception as error:
         traceback.print_exc()
@@ -9925,13 +10558,26 @@ async def llm_enhance_prompt(request: Request):
         model_type.lower().startswith("minimax_h3")
         and generation_mode in ("video", "avatar")
     )
+    try:
+        requested_window_count = max(1, int(body.get("window_count") or 1))
+    except (TypeError, ValueError):
+        requested_window_count = 1
+    needs_ltx_window_plan = (
+        model_type.lower().startswith("ltx")
+        and generation_mode in ("video", "avatar")
+        and requested_window_count > 1
+    )
     enhancer_enabled = int(wgp.server_config.get("enhancer_enabled", 0) or 0)
 
     # The generic Wan2GP cinematic enhancer cannot produce MiniMax H3's
     # required Context-IR fields, speaker IDs, or <d> dialogue tags. Route H3
     # through Maestro's model-specific guide even when the legacy enhancer is
     # enabled; all other model families retain the configured behavior.
-    if enhancer_enabled > 0 and not needs_h3_context_ir:
+    if (
+        enhancer_enabled > 0
+        and not needs_h3_context_ir
+        and not needs_ltx_window_plan
+    ):
         try:
             # Support both single image_path and array image_paths
             image_paths = body.get("image_paths") or []
@@ -9941,8 +10587,14 @@ async def llm_enhance_prompt(request: Request):
         except Exception as e:
             print(f"[Enhance] Wan2GP enhancer failed, falling back to LLM: {e}")
             # Fall through to LLM
-    elif enhancer_enabled > 0 and needs_h3_context_ir:
-        print("[Enhance] MiniMax H3 requires structured Context-IR; using Maestro's model-specific LLM guide")
+    elif enhancer_enabled > 0:
+        if needs_h3_context_ir:
+            print("[Enhance] MiniMax H3 requires structured Context-IR; using Maestro's model-specific LLM guide")
+        elif needs_ltx_window_plan:
+            print(
+                "[Enhance] LTX multi-window planning requires standalone "
+                "window prompts; using Maestro's model-specific LLM guide"
+            )
 
     # Use our local LLM service
     from services import llm_service
@@ -10077,6 +10729,32 @@ async def llm_enhance_prompt(request: Request):
             raw_enhancer_mode=raw_enhancer_mode,
             reference_context=body.get("reference_context"),
         )
+        if needs_ltx_window_plan:
+            from services.ltx_window_planner import (
+                deterministic_ltx_window_prompts,
+                parse_ltx_window_prompts,
+                reinforce_ltx_window_invariants,
+            )
+
+            try:
+                ltx_prompts = parse_ltx_window_prompts(
+                    result,
+                    expected_count=requested_window_count,
+                )
+            except ValueError as planning_error:
+                print(
+                    "[Enhance] LTX planner returned malformed window output; "
+                    f"using deterministic fallback: {planning_error}"
+                )
+                ltx_prompts = deterministic_ltx_window_prompts(
+                    prompt,
+                    requested_window_count,
+                )
+            ltx_prompts = reinforce_ltx_window_invariants(
+                ltx_prompts,
+                prompt,
+            )
+            result = "\n".join(ltx_prompts)
         return {"original": prompt, "enhanced": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -10812,6 +11490,112 @@ async def director_plan_short_film_script(request: Request):
 
 # ── Director Pipeline Endpoints ─────────────────────────────────────────
 
+@api.get("/api/v1/director/queue")
+def director_queue_list():
+    """Return the persistent, project-level Director render queue."""
+    _init_pipeline()
+    from services.director_pipeline import list_director_queue
+    base = wgp.server_config.get("save_path", "outputs")
+    return list_director_queue(base)
+
+
+@api.post("/api/v1/director/queue")
+async def director_queue_add(request: Request):
+    """Freeze a Director project revision in the held queue."""
+    _init_pipeline()
+    from services.director_pipeline import enqueue_director_pipeline
+    body = await request.json()
+    params = body.get("params") if isinstance(body, dict) else None
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail="Director queue params are required")
+    base = wgp.server_config.get("save_path", "outputs")
+    try:
+        # Freezing a project can copy a full music track and many references.
+        # Keep that durable snapshot work off FastAPI's event loop so status,
+        # cancel, and system-stat requests remain responsive.
+        return await asyncio.to_thread(enqueue_director_pipeline, base, params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api.post("/api/v1/director/queue/start")
+def director_queue_start():
+    _init_pipeline()
+    from services.director_pipeline import start_director_queue
+    base = wgp.server_config.get("save_path", "outputs")
+    return start_director_queue(base)
+
+
+@api.post("/api/v1/director/queue/pause")
+def director_queue_pause():
+    _init_pipeline()
+    from services.director_pipeline import pause_director_queue
+    base = wgp.server_config.get("save_path", "outputs")
+    return pause_director_queue(base)
+
+
+@api.post("/api/v1/director/queue/reorder")
+async def director_queue_reorder(request: Request):
+    _init_pipeline()
+    from services.director_pipeline import reorder_director_queue
+    body = await request.json()
+    entry_ids = body.get("entry_ids") if isinstance(body, dict) else None
+    if not isinstance(entry_ids, list) or not all(isinstance(item, str) for item in entry_ids):
+        raise HTTPException(status_code=400, detail="entry_ids must be a list of queue IDs")
+    base = wgp.server_config.get("save_path", "outputs")
+    return reorder_director_queue(base, entry_ids)
+
+
+@api.get("/api/v1/director/queue/{entry_id}")
+def director_queue_get(entry_id: str):
+    _init_pipeline()
+    from services.director_pipeline import get_director_queue_entry
+    base = wgp.server_config.get("save_path", "outputs")
+    entry = get_director_queue_entry(base, entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Director queue entry not found")
+    return entry
+
+
+@api.put("/api/v1/director/queue/{entry_id}")
+async def director_queue_update(entry_id: str, request: Request):
+    """Replace a held queue entry with the edited Director snapshot."""
+    _init_pipeline()
+    from services.director_pipeline import (
+        PipelineBusyError,
+        update_director_queue_entry,
+    )
+    body = await request.json()
+    params = body.get("params") if isinstance(body, dict) else None
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail="Director queue params are required")
+    base = wgp.server_config.get("save_path", "outputs")
+    try:
+        return await asyncio.to_thread(
+            update_director_queue_entry, base, entry_id, params,
+        )
+    except PipelineBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.delete("/api/v1/director/queue/{entry_id}")
+def director_queue_delete(entry_id: str):
+    _init_pipeline()
+    from services.director_pipeline import (
+        PipelineBusyError,
+        remove_director_queue_entry,
+    )
+    base = wgp.server_config.get("save_path", "outputs")
+    try:
+        removed = remove_director_queue_entry(base, entry_id)
+    except PipelineBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="Director queue entry not found")
+    return {"deleted": entry_id}
+
 @api.post("/api/v1/director/pipeline/start")
 async def director_pipeline_start(request: Request):
     """Start a Director pipeline (LLM planning → image gen → video gen).
@@ -10822,7 +11606,7 @@ async def director_pipeline_start(request: Request):
     from services.director_pipeline import start_pipeline
     body = await request.json()
     try:
-        pid = start_pipeline(body)
+        pid = await asyncio.to_thread(start_pipeline, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"pipeline_id": pid}
@@ -11191,7 +11975,15 @@ async def director_v2_plan(request: Request):
 async def generate(request: Request):
     """Submit a generation job. Returns immediately with a job_id."""
     body = await request.json()
+    queue_mode = str(body.pop("_queue_mode", "now") or "now").strip().lower()
+    if queue_mode not in {"now", "held"}:
+        raise HTTPException(
+            status_code=400,
+            detail="_queue_mode must be either 'now' or 'held'",
+        )
+    hold_for_queue = queue_mode == "held"
     h3_window_plan_response = None
+    ltx_window_plan_response = None
 
     is_sfx = body.get("sfx_mode")
     if not body.get("model_type"):
@@ -11296,6 +12088,25 @@ async def generate(request: Request):
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    if (
+        _generation_model_def.get("infer_audio_prompt_from_guide", False)
+        and body.get("audio_guide")
+        and (
+            not body.get("video_guide")
+            or "V" not in str(body.get("video_prompt_type") or "")
+        )
+    ):
+        _audio_prompt_type = str(body.get("audio_prompt_type") or "")
+        if not any(letter in _audio_prompt_type for letter in "AK2"):
+            # Preserve passive processing flags such as N/V/L while restoring
+            # the missing source selector. A Control Video deliberately
+            # permits text-generated audio with a soundtrack still attached,
+            # so this repair is limited to standalone soundtrack input.
+            body["audio_prompt_type"] = f"A{_audio_prompt_type}"
+            print(
+                "[Audio Input] Repaired standalone soundtrack input to "
+                f"Audio-to-Video mode for {body['model_type']}."
+            )
     if _generation_model_def.get("omni_reference"):
         from models.minimax_h3.ref2va import validate_reference_manifest
 
@@ -11351,15 +12162,46 @@ async def generate(request: Request):
             ):
                 print(
                     "[MiniMax H3 Turbo] Experimental preset enabled: "
+                    f"{body.get('minimax_h3_turbo_preset', 'default')}, "
                     f"{body['num_inference_steps']} steps, "
                     f"LoRA strength {body['loras_multipliers'].split()[-1]}."
                 )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         from models.minimax_h3.minimax_h3_handler import (
+            apply_h3_native_omni_memory_policy,
             apply_h3_window_memory_policy,
             h3_runtime_preflight,
+            normalize_h3_clip_frame_schedule,
         )
+
+        raw_h3_clip_frames = body.get("per_clip_frames")
+        if (
+            int(body.get("multi_prompts_gen_type") or 0) == 3
+            and isinstance(raw_h3_clip_frames, list)
+            and raw_h3_clip_frames
+        ):
+            repaired_h3_clip_frames = normalize_h3_clip_frame_schedule(
+                raw_h3_clip_frames,
+                minimum_frames=int(
+                    _generation_model_def.get("frames_minimum") or 124
+                ),
+                maximum_frames=int(
+                    _generation_model_def.get("frames_maximum") or 345
+                ),
+                frame_step=int(
+                    _generation_model_def.get("frames_steps") or 17
+                ),
+            )
+            if repaired_h3_clip_frames != raw_h3_clip_frames:
+                print(
+                    "[MiniMax H3] Repaired legacy/media multi-clip frame "
+                    f"schedule: {raw_h3_clip_frames} -> "
+                    f"{repaired_h3_clip_frames}."
+                )
+            body["per_clip_frames"] = repaired_h3_clip_frames
+            body["video_length"] = sum(repaired_h3_clip_frames)
+            body["sliding_window_size"] = max(repaired_h3_clip_frames)
 
         h3_hardware = _get_cached_hardware()
         h3_runtime_advisory = h3_runtime_preflight(
@@ -11392,12 +12234,421 @@ async def generate(request: Request):
                 "Requested output duration is unchanged."
             )
 
+        h3_native_omni_adjustment = apply_h3_native_omni_memory_policy(
+            body,
+            _generation_model_def,
+            h3_hardware,
+        )
+        if h3_native_omni_adjustment:
+            if h3_native_omni_adjustment.get("unsupported"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=h3_native_omni_adjustment["message"],
+                )
+            print(
+                "[MiniMax H3] VRAM-aware Omni one-shot clip: "
+                f"{h3_native_omni_adjustment['checkpoint'].title()} "
+                "checkpoint, "
+                f"{h3_native_omni_adjustment['gpu_vram_gb']:.1f} GB, "
+                f"{h3_native_omni_adjustment['resolution']}, "
+                f"{h3_native_omni_adjustment['requested_frames']} -> "
+                f"{h3_native_omni_adjustment['effective_frames']} frames."
+            )
+
+        # Omni Reference Sequence can now use Ref2VA's native continuation:
+        # every pass keeps the canonical manifest while carrying recent
+        # generated motion and matching stereo audio. Turning scene continuity
+        # off deliberately retains Maestro's independent hard-cut clip path.
+        h3_reference_sequence_active = False
+        h3_sequence_enabled = (
+            bool(_generation_model_def.get("omni_reference"))
+            and body.get("minimax_h3_reference_sequence") is True
+        )
+        if (
+            bool(_generation_model_def.get("omni_reference"))
+            and not h3_sequence_enabled
+            and "\n" in str(body.get("prompt") or "")
+            and body.get("multi_prompts_gen_type") in (None, 0, 1, "0", "1")
+        ):
+            # A single native Omni pass consumes one complete Context-IR
+            # prompt. Its subject definitions, summary, retention analysis,
+            # detailed description, and soundscape are semantic sections,
+            # not separate continuation-window prompts. Keep this backend
+            # guard for cached/pre-fix web assets as well as API callers.
+            body["multi_prompts_gen_type"] = 2
+            print(
+                "[MiniMax H3 Omni] Preserving the complete multiline "
+                "prompt for one native pass."
+            )
+        h3_sequence_prompt_mode = (
+            "manual"
+            if body.get("minimax_h3_sequence_prompt_mode") == "manual"
+            else "auto"
+        )
+        h3_manual_sequence = (
+            h3_sequence_enabled and h3_sequence_prompt_mode == "manual"
+        )
+        h3_native_sequence = (
+            h3_sequence_enabled
+            and body.get("minimax_h3_sequence_continuity") is not False
+        )
+        try:
+            h3_sequence_total_frames = int(body.get("video_length") or 0)
+        except (TypeError, ValueError):
+            h3_sequence_total_frames = 0
+        h3_sequence_max_frames = int(
+            _generation_model_def.get("frames_maximum") or 345
+        )
+        if h3_sequence_enabled:
+            from models.minimax_h3.minimax_h3_handler import (
+                apply_h3_omni_sequence_memory_policy,
+                normalize_h3_overlap_frames,
+            )
+
+            h3_sequence_adjustment = apply_h3_omni_sequence_memory_policy(
+                body,
+                _generation_model_def,
+                h3_hardware,
+            )
+            if (
+                h3_sequence_adjustment
+                and h3_sequence_adjustment.get("unsupported")
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=h3_sequence_adjustment["message"],
+                )
+            h3_sequence_max_frames = int(
+                body.get("minimax_h3_sequence_clip_frames")
+                or h3_sequence_max_frames
+            )
+            # The job-level VRAM estimator runs before multi-clip dispatch.
+            # Give it the actual native pass ceiling so it budgets one Omni
+            # clip rather than the entire joined sequence timeline.
+            body["sliding_window_size"] = min(
+                h3_sequence_total_frames or h3_sequence_max_frames,
+                h3_sequence_max_frames,
+            )
+            if h3_native_sequence:
+                body["sliding_window_overlap"] = normalize_h3_overlap_frames(
+                    body.get(
+                        "sliding_window_overlap",
+                        (_generation_model_def.get("sliding_window_defaults") or {}).get(
+                            "overlap_default",
+                            18,
+                        ),
+                    ),
+                    window_frames=body["sliding_window_size"],
+                )
+            if h3_sequence_adjustment:
+                override_label = (
+                    "manual"
+                    if h3_sequence_adjustment.get("manual_override")
+                    else "Auto"
+                )
+                print(
+                    f"[MiniMax H3 Omni] {override_label} native window: "
+                    f"{h3_sequence_adjustment['checkpoint'].title()} "
+                    f"checkpoint, "
+                    f"{h3_sequence_adjustment['gpu_vram_gb']:.1f} GB, "
+                    f"{h3_sequence_adjustment['resolution']}, "
+                    f"{h3_sequence_max_frames} frames maximum. "
+                    "Requested sequence duration is unchanged."
+                )
+        if h3_sequence_enabled and (
+            h3_sequence_total_frames > h3_sequence_max_frames
+            or h3_manual_sequence
+        ):
+            from services.h3_sequence_planner import (
+                build_manual_h3_reference_sequence_plan,
+                compute_h3_native_sequence_windows,
+                compute_h3_sequence_clips,
+                h3_sequence_plan_signature,
+                plan_h3_reference_sequence,
+                resolve_h3_sequence_source_prompt,
+            )
+
+            h3_sequence_min_frames = int(
+                _generation_model_def.get("frames_minimum") or 124
+            )
+            h3_sequence_step = int(
+                _generation_model_def.get("frames_steps") or 17
+            )
+            h3_sequence_fps = float(_generation_model_def.get("fps") or 24)
+            h3_sequence_overlap = int(
+                body.get("sliding_window_overlap") or 0
+            ) if h3_native_sequence else 0
+            h3_sequence_refs = list(body.get("minimax_h3_references") or [])
+            h3_sequence_source_prompt = (
+                str(body.get("prompt") or "").strip()
+                if h3_manual_sequence
+                else resolve_h3_sequence_source_prompt(
+                    str(body.get("prompt") or ""),
+                    body.get("h3_window_plan"),
+                    body.get("h3_window_prompts"),
+                )
+            )
+            if (
+                not h3_manual_sequence
+                and h3_sequence_source_prompt
+                != str(body.get("prompt") or "").strip()
+            ):
+                print(
+                    "[MiniMax H3 Omni] Restored the original story prompt "
+                    "from the saved sequence plan."
+                )
+            h3_sequence_signature = h3_sequence_plan_signature(
+                h3_sequence_source_prompt,
+                model_type=str(body.get("model_type") or ""),
+                resolution=str(body.get("resolution") or ""),
+                total_frames=h3_sequence_total_frames,
+                min_clip_frames=h3_sequence_min_frames,
+                max_clip_frames=h3_sequence_max_frames,
+                frame_step=h3_sequence_step,
+                fps=h3_sequence_fps,
+                references=h3_sequence_refs,
+                camera_coverage=str(
+                    body.get("minimax_h3_camera_coverage") or "auto"
+                ),
+                overlap_frames=h3_sequence_overlap,
+                native_continuation=h3_native_sequence,
+            )
+            if h3_native_sequence:
+                h3_sequence_geometry = compute_h3_native_sequence_windows(
+                    h3_sequence_total_frames,
+                    window_frames=h3_sequence_max_frames,
+                    overlap_frames=h3_sequence_overlap,
+                    fps=h3_sequence_fps,
+                )
+            else:
+                h3_sequence_geometry, _ = compute_h3_sequence_clips(
+                    h3_sequence_total_frames,
+                    min_clip_frames=h3_sequence_min_frames,
+                    max_clip_frames=h3_sequence_max_frames,
+                    frame_step=h3_sequence_step,
+                    fps=h3_sequence_fps,
+                )
+            cached_prompts = body.get("h3_window_prompts")
+            cached_plan = body.get("h3_window_plan")
+            cached_is_valid = (
+                isinstance(cached_prompts, list)
+                and len(cached_prompts) == len(h3_sequence_geometry)
+                and all(
+                    isinstance(item, str) and item.strip()
+                    for item in cached_prompts
+                )
+                and isinstance(cached_plan, dict)
+                and cached_plan.get("plan_kind") == "reference_sequence"
+                and (
+                    (h3_manual_sequence and cached_plan.get("planned_by") == "manual")
+                    or (
+                        not h3_manual_sequence
+                        and cached_plan.get("planned_by") != "manual"
+                    )
+                )
+                and body.get("h3_window_plan_signature") == h3_sequence_signature
+            )
+            if h3_manual_sequence:
+                try:
+                    h3_window_plan_response = (
+                        build_manual_h3_reference_sequence_plan(
+                            h3_sequence_source_prompt,
+                            model_type=str(body.get("model_type") or ""),
+                            resolution=str(body.get("resolution") or ""),
+                            total_frames=h3_sequence_total_frames,
+                            references=h3_sequence_refs,
+                            min_clip_frames=h3_sequence_min_frames,
+                            max_clip_frames=h3_sequence_max_frames,
+                            frame_step=h3_sequence_step,
+                            fps=h3_sequence_fps,
+                            camera_coverage=str(
+                                body.get("minimax_h3_camera_coverage") or "auto"
+                            ),
+                            overlap_frames=h3_sequence_overlap,
+                            native_continuation=h3_native_sequence,
+                        )
+                    )
+                except ValueError as error:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=str(error),
+                    ) from error
+                cached_prompts = h3_window_plan_response["window_prompts"]
+                h3_sequence_signature = h3_window_plan_response["signature"]
+                print(
+                    f"[MiniMax H3 Omni] Using {len(cached_prompts)} exact "
+                    f"manual {'window' if h3_native_sequence else 'clip'} prompts; "
+                    "the sequence planner LLM is bypassed."
+                )
+            elif cached_is_valid:
+                h3_window_plan_response = cached_plan
+                print(
+                    "[MiniMax H3 Omni] Reusing reviewed "
+                    f"{len(cached_prompts)}-"
+                    f"{'window' if h3_native_sequence else 'clip'} sequence plan."
+                )
+            else:
+                from services import llm_service
+
+                llm_was_loaded = llm_service.is_loaded()
+                try:
+                    _ensure_llm_loaded()
+                except Exception as load_error:
+                    print(
+                        "[MiniMax H3 Omni] Sequence planner LLM unavailable; "
+                        f"using fallback: {load_error}"
+                    )
+                services = wgp.server_config.get("services", {})
+                provider = services.get("llm_provider", "local")
+                nsfw = (
+                    services.get("nsfw_mode", False)
+                    and provider not in _PUBLIC_LLM_PROVIDERS
+                )
+                h3_sequence_images = [
+                    item.get("path")
+                    for item in h3_sequence_refs
+                    if isinstance(item, dict)
+                    and item.get("type") == "image"
+                    and isinstance(item.get("path"), str)
+                    and os.path.isfile(item["path"])
+                ]
+                print(
+                    f"[MiniMax H3 Omni] Planning {len(h3_sequence_geometry)} "
+                    + (
+                        "native reference-continuation windows."
+                        if h3_native_sequence
+                        else "independent reference-driven clips."
+                    )
+                )
+                h3_window_plan_response = await asyncio.to_thread(
+                    plan_h3_reference_sequence,
+                    h3_sequence_source_prompt,
+                    model_type=str(body.get("model_type") or ""),
+                    resolution=str(body.get("resolution") or ""),
+                    total_frames=h3_sequence_total_frames,
+                    references=h3_sequence_refs,
+                    min_clip_frames=h3_sequence_min_frames,
+                    max_clip_frames=h3_sequence_max_frames,
+                    frame_step=h3_sequence_step,
+                    fps=h3_sequence_fps,
+                    camera_coverage=str(
+                        body.get("minimax_h3_camera_coverage") or "auto"
+                    ),
+                    image_paths=h3_sequence_images or None,
+                    nsfw=bool(nsfw),
+                    overlap_frames=h3_sequence_overlap,
+                    native_continuation=h3_native_sequence,
+                )
+                cached_prompts = h3_window_plan_response["window_prompts"]
+                if not llm_was_loaded and llm_service.is_loaded():
+                    try:
+                        if llm_service.get_status().get("provider") == "local":
+                            llm_service.unload_model()
+                    except Exception as unload_error:
+                        print(
+                            "[MiniMax H3 Omni] Sequence planner unload skipped: "
+                            f"{unload_error}"
+                        )
+
+            h3_reference_sequence_active = True
+            body["h3_window_prompts"] = list(cached_prompts)
+            body["h3_window_plan_signature"] = h3_sequence_signature
+            body["h3_window_plan"] = h3_window_plan_response
+            if len(cached_prompts) == 1:
+                body["multi_prompts_gen_type"] = 0
+                body["sliding_window_size"] = min(
+                    h3_sequence_total_frames,
+                    h3_sequence_max_frames,
+                )
+                body.pop("per_clip_frames", None)
+                body.pop("per_clip_minimax_h3_references", None)
+                body.pop("_omni_sequence_continuity", None)
+                body.pop("_omni_sequence_target_frames", None)
+                print("[MiniMax H3 Omni] Manual one-pass prompt ready.")
+            elif h3_native_sequence:
+                # Keep one Ref2VA task. wgp's native scheduler feeds the
+                # generated video/audio overlap into the next pass while the
+                # model runtime repeats the canonical references every time.
+                body["multi_prompts_gen_type"] = 0
+                body["sliding_window_size"] = h3_sequence_max_frames
+                body["sliding_window_overlap"] = h3_sequence_overlap
+                body.pop("per_clip_frames", None)
+                body.pop("per_clip_minimax_h3_references", None)
+                body.pop("_omni_sequence_continuity", None)
+                body.pop("_omni_sequence_target_frames", None)
+                print(
+                    f"[MiniMax H3 Omni] Native sequence ready: "
+                    f"{len(cached_prompts)} windows, "
+                    f"{h3_sequence_overlap}-frame motion/audio overlap."
+                )
+            else:
+                # Hard-cut mode intentionally remains independent. This is
+                # useful when the user wants editorial cuts without motion or
+                # soundtrack leakage between adjacent clips.
+                per_clip_frames = list(
+                    h3_window_plan_response.get("per_clip_frames")
+                    or [item["frames"] for item in h3_sequence_geometry]
+                )
+                body["prompt"] = "\n---CLIP_BOUNDARY---\n".join(cached_prompts)
+                body["multi_prompts_gen_type"] = 3
+                body["per_clip_frames"] = per_clip_frames
+                body["per_clip_minimax_h3_references"] = [
+                    [dict(reference) for reference in h3_sequence_refs]
+                    for _ in per_clip_frames
+                ]
+                body["_omni_sequence_continuity"] = False
+                body["_omni_sequence_target_frames"] = h3_sequence_total_frames
+            try:
+                from services import llm_service as _h3_sequence_llm
+
+                if (
+                    not h3_manual_sequence
+                    and
+                    _h3_sequence_llm.is_loaded()
+                    and _h3_sequence_llm.get_status().get("provider") == "local"
+                ):
+                    _h3_sequence_llm.unload_model()
+            except Exception as unload_error:
+                print(
+                    "[MiniMax H3 Omni] Sequence planner release skipped: "
+                    f"{unload_error}"
+                )
+
+        if _generation_model_def.get("omni_reference"):
+            from models.minimax_h3.reference_manifest import (
+                split_exact_drive_audio_reference,
+            )
+
+            runtime_references, drive_audio_path, drive_audio_ordinal = (
+                split_exact_drive_audio_reference(
+                    body.get("minimax_h3_references") or []
+                )
+            )
+            if drive_audio_path:
+                # ``drive`` is not a creative Ref2VA audio reference. Route it
+                # through the same frozen target-audio path as Director while
+                # retaining the original manifest for Load Settings and UI.
+                body["minimax_h3_runtime_references"] = runtime_references
+                body["minimax_h3_exact_drive_audio_ordinal"] = (
+                    drive_audio_ordinal
+                )
+                body["audio_prompt_type"] = "AD"
+                body["audio_guide"] = drive_audio_path
+                if int(body.get("multi_prompts_gen_type") or 0) == 3:
+                    body["multi_clip_concat_audio"] = drive_audio_path
+                print(
+                    "[MiniMax H3 Omni] Music / Performance timeline locked "
+                    "as exact target audio; voice/style references remain "
+                    "in the Omni manifest."
+                )
+
         # H3 First/Last continuation passes need genuinely different prompts.
         # A timing wrapper around one full-shot prompt still lets the model see
         # (and prematurely perform) every later action.  Plan after the VRAM
         # policy has finalized the real pass length, then pass an explicit
         # prompt array to wgp's existing per-window selector.
         h3_storyboard_enabled = body.get("minimax_h3_window_storyboard", True) is not False
+        h3_multi_window_enabled = body.get("minimax_h3_multi_window", False) is True
         h3_is_multi_clip = int(body.get("multi_prompts_gen_type") or 0) == 3
         try:
             h3_total_frames = int(body.get("video_length") or 0)
@@ -11408,11 +12659,56 @@ async def generate(request: Request):
             h3_total_frames = h3_window_frames = h3_overlap_frames = h3_discard_frames = 0
         h3_needs_storyboard = (
             h3_storyboard_enabled
+            and h3_multi_window_enabled
             and not _generation_model_def.get("omni_reference")
             and not h3_is_multi_clip
             and h3_total_frames > h3_window_frames > 0
         )
-        if h3_needs_storyboard:
+        h3_manual_first_last = (
+            not h3_storyboard_enabled
+            and h3_multi_window_enabled
+            and not _generation_model_def.get("omni_reference")
+            and not h3_is_multi_clip
+            and h3_total_frames > h3_window_frames > 0
+        )
+        if h3_manual_first_last:
+            from services.h3_window_planner import (
+                compute_h3_window_boundaries,
+                parse_h3_manual_window_prompts,
+            )
+
+            h3_fps = float(_generation_model_def.get("fps", 24) or 24)
+            h3_expected_count = len(
+                compute_h3_window_boundaries(
+                    h3_total_frames,
+                    h3_window_frames,
+                    fps=h3_fps,
+                    overlap_frames=h3_overlap_frames,
+                    discard_frames=h3_discard_frames,
+                )
+            )
+            try:
+                h3_manual_prompts = parse_h3_manual_window_prompts(
+                    str(body.get("prompt") or ""),
+                    expected_count=h3_expected_count,
+                    window_prompts=body.get("h3_window_prompts"),
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+
+            # Keep this as one rolling generation. The explicit array is
+            # selected by wgp one prompt at a time; the original multiline
+            # prompt must never be split into independent queue tasks or sent
+            # wholesale to every continuation pass.
+            body["multi_prompts_gen_type"] = 2
+            body["h3_window_prompts"] = h3_manual_prompts
+            body.pop("h3_window_plan_signature", None)
+            body.pop("h3_window_plan", None)
+            print(
+                f"[MiniMax H3] Manual First / Last sequence ready: "
+                f"{h3_expected_count} explicit window-local prompts."
+            )
+        elif h3_needs_storyboard:
             from services.h3_window_planner import (
                 compute_h3_window_boundaries,
                 h3_window_plan_signature,
@@ -11424,6 +12720,7 @@ async def generate(request: Request):
             h3_end_value = body.get("image_end")
             h3_has_start = bool(h3_start_value)
             h3_has_end = bool(h3_end_value)
+            h3_injected_keyframes = _h3_injected_keyframes_from_body(body)
             h3_expected_signature = h3_window_plan_signature(
                 str(body.get("prompt") or ""),
                 model_type=str(body.get("model_type") or ""),
@@ -11435,6 +12732,10 @@ async def generate(request: Request):
                 fps=h3_fps,
                 has_start_image=h3_has_start,
                 has_end_image=h3_has_end,
+                camera_coverage=str(
+                    body.get("minimax_h3_camera_coverage") or "auto"
+                ),
+                injected_keyframes=h3_injected_keyframes or None,
             )
             h3_expected_count = len(
                 compute_h3_window_boundaries(
@@ -11474,6 +12775,10 @@ async def generate(request: Request):
                         value = value[0] if value else None
                     if isinstance(value, str) and value and os.path.isfile(value):
                         h3_images.append(value)
+                for keyframe in h3_injected_keyframes:
+                    value = keyframe["path"]
+                    if value and os.path.isfile(value):
+                        h3_images.append(value)
                 print(
                     f"[MiniMax H3] Planning {h3_expected_count} window-local prompts "
                     f"after VRAM-safe geometry ({h3_window_frames} frames/window)."
@@ -11491,7 +12796,11 @@ async def generate(request: Request):
                     has_start_image=h3_has_start,
                     has_end_image=h3_has_end,
                     image_paths=h3_images or None,
+                    injected_keyframes=h3_injected_keyframes or None,
                     nsfw=bool(nsfw),
+                    camera_coverage=str(
+                        body.get("minimax_h3_camera_coverage") or "auto"
+                    ),
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 # A planner loaded only for this request should not compete
@@ -11521,10 +12830,204 @@ async def generate(request: Request):
                     _h3_planner_llm.unload_model()
             except Exception as unload_error:
                 print(f"[MiniMax H3] Planner LLM release skipped: {unload_error}")
-        else:
+        elif not h3_reference_sequence_active:
             body.pop("h3_window_prompts", None)
             body.pop("h3_window_plan_signature", None)
             body.pop("h3_window_plan", None)
+
+    # LTX 0.9 / 2.x / 2.5 all use WanGP's native rolling-window engine, but
+    # Maestro now makes that behavior explicit.  A disabled toggle means one
+    # native pass; Manual requires one exact line per computed window; Auto
+    # expands one overall idea through the configured prompt-enhancer LLM.
+    if _generation_model_def.get("multi_window_sequence_controls"):
+        from services.ltx_window_planner import (
+            compute_ltx_window_count,
+            parse_ltx_window_prompts,
+            plan_ltx_sliding_windows,
+            reinforce_ltx_window_invariants,
+        )
+
+        try:
+            ltx_total_frames = max(1, int(body.get("video_length") or 1))
+            ltx_window_frames = max(
+                1,
+                int(body.get("sliding_window_size") or ltx_total_frames),
+            )
+            ltx_overlap_frames = max(
+                0,
+                int(body.get("sliding_window_overlap") or 0),
+            )
+            ltx_discard_frames = max(
+                0,
+                int(body.get("sliding_window_discard_last_frames") or 0),
+            )
+        except (TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid LTX multi-window timing: {error}",
+            ) from error
+
+        ltx_sequence_enabled = body.get("ltx_multi_window") is True
+        ltx_prompt_mode = (
+            "manual"
+            if body.get("ltx_window_prompt_mode") == "manual"
+            else "auto"
+        )
+        if not ltx_sequence_enabled:
+            if ltx_total_frames > ltx_window_frames:
+                print(
+                    "[LTX Sequence] Multi-window is off; limiting the request "
+                    f"to one {ltx_window_frames}-frame native pass."
+                )
+                body["video_length"] = ltx_window_frames
+            # Newlines inside an ordinary cinematic prompt are semantic prose,
+            # not queue entries or continuation-window boundaries.
+            body["multi_prompts_gen_type"] = 2
+            body.pop("ltx_window_prompts", None)
+            body.pop("_ltx_original_prompt", None)
+        elif ltx_total_frames > ltx_window_frames:
+            try:
+                ltx_window_count = compute_ltx_window_count(
+                    ltx_total_frames,
+                    ltx_window_frames,
+                    overlap_frames=ltx_overlap_frames,
+                    discard_frames=ltx_discard_frames,
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+
+            if ltx_prompt_mode == "manual":
+                try:
+                    ltx_prompts = parse_ltx_window_prompts(
+                        str(body.get("prompt") or ""),
+                        expected_count=ltx_window_count,
+                    )
+                except ValueError as error:
+                    raise HTTPException(status_code=400, detail=str(error)) from error
+                ltx_window_plan_response = {
+                    "source_prompt": str(body.get("prompt") or "").strip(),
+                    "window_count": ltx_window_count,
+                    "window_prompts": ltx_prompts,
+                    "planned_by": "manual",
+                    "planning_error": None,
+                }
+                body.pop("_ltx_original_prompt", None)
+                print(
+                    f"[LTX Sequence] Using {ltx_window_count} exact manual "
+                    "window prompts."
+                )
+            else:
+                ltx_source_prompt = str(
+                    body.get("_ltx_original_prompt")
+                    or body.get("prompt")
+                    or ""
+                ).strip()
+                cached_ltx_prompts = body.get("ltx_window_prompts")
+                try:
+                    ltx_prompts = parse_ltx_window_prompts(
+                        cached_ltx_prompts,
+                        expected_count=ltx_window_count,
+                    )
+                    cached_ltx_valid = bool(
+                        body.get("_ltx_original_prompt")
+                        and ltx_source_prompt
+                    )
+                except ValueError:
+                    ltx_prompts = []
+                    cached_ltx_valid = False
+
+                if cached_ltx_valid:
+                    # Older saved Auto plans predate the standalone-window
+                    # contract. Reinforcement is idempotent, so this upgrades
+                    # those plans while preserving every reviewed local beat.
+                    ltx_prompts = reinforce_ltx_window_invariants(
+                        ltx_prompts,
+                        ltx_source_prompt,
+                    )
+                    ltx_window_plan_response = {
+                        "source_prompt": ltx_source_prompt,
+                        "window_count": ltx_window_count,
+                        "window_prompts": ltx_prompts,
+                        "planned_by": "reviewed",
+                        "planning_error": None,
+                    }
+                    print(
+                        f"[LTX Sequence] Reusing {ltx_window_count} reviewed "
+                        "window prompts."
+                    )
+                else:
+                    from services import llm_service
+
+                    llm_was_loaded = llm_service.is_loaded()
+                    try:
+                        _ensure_llm_loaded()
+                    except Exception as load_error:
+                        # The planner has a deterministic chronological
+                        # fallback, so a missing optional LLM must not block
+                        # the actual video generation.
+                        print(
+                            "[LTX Sequence] Planner LLM unavailable; using "
+                            f"fallback: {load_error}"
+                        )
+                    services = wgp.server_config.get("services", {})
+                    provider = services.get("llm_provider", "local")
+                    nsfw = (
+                        services.get("nsfw_mode", False)
+                        and provider not in _PUBLIC_LLM_PROVIDERS
+                    )
+                    ltx_image_value = body.get("image_start")
+                    if isinstance(ltx_image_value, (list, tuple)):
+                        ltx_image_value = (
+                            ltx_image_value[0] if ltx_image_value else None
+                        )
+                    ltx_images = (
+                        [ltx_image_value]
+                        if isinstance(ltx_image_value, str)
+                        and os.path.isfile(ltx_image_value)
+                        else None
+                    )
+                    ltx_fps = float(_generation_model_def.get("fps") or 24)
+                    print(
+                        f"[LTX Sequence] Planning {ltx_window_count} "
+                        "chronological window-local prompts."
+                    )
+                    ltx_window_plan_response = await asyncio.to_thread(
+                        plan_ltx_sliding_windows,
+                        ltx_source_prompt,
+                        model_type=str(body.get("model_type") or ""),
+                        duration_seconds=ltx_total_frames / ltx_fps,
+                        window_count=ltx_window_count,
+                        window_size_seconds=ltx_window_frames / ltx_fps,
+                        image_paths=ltx_images,
+                        nsfw=bool(nsfw),
+                    )
+                    ltx_prompts = list(
+                        ltx_window_plan_response["window_prompts"]
+                    )
+                    if not llm_was_loaded and llm_service.is_loaded():
+                        try:
+                            if llm_service.get_status().get("provider") == "local":
+                                llm_service.unload_model()
+                        except Exception as unload_error:
+                            print(
+                                "[LTX Sequence] Planner LLM unload skipped: "
+                                f"{unload_error}"
+                            )
+
+                body["_ltx_original_prompt"] = ltx_source_prompt
+
+            # WanGP's generic mode 1 selector consumes one non-empty line per
+            # rolling pass.  Collapse each planned paragraph to one line in
+            # the planner, then route the result through that native path.
+            body["ltx_window_prompts"] = list(ltx_prompts)
+            body["prompt"] = "\n".join(ltx_prompts)
+            body["multi_prompts_gen_type"] = 1
+        else:
+            # The toggle may be on before Duration crosses a second native
+            # pass. Keep the ordinary prompt intact until a split is real.
+            body["multi_prompts_gen_type"] = 2
+            body.pop("ltx_window_prompts", None)
+            body.pop("_ltx_original_prompt", None)
 
     # Defense: normalize video_prompt_type so flags whose required input
     # is missing get stripped before wgp.py's validation rejects the job.
@@ -11677,14 +13180,19 @@ async def generate(request: Request):
     job_out_dir = _workspace_dir(workspace)
 
     job_id = uuid.uuid4().hex[:8]
+    initial_status = "held" if hold_for_queue else "queued"
     job = {
         "id": job_id,
-        "status": "queued",
+        "status": initial_status,
         "progress": 0,
         "step": 0,
         "total_steps": 0,
         "phase": "",
-        "message": "Queued",
+        "message": (
+            "Ready - waiting for Start Queue"
+            if hold_for_queue
+            else "Queued"
+        ),
         "created_at": time.time(),
         "params": body,
         "output_files": [],
@@ -11694,13 +13202,22 @@ async def generate(request: Request):
     }
     _jobs[job_id] = job
 
-    # Non-daemon so generation survives browser disconnect during overnight runs
-    thread = threading.Thread(target=_run_generation, args=(job_id,), daemon=False)
-    thread.start()
+    if not hold_for_queue:
+        # Non-daemon so generation survives browser disconnect during
+        # overnight runs. Held Studio jobs deliberately have no worker until
+        # the user presses Start Queue.
+        thread = threading.Thread(
+            target=_run_generation,
+            args=(job_id,),
+            daemon=False,
+        )
+        thread.start()
 
-    response = {"job_id": job_id, "status": "queued"}
+    response = {"job_id": job_id, "status": initial_status}
     if h3_window_plan_response is not None:
         response["h3_window_plan"] = h3_window_plan_response
+    if ltx_window_plan_response is not None:
+        response["ltx_window_plan"] = ltx_window_plan_response
     return response
 
 
@@ -11991,19 +13508,23 @@ _MANAGED_LORAS = {
         "label": "SCAIL-2 Relighting",
         "support_url": "https://huggingface.co/zai-org/SCAIL-2/blob/main/model/relighting-lora.pt",
     },
-    MINIMAX_H3_TURBO_LORA_FILENAME: {
-        "repo_id": MINIMAX_H3_TURBO_LORA_REPO_ID,
-        "revision": MINIMAX_H3_TURBO_LORA_REVISION,
-        "remote_path": MINIMAX_H3_TURBO_LORA_FILENAME,
-        "sha256": MINIMAX_H3_TURBO_LORA_SHA256,
-        "size": MINIMAX_H3_TURBO_LORA_SIZE,
-        "label": "MiniMax H3 Turbo (Experimental)",
-        "support_url": (
-            "https://huggingface.co/"
-            f"{MINIMAX_H3_TURBO_LORA_REPO_ID}"
-        ),
-    },
 }
+
+for _turbo_preset in MINIMAX_H3_TURBO_PRESETS:
+    _MANAGED_LORAS[str(_turbo_preset["filename"])] = {
+        "repo_id": str(MINIMAX_H3_TURBO_MANIFEST["repo_id"]),
+        "revision": str(_turbo_preset["revision"]),
+        "remote_path": str(_turbo_preset["remote_path"]),
+        "sha256": str(_turbo_preset["sha256"]),
+        "size": int(_turbo_preset["size"]),
+        "label": f"MiniMax H3 Turbo — {_turbo_preset['label']}",
+        "support_url": str(
+            (MINIMAX_H3_TURBO_MANIFEST.get("upstream_watch") or {}).get(
+                "model_card_url"
+            )
+            or f"https://huggingface.co/{MINIMAX_H3_TURBO_MANIFEST['repo_id']}"
+        ),
+    }
 
 
 def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
@@ -12048,6 +13569,19 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
                     match = dict(rec)
             return match
 
+    from services.managed_assets import (
+        managed_asset_matches,
+        write_managed_asset_receipt,
+    )
+
+    def _managed_file_matches(path, spec):
+        # Converted assets (currently SCAIL-2's SAT .pt -> safetensors) carry
+        # source-file integrity metadata, not a hash/size for the converted
+        # destination. Their converter performs its own pinned-source check.
+        if spec.get("converter"):
+            return os.path.isfile(path)
+        return managed_asset_matches(path, spec)
+
     downloaded = []
     for fname in activated_loras:
         base = os.path.basename(str(fname))
@@ -12064,7 +13598,12 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
         except Exception:
             resolved_path = save_path
         if os.path.isfile(resolved_path):
-            continue
+            if _managed_file_matches(resolved_path, spec):
+                continue
+            print(
+                f"[ManagedLoRA] {label} local copy does not match its pinned "
+                "manifest; downloading a verified replacement."
+            )
 
         # If another part of the app is already fetching this exact file (the
         # frontend pre-downloads it when the panel mounts), wait for that to
@@ -12094,7 +13633,7 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
                 except Exception:
                     pass
 
-        if os.path.isfile(save_path):
+        if os.path.isfile(save_path) and _managed_file_matches(save_path, spec):
             continue
 
         os.makedirs(target_dir, exist_ok=True)
@@ -12158,6 +13697,18 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
             elif source_tmp_path != tmp_path:
                 os.replace(source_tmp_path, tmp_path)
             os.replace(tmp_path, save_path)
+            if not spec.get("converter"):
+                try:
+                    write_managed_asset_receipt(
+                        save_path,
+                        spec,
+                        actual_sha256=actual_sha256,
+                    )
+                except OSError as receipt_error:
+                    print(
+                        f"[ManagedLoRA] Could not cache verification receipt for "
+                        f"{label}: {receipt_error}"
+                    )
             downloaded.append(base)
             print(f"[ManagedLoRA] {label} downloaded -> {save_path}")
         except Exception as e:
@@ -12168,6 +13719,19 @@ def _ensure_managed_loras_present(activated_loras, model_type, progress=None):
                 except Exception:
                     pass
             support_url = spec.get("support_url", f"https://huggingface.co/{spec['repo_id']}")
+            error_text = str(e)
+            integrity_failure = (
+                "sha-256 mismatch" in error_text.casefold()
+                or "download size mismatch" in error_text.casefold()
+            )
+            if integrity_failure:
+                raise RuntimeError(
+                    f"Could not verify the {label} model automatically: {e}. "
+                    "Maestro rejected the download before installation because "
+                    "its bytes did not match the pinned release metadata. Update "
+                    "Maestro and retry; if the error remains, report it so the "
+                    f"manifest can be reviewed. Source: {support_url}."
+                ) from e
             if spec.get("converter"):
                 recovery_hint = (
                     f"Retry the automatic setup, or download the official source from "
@@ -22393,6 +23957,7 @@ def _apply_per_job_coefficient(job: dict) -> None:
     try:
         from services.perf_recommend import (
             compute_h3_weight_budget,
+            compute_music3_weight_budget,
             compute_per_job_coefficient,
         )
 
@@ -22493,13 +24058,17 @@ def _apply_per_job_coefficient(job: dict) -> None:
         _is_h3 = str(_job_model_def.get("architecture") or "").startswith(
             "minimax_h3"
         )
+        _is_music3 = (
+            str(_job_model_def.get("architecture") or "") == "minimax_music3"
+            or str(model_type or "") == "minimax_music3"
+        )
         _h3_omni_video = bool(
             _job_model_def.get("omni_reference")
             and _h3_video_reference_count
         )
         # H3 itself is a single denoising pipeline. Treating the ordinary
         # two-stage UI default as a second H3 stage double-counts model memory.
-        if _is_h3:
+        if _is_h3 or _is_music3:
             stage_count = 1
 
         if _base_mt in ("scail2_14B", "scail2_1.3B"):
@@ -22652,22 +24221,62 @@ def _apply_per_job_coefficient(job: dict) -> None:
                     f"- {h3_budget['additional_reserve_gb']:.2f} GB reserved "
                     "inside the H3 cap for active LoRA tensors"
                 )
+        if _is_music3:
+            music3_budget = compute_music3_weight_budget(
+                total_vram_gb,
+                params.get("duration_seconds", 120),
+            )
+            music3_weight_budget_gb = music3_budget["weight_budget_gb"]
+            music3_coefficient_cap = music3_weight_budget_gb / total_vram_gb
+            if adjustment["effective_coef"] > music3_coefficient_cap:
+                adjustment["effective_coef"] = music3_coefficient_cap
+                adjustment["floored"] = False
+                adjustment["reasons"].append(
+                    f"- MiniMax Music3 Qwen residency capped at "
+                    f"{music3_weight_budget_gb:.1f} GB to preserve "
+                    f"{music3_budget['runtime_reserve_gb']:.1f} GB of "
+                    "semantic-stage workspace"
+                )
+            adjustment["music3_weight_budget_gb"] = music3_weight_budget_gb
+            adjustment["music3_runtime_reserve_gb"] = music3_budget[
+                "runtime_reserve_gb"
+            ]
+            adjustment["music3_kv_cache_gb"] = music3_budget["kv_cache_gb"]
+            adjustment["music3_duration_seconds"] = music3_budget[
+                "duration_seconds"
+            ]
+            adjustment["reasons"].append(
+                f"- {music3_budget['kv_cache_gb']:.2f} GB reserved for the "
+                f"{music3_budget['duration_seconds']:g}s Qwen KV cache"
+            )
         job["vram_adjustment"] = adjustment
 
         effective = adjustment["effective_coef"]
-        if abs(effective - base_coef) > 1e-6 or _is_h3:
+        if abs(effective - base_coef) > 1e-6 or _is_h3 or _is_music3:
             wgp.args.vram_safety_coefficient = effective
-            if _is_h3 and getattr(wgp, "wan_model", None) is not None:
+            if (
+                (_is_h3 or _is_music3)
+                and getattr(wgp, "wan_model", None) is not None
+            ):
                 loaded_coefficient = getattr(
                     wgp.wan_model,
                     "_maestro_profile_vram_coefficient",
                     None,
                 )
-                if loaded_coefficient is None or float(loaded_coefficient) > effective + 1e-6:
+                if (
+                    loaded_coefficient is None
+                    or float(loaded_coefficient) > effective + 1e-6
+                ):
                     wgp.reload_needed = True
-                    adjustment["reasons"].append(
-                        "- resident H3 profile will reload with packed-sequence headroom"
-                    )
+                    if _is_music3:
+                        adjustment["reasons"].append(
+                            "- resident Music3 profile will reload with "
+                            "duration-aware semantic-cache headroom"
+                        )
+                    else:
+                        adjustment["reasons"].append(
+                            "- resident H3 profile will reload with packed-sequence headroom"
+                        )
             cap_gb = effective * total_vram_gb
             base_cap_gb = base_coef * total_vram_gb
             # Log the frame-clamp explicitly when it fired so a future
@@ -23841,6 +25450,9 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     image_ends = [image_ends] if image_ends else []
                 sw_size = raw_params.get("sliding_window_size", raw_params.get("video_length", 121))
                 per_clip_frames = raw_params.pop("per_clip_frames", None)  # optional per-clip durations
+                per_clip_prompt_modes = raw_params.pop(
+                    "per_clip_prompt_modes", None,
+                )
                 per_clip_keyframes = raw_params.pop("per_clip_keyframes", None)  # optional keyframe injection per clip
                 per_clip_h3_references = raw_params.pop(
                     "per_clip_minimax_h3_references", None,
@@ -23852,6 +25464,16 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     "multi_clip_concat_audio", None,
                 )
                 multi_clip_audio_start_sec = raw_params.pop("multi_clip_audio_start_sec", 0.0)
+                omni_sequence_continuity = bool(
+                    raw_params.pop("_omni_sequence_continuity", False)
+                )
+                try:
+                    omni_sequence_target_frames = max(
+                        0,
+                        int(raw_params.pop("_omni_sequence_target_frames", 0) or 0),
+                    )
+                except (TypeError, ValueError):
+                    omni_sequence_target_frames = 0
                 group_id = f"mc_{int(time.time())}_{raw_params.get('seed', 0)}"
                 clip_count = max(
                     len(prompt_lines),
@@ -23873,12 +25495,44 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     _mc_model_def = wgp.get_model_def(_mc_model_type) or {}
                 except Exception:
                     _mc_model_def = {}
+                _mc_is_h3 = str(
+                    _mc_model_def.get("architecture") or ""
+                ).startswith("minimax_h3")
                 _mc_bounded_director = str(
                     _mc_model_def.get("director_video_strategy") or "rolling_window"
                 ) in {"bounded_start_end", "omni_reference"}
                 _mc_trim_end_frames = bool(
                     _mc_model_def.get("director_trim_end_frames", True)
                 )
+                if _mc_is_h3 and _mc_bounded_director:
+                    from models.minimax_h3.minimax_h3_handler import (
+                        normalize_h3_clip_frame_schedule,
+                    )
+
+                    raw_h3_schedule = [
+                        (
+                            per_clip_frames[index]
+                            if per_clip_frames and index < len(per_clip_frames)
+                            else sw_size
+                        )
+                        for index in range(clip_count)
+                    ]
+                    repaired_h3_schedule = normalize_h3_clip_frame_schedule(
+                        raw_h3_schedule,
+                        minimum_frames=_mc_min_f,
+                        maximum_frames=int(
+                            _mc_model_def.get("frames_maximum") or 345
+                        ),
+                        frame_step=_mc_fs,
+                    )
+                    if repaired_h3_schedule != raw_h3_schedule:
+                        print(
+                            "[MiniMax H3] Worker repaired multi-clip frame "
+                            f"schedule: {raw_h3_schedule} -> "
+                            f"{repaired_h3_schedule}."
+                        )
+                    per_clip_frames = repaired_h3_schedule
+                    sw_size = max(repaired_h3_schedule)
 
                 manifest = []
                 # Director timelines can begin after a silent intro. Preserve
@@ -23900,6 +25554,14 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     wgp.task_id += 1
                     clip_params = raw_params.copy()
                     clip_params["prompt"] = prompt_lines[i] if i < len(prompt_lines) else (prompt_lines[-1] if prompt_lines else "")
+                    if _mc_is_h3:
+                        # Each bounded H3 task starts at local window zero.
+                        # Keeping the parent request's full prompt array here
+                        # made every independent clip select prompt zero and
+                        # repeat the first clip's action.
+                        clip_params["h3_window_prompts"] = [
+                            clip_params["prompt"]
+                        ]
                     clip_params["image_start"] = image_starts[i] if i < len(image_starts) else None
                     clip_end = image_ends[i] if i < len(image_ends) else None
                     clip_params["image_end"] = clip_end if clip_end else None
@@ -23972,11 +25634,33 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         "cumulative_offset": True,
                         "audio_start_sec": multi_clip_audio_start_sec,
                         "concat_audio_path": multi_clip_concat_audio,
+                        "omni_sequence_continuity": omni_sequence_continuity,
+                        "target_total_frames": omni_sequence_target_frames,
                     }
-                    # If the clip prompt has newlines (window_prompts), use mode 1 (per-window)
-                    # Otherwise mode 0 (single task)
+                    # Director supplies the prompt mode explicitly so normal
+                    # paragraph breaks cannot be mistaken for window prompts.
+                    # Retain newline inference only for legacy/Studio callers.
                     clip_prompt = clip_params.get("prompt", "")
-                    clip_params["multi_prompts_gen_type"] = 1 if "\n" in clip_prompt else 0
+                    explicit_prompt_mode = None
+                    if (
+                        isinstance(per_clip_prompt_modes, list)
+                        and i < len(per_clip_prompt_modes)
+                    ):
+                        try:
+                            explicit_prompt_mode = int(
+                                per_clip_prompt_modes[i]
+                            )
+                        except (TypeError, ValueError):
+                            explicit_prompt_mode = 0
+                    clip_params["multi_prompts_gen_type"] = (
+                        0
+                        if _mc_is_h3
+                        else (
+                            explicit_prompt_mode
+                            if explicit_prompt_mode is not None
+                            else (1 if "\n" in clip_prompt else 0)
+                        )
+                    )
                     # Keyframe injection: add image_refs and frames_positions for this clip
                     if per_clip_keyframes and i < len(per_clip_keyframes) and per_clip_keyframes[i]:
                         kf_paths = per_clip_keyframes[i]
@@ -24012,6 +25696,10 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     tail_params = raw_params.copy()
                     # Use last clip's prompt and last clip's end image as start frame
                     tail_params["prompt"] = prompt_lines[-1] if prompt_lines else ""
+                    if _mc_is_h3:
+                        tail_params["h3_window_prompts"] = [
+                            tail_params["prompt"]
+                        ]
                     tail_params["image_start"] = last_se_clip_end_image
                     tail_params["image_end"] = None
                     tail_params["image_prompt_type"] = "S"  # start-only, no SE distortion
@@ -24110,6 +25798,8 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
             stream_error = ""
             clip_output_files: dict[int, str] = {}
             join_output_file = None
+            active_generation_seconds_by_output: dict[str, int] = {}
+            active_generation_seconds_by_task: dict[int, int] = {}
 
             def _write_output_sidecars(file_names):
                 """Stamp every produced media file, including abort leftovers.
@@ -24161,7 +25851,9 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     "upload_filenames": upload_filenames,
                     "generation_mode": job["params"].get("generation_mode"),
                     "job_id": job_id,
-                    "generation_time": round(time.time() - start_time),
+                    # Keep submit-to-write elapsed time for diagnostics, but
+                    # do not present it as generation time in the gallery.
+                    "job_elapsed_time": round(time.time() - start_time),
                     "created_at": time.time(),
                 }
                 dpid = job["params"].get("_director_pipeline_id")
@@ -24194,6 +25886,46 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     meta_path = os.path.join(
                         out_dir, os.path.splitext(fname)[0] + ".meta.json",
                     )
+                    active_seconds = active_generation_seconds_by_output.get(
+                        os.path.basename(fname)
+                    )
+                    if active_seconds is None and os.path.isfile(meta_path):
+                        # Sidecars are refreshed after optional post-processing.
+                        # Preserve the first write's active duration when a
+                        # final filename was not part of WGP's artifact event.
+                        try:
+                            with open(meta_path, "r", encoding="utf-8") as f:
+                                existing_sidecar = json.load(f)
+                            if (
+                                existing_sidecar.get("generation_time_basis")
+                                == "active"
+                            ):
+                                active_seconds = int(round(float(
+                                    existing_sidecar.get("generation_time", 0)
+                                )))
+                        except (
+                            OSError,
+                            TypeError,
+                            ValueError,
+                            json.JSONDecodeError,
+                        ):
+                            pass
+                    if (
+                        active_seconds is None
+                        and active_generation_seconds_by_task
+                        and (total_tasks == 1 or fname == join_output_file)
+                    ):
+                        # A joined output represents every generated task; a
+                        # single-task post-process represents that one task.
+                        active_seconds = sum(
+                            active_generation_seconds_by_task.values()
+                        )
+                    if active_seconds is not None:
+                        file_sidecar["generation_time"] = max(
+                            0,
+                            int(round(active_seconds)),
+                        )
+                        file_sidecar["generation_time_basis"] = "active"
                     try:
                         with open(meta_path, "w", encoding="utf-8") as f:
                             json.dump(file_sidecar, f, indent=2)
@@ -24201,6 +25933,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                         pass
 
             is_multiclip = total_tasks > 1 and any(t.get('params', {}).get('multi_clip_info') for t in queue)
+            omni_sequence_temp_files = []
 
             for task_idx, task in enumerate(queue):
                 if is_cancel_requested(job):
@@ -24287,6 +26020,7 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
 
                 # Process stream — update job dict with live progress
                 task_error = False
+                task_generation_time = None
                 last_msg_len = 0
                 in_status_line = False
                 while True:
@@ -24396,6 +26130,27 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                     elif cmd == "info":
                         print(f"\n  [INFO] {data}")
                         in_status_line = False
+                    elif cmd == "generation_time":
+                        try:
+                            if isinstance(data, dict):
+                                task_generation_time = max(
+                                    0,
+                                    int(round(float(data.get("seconds", 0)))),
+                                )
+                                timing_outputs = data.get("outputs") or []
+                            else:
+                                task_generation_time = max(
+                                    0,
+                                    int(round(float(data))),
+                                )
+                                timing_outputs = []
+                            for output_path in timing_outputs:
+                                if isinstance(output_path, str) and output_path:
+                                    active_generation_seconds_by_output[
+                                        os.path.basename(output_path)
+                                    ] = task_generation_time
+                        except (TypeError, ValueError):
+                            task_generation_time = None
 
                 # WGP may emit several cumulative sliding-window files for a
                 # single clip. Bind only the latest file from this task to its
@@ -24407,6 +26162,16 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                 ):
                     if output_path not in task_files:
                         task_files.append(output_path)
+                if task_generation_time is not None:
+                    active_generation_seconds_by_task[
+                        task_idx
+                    ] = task_generation_time
+                    for output_path in task_files:
+                        if isinstance(output_path, str) and output_path:
+                            active_generation_seconds_by_output.setdefault(
+                                os.path.basename(output_path),
+                                task_generation_time,
+                            )
                 clip_info = (task.get("params") or {}).get("multi_clip_info")
                 if isinstance(clip_info, dict) and "index" in clip_info:
                     latest_clip_file = None
@@ -24504,6 +26269,135 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                                 except Exception as e:
                                     print(f"  [Continuation] Failed to extract frame: {e}")
 
+                    # H3 Omni Reference Sequence: keep canonical user media
+                    # first, then add at most two generated, composition-only
+                    # images. Clip 2 receives one readable late frame from
+                    # clip 1. Clip 3+ may also receive one persistent look
+                    # frame selected from clip 1. The rolling image is replaced
+                    # every clip instead of accumulating drift.
+                    sequence_info = (
+                        (task.get("params") or {}).get("multi_clip_info")
+                        or {}
+                    )
+                    if (
+                        is_multiclip
+                        and sequence_info.get("omni_sequence_continuity")
+                        and task_idx + 1 < total_tasks
+                    ):
+                        latest_video = None
+                        for output_path in reversed(task_files):
+                            if os.path.splitext(output_path)[1].lower() not in {
+                                ".mp4", ".webm", ".mkv", ".mov",
+                            }:
+                                continue
+                            candidate = output_path
+                            if not os.path.isabs(candidate):
+                                candidate = os.path.join(out_dir, candidate)
+                            candidate = os.path.realpath(candidate)
+                            if (
+                                os.path.normcase(os.path.dirname(candidate))
+                                == os.path.normcase(os.path.realpath(out_dir))
+                                and os.path.isfile(candidate)
+                            ):
+                                latest_video = candidate
+                                break
+                        if latest_video:
+                            try:
+                                from services.h3_sequence_continuity import (
+                                    append_generated_reference,
+                                    augment_prompt_with_continuity,
+                                    reference_capacity,
+                                    select_reference_frame,
+                                )
+
+                                if task_idx == 0 and task_idx + 2 < total_tasks:
+                                    first_future_refs = list(
+                                        (queue[task_idx + 2].get("params") or {}).get(
+                                            "minimax_h3_references"
+                                        )
+                                        or []
+                                    )
+                                    if reference_capacity(first_future_refs, 2):
+                                        look_image = select_reference_frame(
+                                            latest_video,
+                                            kind="look",
+                                            fps=float(_mc_model_def.get("fps") or 24),
+                                        )
+                                        omni_sequence_look_path = os.path.join(
+                                            out_dir,
+                                            f"_omni_sequence_look_{job_id}.png",
+                                        )
+                                        look_image.save(omni_sequence_look_path)
+                                        omni_sequence_temp_files.append(
+                                            omni_sequence_look_path
+                                        )
+                                        for future_task in queue[task_idx + 2:]:
+                                            future_params = future_task.get("params") or {}
+                                            future_refs, picture_number = append_generated_reference(
+                                                list(future_params.get("minimax_h3_references") or []),
+                                                omni_sequence_look_path,
+                                                role=(
+                                                    "Maestro project-look reference from the first "
+                                                    "generated clip; scene, wardrobe, lighting, and "
+                                                    "color only"
+                                                ),
+                                            )
+                                            if picture_number is not None:
+                                                future_params["minimax_h3_references"] = future_refs
+                                                future_prompt = augment_prompt_with_continuity(
+                                                    str(future_params.get("prompt") or ""),
+                                                    picture_number=picture_number,
+                                                    kind="look",
+                                                )
+                                                future_params["prompt"] = future_prompt
+                                                future_task["prompt"] = future_prompt
+
+                                next_task = queue[task_idx + 1]
+                                next_params = next_task.get("params") or {}
+                                next_refs = list(
+                                    next_params.get("minimax_h3_references") or []
+                                )
+                                if reference_capacity(next_refs, 1):
+                                    continuity_image = select_reference_frame(
+                                        latest_video,
+                                        kind="continuity",
+                                        fps=float(_mc_model_def.get("fps") or 24),
+                                    )
+                                    continuity_path = os.path.join(
+                                        out_dir,
+                                        f"_omni_sequence_continuity_{job_id}_{task_no}.png",
+                                    )
+                                    continuity_image.save(continuity_path)
+                                    omni_sequence_temp_files.append(continuity_path)
+                                    next_refs, picture_number = append_generated_reference(
+                                        next_refs,
+                                        continuity_path,
+                                        role=(
+                                            "Maestro rolling continuity reference from the "
+                                            "preceding generated clip; blocking, environment "
+                                            "state, lighting, and screen direction only"
+                                        ),
+                                    )
+                                    if picture_number is not None:
+                                        next_params["minimax_h3_references"] = next_refs
+                                        next_prompt = augment_prompt_with_continuity(
+                                            str(next_params.get("prompt") or ""),
+                                            picture_number=picture_number,
+                                            kind="continuity",
+                                        )
+                                        next_params["prompt"] = next_prompt
+                                        next_task["prompt"] = next_prompt
+                                        print(
+                                            "  [H3 Omni Sequence] Added curated "
+                                            f"continuity Picture {picture_number} for clip "
+                                            f"{task_no + 1}."
+                                        )
+                            except Exception as sequence_error:
+                                print(
+                                    "  [H3 Omni Sequence] Continuity selection "
+                                    f"skipped: {sequence_error}"
+                                )
+
             elapsed = time.time() - start_time
             print(f"\n{'='*50}")
             summary = f"Queue completed: {completed}/{total_tasks} tasks in {wgp.format_time(elapsed)}"
@@ -24531,7 +26425,12 @@ def _run_generation(job_id: str, *, finalize: bool = True) -> bool:
                             os.remove(os.path.join(out_dir, f))
                         except Exception:
                             pass
-
+            for temp_path in omni_sequence_temp_files:
+                try:
+                    if os.path.isfile(temp_path):
+                        os.remove(temp_path)
+                except OSError:
+                    pass
             # Publish any files that finished before an abort. Director waits
             # for this worker to settle and persists these partial outputs.
             new_files = []
@@ -25943,7 +27842,7 @@ def get_status(job_id: str):
 
 @api.post("/api/v1/cancel/{job_id}")
 def cancel_job(job_id: str):
-    """Cancel a queued or running generation job."""
+    """Cancel a held, queued, or running generation job."""
     if job_id not in _jobs:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -25978,13 +27877,67 @@ def cancel_job(job_id: str):
             "stopped_downloads": stopped_downloads}
 
 
+def _run_held_studio_jobs(job_ids: list[str]) -> None:
+    """Dispatch released Studio jobs serially in their captured order."""
+    for job_id in job_ids:
+        job = _jobs.get(job_id)
+        if job is None or snapshot_job(job).get("status") != "queued":
+            continue
+        try:
+            _run_generation(job_id)
+        except Exception as error:
+            # `_run_generation` normally owns all failure publication. Keep
+            # the batch moving if an unexpected exception escapes its guard.
+            current = snapshot_job(job).get("status")
+            if current == "queued" and try_start(job, message="Starting"):
+                current = "running"
+            if current == "running":
+                finish_job(job, "failed", message="Failed", error=str(error))
+            print(f"[Studio Queue] Job {job_id} failed: {error}")
+
+
+def _start_held_studio_queue() -> list[str]:
+    """Release all currently held Studio jobs and start one dispatcher."""
+    candidates = sorted(
+        (
+            (snapshot_job(job).get("created_at", 0), job_id, job)
+            for job_id, job in list(_jobs.items())
+            if snapshot_job(job).get("status") == "held"
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    released: list[str] = []
+    for _created_at, job_id, job in candidates:
+        if release_held(job, message="Queued"):
+            released.append(job_id)
+    if released:
+        threading.Thread(
+            target=_run_held_studio_jobs,
+            args=(released,),
+            daemon=False,
+            name="maestro_studio_queue",
+        ).start()
+    return released
+
+
+@api.post("/api/v1/jobs/queue/start")
+def start_studio_queue():
+    """Release held Studio jobs without disturbing an active generation."""
+    released = _start_held_studio_queue()
+    return {
+        "status": "started" if released else "idle",
+        "job_ids": released,
+        "released": len(released),
+    }
+
+
 @api.get("/api/v1/jobs")
 def list_jobs():
     """List all active/recent jobs for reconnection after browser refresh."""
     active = []
     for job in list(_jobs.values()):
         j = snapshot_job(job)
-        if j["status"] in ("queued", "running"):
+        if j["status"] in ("held", "queued", "running"):
             active.append({
                 "job_id": j["id"],
                 "status": j["status"],

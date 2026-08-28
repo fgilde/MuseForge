@@ -12,6 +12,8 @@ import math
 import re
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
+from services.text_integrity import repair_text
+
 
 class H3DialogueContractError(ValueError):
     """Raised when an H3 prompt cannot be made safe for native speech."""
@@ -84,6 +86,11 @@ _H3_MUSIC_PROSE_RE = re.compile(
     r"(?=\s+(?:the\s+final\s+beat|closing\s+blocking|"
     r"opening\s+continuity|final\s+blocking)\b|$)",
     re.IGNORECASE | re.DOTALL,
+)
+_H3_AUXILIARY_SECTION_BOUNDARY_RE = re.compile(
+    r"\b(?:integrated_multimodal_description|detailed_description|"
+    r"overall_soundscape|non_diegetic_music|dialogue\s+beats?)\s*:",
+    re.IGNORECASE,
 )
 _H3_META_SENTENCE_RE = re.compile(
     r"\bMiniMax H3 generates synchronized picture and stereo sound\.\s*",
@@ -165,6 +172,54 @@ def _replace_spans(
     for (start, end), replacement in reversed(list(zip(spans, replacements))):
         result = f"{result[:start]}{replacement}{result[end:]}"
     return result
+
+
+def _strip_dialogue_for_driving_audio(prompt: str) -> str:
+    """Remove generated dialogue when mapped audio owns every audible vocal.
+
+    Music-video planning sometimes receives a noisy transcription containing a
+    repeated refrain. If an LLM copies that transcript into a ``<d>`` block and
+    reaches its output limit before ``</d>``, the visual plan is still safe to
+    use: the mapped soundtrack, rather than prompt-authored speech, is the vocal
+    source. Remove balanced blocks, malformed nested blocks, unmatched closing
+    tags, and an unterminated final block without altering surrounding visual
+    instructions.
+    """
+
+    text = str(prompt or "")
+    pieces: list[str] = []
+    cursor = 0
+    depth = 0
+    open_start = -1
+    for token in _H3_DIALOGUE_TOKEN_RE.finditer(text):
+        closing = bool(token.group(1))
+        if not closing:
+            if depth == 0:
+                pieces.append(text[cursor:token.start()])
+                open_start = token.start()
+            depth += 1
+            continue
+        if depth:
+            depth -= 1
+            if depth == 0:
+                cursor = token.end()
+                open_start = -1
+            continue
+
+        # A closing tag without an opening tag is markup noise. Preserve the
+        # prose around it, but do not leave the invalid token in the prompt.
+        pieces.append(text[cursor:token.start()])
+        cursor = token.end()
+
+    if depth:
+        # Preserve official sound/music fields if malformed raw text includes
+        # them after an unterminated dialogue block. Context-IR parsing usually
+        # separates these fields before this helper runs, but this also makes
+        # the recovery safe for legacy free-form prompts.
+        boundary = _H3_SOUND_BOUNDARY_RE.search(text, max(0, open_start))
+        cursor = boundary.start() if boundary else len(text)
+    pieces.append(text[cursor:])
+    return _normalized_space(" ".join(pieces))
 
 
 def _dialogue_payload(value: Any) -> tuple[str, str]:
@@ -525,14 +580,7 @@ def normalize_h3_text(value: Any) -> str:
     known sequences and remove any orphaned controls deterministically.
     """
 
-    text = str(value or "")
-    for broken, repaired in _H3_MOJIBAKE_REPLACEMENTS.items():
-        text = text.replace(broken, repaired)
-    return "".join(
-        character
-        for character in text
-        if not 0x80 <= ord(character) <= 0x9F
-    )
+    return repair_text(value)
 
 
 def _extract_h3_fields(text: str) -> dict[str, str]:
@@ -673,10 +721,24 @@ def _source_prompt_parts(
             if _trim_sentence(effect)
         )
         soundscape = ", ".join(sound_bits) or "Natural scene-appropriate stereo ambience"
+    # Small local planners occasionally emit the requested Context-IR labels
+    # inline after first writing a prose prompt. The prose music extractor can
+    # then capture the repeated visual/sound fields (and even a non-canonical
+    # ``<d>`` block) as part of non_diegetic_music. Auxiliary fields never own
+    # dialogue, so trim at the first nested field and remove any dialogue block
+    # before final validation. The visual compiler retains/canonicalizes the
+    # authoritative copy when scripted dialogue is actually present.
+    def clean_auxiliary(value: Any) -> str:
+        cleaned = normalize_h3_text(value)
+        boundary = _H3_AUXILIARY_SECTION_BOUNDARY_RE.search(cleaned)
+        if boundary:
+            cleaned = cleaned[:boundary.start()]
+        return _strip_dialogue_for_driving_audio(cleaned)
+
     soundscape = _trim_sentence(
-        _sanitize_scripted_ambience(normalize_h3_text(soundscape))
+        _sanitize_scripted_ambience(clean_auxiliary(soundscape))
     )
-    music = _trim_sentence(normalize_h3_text(music)) or "N/A"
+    music = _trim_sentence(clean_auxiliary(music)) or "N/A"
     if music.casefold() in {"n/a", "none", "no music"}:
         music = "N/A"
     return body, soundscape, music, existing_blocks
@@ -818,6 +880,14 @@ def _compile_official_dialogue(
         })
 
     body = _strip_h3_custom_sections(body)
+    if has_driving_audio and not valid_beats:
+        # The mapped audio is authoritative. LLM-authored vocal tags are both
+        # unnecessary and actively harmful here: they can compete with the
+        # soundtrack or become unbalanced when a repetitive transcript causes
+        # output truncation. Structured dialogue remains authoritative for
+        # narrative shots and follows the stricter validation path below.
+        body = _strip_dialogue_for_driving_audio(body)
+        existing_blocks = []
     spans, malformed = _dialogue_spans(body)
     if malformed and not spans:
         raise H3DialogueContractError(
@@ -1232,6 +1302,13 @@ def compile_h3_official_prompt(
         subjects or [],
         registry,
     )
+    audio_mode = _normalized_space(_field(audio_plan or {}, "mode", "")).casefold()
+    if audio_mode in {"audio_driven", "music_driven"}:
+        # Initial Director preflight runs before concrete Ref2VA manifests are
+        # assembled. The shot's audio plan still proves that a mapped source
+        # track owns the vocals, so do not temporarily treat it as a silent or
+        # prompt-scripted shot.
+        has_driving_audio = True
     body, soundscape, music, existing_blocks = _source_prompt_parts(
         prompt,
         project_context=project_context,

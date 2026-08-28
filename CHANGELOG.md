@@ -5,6 +5,326 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-08-25
+
+Local LLM hotfix: fixed fresh Windows installations failing prompt enhancement
+when llama.cpp's latest semantic release contains a `nightly-tag.txt` pointer
+instead of platform binaries. Maestro now follows that pointer to the referenced
+binary nightly, verifies the required llama-server and CUDA runtime archives,
+and falls back to a known-good binary build if current-release resolution is
+unavailable. Existing cached llama-server installations remain untouched.
+
+## [1.9.0] - 2026-08-19
+
+Universal queue and Director recovery: Studio and Director now share a compact
+top-bar queue with a live count, ordering, removal, pause, and start controls.
+Studio's split Generate control can freeze a complete job in a held state
+without immediately starting the GPU. Director saves a complete project
+revision before rendering, restores it through Load Settings, and can place it
+in a persistent asset-owning queue that survives restarts and executes projects
+sequentially. Held, queued, running, cancelled, and resumed work use one
+lifecycle contract, and queued work no longer creates blank gallery cards.
+
+Director and MiniMax-Music3 reliability: soundtrack creation now reports live
+progress inside Director. Music3 uses an optimized Qwen semantic path, reusable
+non-growing KV caches, accelerated RVQ depth decoding, and capability-aware GPU
+fallbacks. Its song writer follows the checkpoint's canonical bare section-tag
+format and adapts lyric density and arrangement to the requested duration.
+Director recursively repairs legacy mojibake while preserving valid Unicode;
+MiniMax H3 enhancement retains requested spoken languages and grounds prompts
+in attached frames. Duplicate nested H3 dialogue fields are normalized before
+canonical validation instead of rejecting an otherwise valid project.
+
+Checkpoint, LLM, and GPU compatibility: CivitAI checkpoint downloads are now
+restricted to explicit supported base-model/architecture mappings and their
+safetensors tensor layouts are verified before a model definition is
+published. Existing incompatible registrations are quarantined without
+deleting weights. Remote OpenAI-compatible LLMs have a separate credential,
+receive standards-compliant model-aware payloads, preserve multimodal content,
+and surface the endpoint's rejection detail. Cached llama.cpp runtimes remain
+installed even when a binary reports build zero, preventing repeated llama and
+CUDA archive downloads. The local server's output pipe is continuously drained
+and its non-fatal Gemma 4 compatibility warning is not reported as a crash.
+SCAIL-2 now uses Maestro's shared attention dispatcher, validates kernel
+support at runtime, and falls back safely when a FlashAttention wheel does not
+cover the active GPU.
+
+Studio and interface polish: LoRA selection moved near the top of Advanced and
+the CivitAI update tracker now follows the installed variant rather than the
+first item in a release. The prompt editor grows with its content and supports
+browser spellcheck. The gallery toolbar compacts and scrolls cleanly on narrow
+screens. The footer uses an icon-only Advanced control plus separate Generate
+and Queue actions. Fresh defaults exclude unreachable and mature-only models,
+and disconnected file streams stop immediately instead of flooding the console
+with repeated socket-send exceptions.
+
+## [1.8.7.1] - 2026-08-17
+
+MiniMax-Music3 GPU compatibility: Windows runtimes now probe whether an
+importable FlashAttention wheel actually includes a kernel for the active GPU
+before selecting it. Unsupported architectures automatically use SDPA instead,
+and Update removes the known incompatible architecture-specific package from
+affected legacy runtimes without disabling acceleration on supported cards.
+
+## [1.8.7] - 2026-08-16
+
+MiniMax H3 soundtrack workflows: Studio Omni now treats Music / Performance
+timeline audio as an exact target soundtrack instead of a generative reference,
+preserving its waveform while advancing the correct segment through every
+sequence window. Selecting that intent adopts the source duration and enables
+multi-window generation when needed without changing Voice or Style references.
+Prompt-reference numbering is repaired after the target soundtrack is routed
+out of the Omni manifest, and runtime logs show the exact audio window in use.
+
+H3 continuation and model sharing: Studio Video Extend now preserves the
+original clip, uses its audiovisual tail as native continuation context, and
+generates the requested amount of new material instead of starting an unrelated
+shot. All four Pruned and Full First / Last and Omni variants now select WanGP's
+INT8 ConvRot or BF16 checkpoints consistently. Linked checkpoint aliases and
+Qwen encoder layouts participate in readiness, download, storage, and deletion
+accounting, while startup diagnostics report each component's source and the
+transformer's actual quantization format.
+
+Music-video synchronization: vocal-performance LTX-2.5 Director plans are
+divided into native independent shots before prompt generation, and every
+window receives its exact soundtrack segment and lip-sync contract. When Audio
+Analysis provides a separated vocal stem, Maestro uses it only to condition
+mouth motion while retaining the untouched song in the published video; the
+same behavior applies to Dashboard regeneration. LTX-2.3 also restores its
+audio-driven mode when a soundtrack survives a model switch or saved-settings
+load, preventing it from silently generating unrelated audio.
+
+## [1.8.6] - 2026-08-15
+
+Director music-video reliability: MiniMax H3 Omni batches now use a
+no-progress timeout instead of a fixed total-runtime limit, allowing long
+soundtracks and large shot counts to continue as long as generation is still
+advancing. LTX-2.5 music-video prompts now explicitly bind visible vocal
+performance to the exact supplied soundtrack segment, including normal,
+Seamless, and Dashboard-regenerated clips, improving lyric and mouth timing
+without changing the proven LTX-2.3 path.
+
+## [1.8.5.1] - 2026-08-15
+
+Linux performance runtime: fixed the H3 high-performance upgrade repeatedly
+restarting on Linux Mint and Ubuntu when SageAttention was compiled with a
+CUDA 12.x host toolkit against Maestro's PyTorch CUDA 13 runtime. Linux now
+installs pinned, prebuilt CUDA 13 SageAttention and FlashAttention wheels
+without invoking the host CUDA compiler. These optional accelerators can fall
+back to Sol/SDPA without blocking installation, while Maestro verifies the
+required Python, PyTorch, CUDA, Triton, GPU-access, and compute-capability
+contract before publishing the runtime-complete marker.
+
+## [1.8.5] - 2026-08-14
+
+MiniMax-Music3: added native local long-form stereo music generation from a
+structured caption and section-tagged lyrics, with selectable 5-second to
+5-minute runtimes and a two-minute default. The model uses staged single-GPU
+offloading, pinned component downloads, complete-asset validation, and a
+model-aware Studio editor. Its AI song writer now treats the selected duration
+as a hard creative constraint, scaling lyric density, song structure,
+arrangement, transitions, and instrumental space accordingly. Director Music
+Video projects can generate their soundtrack with MiniMax-Music3 or ACE-Step.
+
+Director flexibility: the image-model selector now includes an explicit
+`None — no generated images` choice for every compatible video model. Auto
+projects skip image planning and generation when it is selected, while Manual
+projects can attach an optional image to any individual scene. A user-uploaded
+main image remains the first-frame anchor for Seamless generation even without
+an image generator, and H3 Omni continues to receive the supplied character,
+location, image, and voice references for its clips. Director's aspect ratio,
+resolution, workflow, and video/image model controls now appear before media
+inputs and remain visible after audio analysis. The music and image upload
+areas retain a consistent full-size presentation throughout setup instead of
+collapsing after soundtrack analysis. Setup controls lock when prompt planning
+begins; a pre-planning video-model change rebuilds clip timing while preserving
+uploaded media and analysis. MiniMax H3 First / Last can now run as one native Seamless
+Director timeline with motion and synchronized-audio overlap, exact H3 window
+geometry, and one local prompt assigned to each actual generation pass.
+MiniMax H3 Omni music videos now use the exact source-song timeline as target
+audio conditioning for each native shot and preserve the pristine continuous
+track in the joined result. Director status also replaces draft screenplay
+durations with the model-adapted H3 clip schedule, preventing stale 20-second
+estimates from appearing after the plan has been split below H3's native cap.
+The persistent Director Advanced drawer now exposes Director-owned H3 Turbo,
+Sol Engine, and First Block Cache controls, including managed Turbo checkpoint
+selection and cache threshold/warmup tuning; it no longer displays unrelated
+Studio-owned controls while Director mode is active. Director also hides the
+inapplicable image/audio strength controls for MiniMax H3 and LTX-2.5 and
+normalizes both conditioning strengths to their supported value of 1.0.
+
+LTX long-form generation: increasing total duration once again expands the
+native window toward the model ceiling before adding additional passes, unless
+the user deliberately locks a shorter window. AI-planned LTX sequences now
+treat every pass as an isolated generation request: Maestro repeats persistent
+camera, speed, style, identity, location, lighting, audio, and continuity rules
+while keeping each window's action local. Deterministic reinforcement protects
+seamless one-take and open-ended motion requests from resets, invented cuts,
+premature slowdown, or an unwanted ending.
+
+Generation reliability: corrected LTX-2.5 continuation audio when a generated
+tail is sample-major rather than channel-major, fixing failures after the first
+window and malformed carried audio. Shared attention now normalizes an
+otherwise-invalid BF16 mask / FP32 query combination, fixing LTX-2.5 jobs that
+combine multiple reference images with reference audio. Component-folder
+models verify every required asset before reporting that installation is
+complete. MiniMax H3 Music Video planning now treats source-song vocals as
+mapped driving audio instead of copying transcriptions into scripted dialogue;
+pathological repeated refrains are bounded before LLM planning, and a truncated
+generated dialogue tag can no longer prevent video jobs from being queued.
+Regression coverage now spans the new music, Director, H3, LTX, and mixed-dtype
+reference paths.
+
+## [1.8.1] - 2026-08-13
+
+MiniMax H3 model sharing: linked WanGP installations can now supply their
+pruned FL2VA and Ref2VA rank-8 INT8 ConvRot transformers as load-compatible
+alternatives to Maestro's scaled-FP8 exports. Maestro also resolves the shared
+Qwen3-VL encoder variants from WanGP's folder layout, prefers an exact Maestro
+asset when both exist, detects the checkpoint's QKV layout before loading, and
+prints the source of every H3 component. Differently published VAE artifacts
+remain separate rather than being treated as unsafe duplicates.
+
+Account-free installation: Install no longer starts Pinokio's Hugging Face
+device-login flow. Maestro's default managed models download anonymously from
+public sources. A clearly labeled optional menu action remains available for
+custom gated assets or higher download limits, and missing LTX-2.5 components
+now report the relevant public-download checks instead of incorrectly telling
+users that an account is required.
+
+## [1.8.0] - 2026-08-13
+
+LTX-2.5: added native local support for the official Distilled workflow with
+synchronized audio and WanGP/MMGP memory management. The recommended model
+runs the official eight-step base pass, learned latent upscaling, and
+three-step full-resolution refinement, with persistent model reuse for faster
+follow-up jobs. Optional Dev and NVFP4 variants are available through Settings
+without crowding the default model list, and Advanced offers the fast video
+decoder or optional NAD diffusion decoder.
+
+Complete LTX workflows: LTX-2.5 supports text and image generation, first and
+last frames, timed frame injection, soundtrack and control-video audio
+conditioning, sliding-window continuation, synchronized native audio, and
+compatible LTX-2/2.3 LoRAs from the existing shared LoRA library. The model is
+available to compatible Music Video, Short Film, and seamless Director paths.
+INT8 ConvRot LoRA application now preserves the native linear forwards instead
+of producing noise, and loaded LTX-2.5 profiles remain resident between jobs.
+
+LTX long-form generation: every LTX video family now shares an explicit
+Multi-window Sequence workflow with single-pass, AI-planned, and exact manual
+prompt modes. Maestro computes the real overlap/discard geometry, validates one
+manual prompt per window before loading a model, expands an overall idea into
+chronological window-local prompts, and displays the reviewed prompts in the
+main editor. Full temporal prefix frames and matching audio history now carry
+across LTX-2.5 windows without the distorted seam or motion stall seen in the
+initial implementation.
+
+Audio and saved-settings reliability: corrected generated-audio sample-rate
+handling that could make H3 and LTX sound slowed down, repaired standalone
+soundtrack routing for loaded sidecars, and made audio strength use the actual
+backend parameter. Load Settings now restores LTX window mode and geometry,
+LTX-2.5 decoder choice, H3 Turbo preset, Sol Engine, First Block Cache, text
+encoder, and their associated tuning values instead of leaking the prior
+clip's state.
+
+Runtime and interface polish: compatible RTX 40- and 50-series systems now
+receive the tested Python 3.11 / PyTorch 2.10 / CUDA 13 Sol-capable runtime
+through the normal Install, Update, and Start actions. The Studio sidecar is
+ordered as Duration, inputs or Omni references, H3 Optimizations, then
+Multi-window Sequence. Install, update, reset, recovery, and startup checks
+cover the new runtime and LTX-2.5 assets while retaining safe compatibility
+fallbacks.
+
+## [1.7.5] - 2026-08-11
+
+MiniMax H3 performance controls: added an optional experimental Sol Engine
+sparse-attention path for supported RTX 40- and 50-series GPUs. Studio now
+groups Turbo, Sol Engine, and First Block Cache in one collapsible H3
+Optimizations panel and allows the three accelerators to be used independently
+or together. Unsupported Sol calls fail safely to the normal attention path,
+the startup audit reports runtime readiness, and the first compilation is
+cached for later generations.
+
+Director optimization parity: H3 Director projects now expose the same Turbo
+preset, Sol Engine, and First Block Cache controls as Studio. The selected
+recipe and cache tuning are persisted with the project and applied consistently
+to initial shots, Dashboard regeneration, repair, and resume. Projects saved by
+older Maestro versions remain compatible and default the new options off.
+
+Managed H3 Turbo presets: updated the default to the upstream v4-600 EMA LoRA
+at six steps and strength 1.0, while retaining the earlier v1-500 preset as a
+rollback choice. Managed assets are revision-pinned, size- and SHA-256-verified,
+published atomically, and recorded with local receipts. A scheduled GitHub
+workflow detects upstream repository changes and opens a review issue rather
+than silently replacing a validated adapter.
+
+Runtime and update reliability: the tested Python 3.11 / PyTorch 2.10 / CUDA
+13 runtime is now the standard Install, Update, and Start path on compatible
+RTX 40- and 50-series systems. Existing RTX 40 installs migrate automatically
+to `env-sol` while retaining `env` as an emergency compatibility fallback; the
+separate Sol Start and installer choices are no longer required. Interrupted
+runtime and FlashAttention installs remain resumable, NVIDIA drivers older
+than 580 are handled safely, and RTX 20/30 systems continue to use the existing
+SageAttention path. Bundled Sol sources include pinned upstream provenance and
+Apache-2.0 notices.
+
+## [1.7.2] - 2026-08-11
+
+H3 compatibility fixes: repaired legacy Director and uploaded-media frame
+counts onto H3's native frame lattice without timeline drift. Fixed manual
+First / Last multi-window prompts being repeated wholesale in every window,
+and corrected mixed FP16/FP32 visual conditioning for H3 GGUF text encoders.
+
+## [1.7.1] - 2026-08-10
+
+MiniMax H3 memory stability: fixed a workload inversion where a full-duration
+540p generation could retain too many transformer weights, use oversized
+projection chunks, spill into Windows shared GPU memory, and eventually run
+out of VRAM even though the corresponding 720p job completed normally. H3 now
+blends its measured runtime-workspace requirement smoothly into the residency
+budget as clip load approaches a full native window and uses allocation-safe
+chunks for long sequences. The corrected policy was validated with Full and
+Pruned checkpoints in First / Last and Omni workflows.
+
+## [1.7.0] - 2026-08-10
+
+MiniMax H3 native continuation: First / Last and Omni can now build long
+multi-window sequences while carrying a configurable span of recent video
+motion and matching stereo audio into the next window. Shared Studio controls
+support total duration, one editable prompt per window, optional AI planning,
+and independent hard-cut sequences. The sequence planner now uses a persistent
+story ledger to assign actions, dialogue, camera coverage, sound, and concrete
+handoffs once across the timeline instead of repeating or prematurely
+completing them. Exact-duration assembly and saved runtime prompts keep the
+result reproducible.
+
+H3 source-media workflows: added multiple timed frame injection for FL2VA,
+soundtrack- and control-audio-driven video, video-to-audio generation that
+preserves the source pictures, and video-to-video editing over the whole frame,
+inside a white mask, or outside a white mask with denoise and masking controls.
+Ref2VA music and performance references now advance through the source timeline
+across sequence clips instead of replaying the first segment, while reusable
+voice references retain their intended behavior.
+
+H3 memory and hardware support: window recommendations now account for the
+checkpoint family, output resolution, and detected VRAM, expose the native
+14.4-second ceiling, and allow durable per-combination overrides. Transformer
+residency, activation workspace, streaming VAE decoding, system-RAM ceilings,
+and pageable LoRA fallback were refined for Full and Pruned checkpoints. RTX 50
+/ Blackwell systems now use a dedicated Python 3.11, PyTorch 2.10, CUDA 13
+runtime with compatible acceleration kernels, automatic Update migration,
+startup compatibility diagnostics, and a launcher repair action; earlier RTX
+families retain the established runtime.
+
+Interface and reliability: invalid H3 media, prompt counts, durations, and
+sequence combinations fail before expensive model loading. Omni's mixed-media
+picker no longer prevents valid audio selection on iOS, and file extensions are
+used when mobile document providers report ambiguous MIME types. Output cards
+now report active generation time in minutes and seconds without including
+queue or model-loading time. Regression coverage was expanded across native
+continuation, reference packing, audio offsets, frame injection, video editing,
+memory policy, RTX 50 setup, and the shared multi-window interface.
+
 ## [1.6.5] - 2026-08-08
 
 MiniMax H3 performance and memory: rebalanced transformer residency and

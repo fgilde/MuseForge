@@ -2,7 +2,7 @@ manifestVersion: 1.1
 id: gilde-museforge
 category: ai
 name: MuseForge
-version: "1.6.5"
+version: "1.9.1"
 tagline: Self-hosted AI studio for video, images, audio and audiobooks
 description: >-
   MuseForge generates video, images, audio, long-form text and complete
@@ -34,15 +34,22 @@ description: >-
     downloads its files once, often tens of gigabytes for a video model,
     before anything appears. Later runs start immediately.
 releaseNotes: >-
-  Level with Maestro 1.6.5: MiniMax H3 with native audio-video and
-  VRAM-aware sliding windows, SCAIL-2 Repaint and multi-character Recast,
-  and LTX-2.3 Outpaint.
+  Level with Maestro 1.9.1. A universal queue now spans Studio and Director:
+  work can be held without starting the GPU, reordered, and executed
+  sequentially, and Director saves a full project revision before rendering
+  so a run survives a restart.
 
 
-  On top of that this release makes every MCP tool actually callable — the
-  endpoint listed its tools correctly but deadlocked on invocation — and
-  stops non-ASCII text from being mangled, which affected every story and
-  translation outside English.
+  New models: MiniMax-Music3 for soundtracks, and LTX-2.5. MiniMax H3 gains
+  native motion and audio continuation plus adaptive sequence planning.
+
+
+  Reliability: CivitAI checkpoint downloads are verified against supported
+  architectures before registration, remote OpenAI-compatible LLMs get their
+  own credential and surface the endpoint's rejection reason, and the
+  llama.cpp runtime resolves the current release correctly on a fresh
+  install.
+
 developer: Florian Gilde
 website: https://gilde.org
 dependencies: []

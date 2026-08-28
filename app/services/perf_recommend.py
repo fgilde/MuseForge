@@ -47,6 +47,31 @@ PROFILE_DESCRIPTIONS = {
 }
 
 
+def recommend_h3_reserved_ram_fraction(
+    requested_fraction: float,
+    total_ram_gb: float,
+    *,
+    full_checkpoint: bool,
+) -> float:
+    """Raise MMGP's reserved-RAM ceiling only when H3 Full can fit safely.
+
+    H3 Full's complete pinned working set is roughly 53-55 GB. MMGP's
+    implicit 40% ceiling leaves a 128 GB workstation just short, forcing
+    partial pinning and avoidable CPU/RAM transfers. Reserve a 60 GB ceiling
+    on systems with at least 96 GB RAM, while retaining at least 36 GB for the
+    OS, decoded media, and transient allocations. This is a ceiling, not an
+    eager allocation. Explicit user values always win.
+    """
+    requested = max(0.0, float(requested_fraction or 0.0))
+    ram_gb = max(0.0, float(total_ram_gb or 0.0))
+    if requested > 0.0 or not full_checkpoint or ram_gb < 96.0:
+        return requested
+
+    target_fraction = 60.0 / ram_gb
+    safe_fraction = min(0.65, max(0.50, target_fraction))
+    return round(safe_fraction, 3)
+
+
 def _pick_profile(ram_tier: str, vram_tier: str) -> float:
     """Pick the mmgp profile number for a (ram, vram) tier pair.
 
@@ -353,26 +378,49 @@ _H3_MIN_ACTIVATION_RESERVE_GB = 5.0
 _H3_MAX_WEIGHT_BUDGET_GB = 18.0
 _H3_MIN_WEIGHT_BUDGET_GB = 3.5
 _H3_VIDEO_REFERENCE_RESERVE_GB = 10.0
-# MMGP applies the transformer's fixed ``workingVRAM`` reserve independently,
-# so there is no reason to repeat it for baseline 540p jobs.  Once the packed
-# sequence grows materially beyond that baseline, however, the fixed reserve
-# no longer represents H3's Q/K/V and residual peak. Native 768p x 345 frames
-# is almost 2x the baseline token load and hard-OOMed a 24 GB 4090 while MMGP
-# kept 13.35 GB of weights resident. H3 now routes through the shared
-# allocation-efficient attention backend and bounds projection temporaries.
+# MMGP receives the transformer's fixed ``workingVRAM`` reserve independently,
+# but its preload plan is also constrained by the per-job residency
+# coefficient. Letting the coefficient retain 17 GB at baseline 540p left
+# only 7 GB of actual device headroom and triggered Windows shared-memory
+# paging. Blend the measured workspace into that coefficient as packed load
+# approaches baseline. Native 768p x 345 frames is almost 2x the baseline
+# token load and hard-OOMed a 24 GB 4090 while MMGP kept 13.35 GB of weights
+# resident. H3 also routes through the allocation-efficient attention backend
+# and bounds projection temporaries.
 # A subsequent 1280x704 x 345-frame measurement still filled 24.0/24.6 GB at
 # a 9.9 GB transformer cap, before denoising step zero. Preserve enough room
 # for that measured full-window peak while shorter recommended windows retain
 # more transformer residency and therefore run faster.
-# Begin dynamic residency before the native packed sequence is 25% above
-# baseline. The measured 720p / 243-frame recommendation is already 1.22x;
-# relying on the generic cap there leaves too little real-world allocator
-# margin on display-attached cards.
-_H3_RUNTIME_SCALING_MIN_RATIO = 1.10
+# Blend the measured runtime workspace into the residency cap as a request
+# approaches the native full-window baseline. The previous 1.10x hard gate
+# left only 7 GB outside model residency at exactly 540p / 345 frames, then
+# abruptly reserved more than 12 GB immediately above the gate. On Windows,
+# that made the smaller 540p job spill into shared GPU memory while 720p ran
+# normally. A blended ramp keeps short jobs fast without that inversion.
+_H3_RUNTIME_BLEND_START_RATIO = 0.75
+_H3_RUNTIME_BLEND_FULL_RATIO = 1.0
 _H3_LARGE_CANVAS_MIN_PIXELS = 1_400_000
 _H3_NATIVE_RUNTIME_EXCESS_SCALE = 0.70
 _H3_NATIVE_RUNTIME_SAFETY_MARGIN_GB = 1.0
 _H3_LARGE_CANVAS_RUNTIME_SAFETY_MARGIN_GB = 1.0
+
+# MiniMax-Music3 first runs a 25 Hz autoregressive Qwen stage. Its bf16
+# language-model weights are about 16 GB, the RVQ depth decoder is another
+# 1.2 GB, and a conditional/unconditional KV cache remains resident for the
+# entire requested song. A generic video coefficient cannot see that cache,
+# so a 120-second job on a 20 GB card can try to retain too much Qwen and fail
+# while MMGP is loading the next block. Keep the geometry here model-free so
+# the job planner can reserve the cache before the checkpoint is loaded.
+_MUSIC3_QWEN_LAYERS = 36
+_MUSIC3_QWEN_KV_HEADS = 8
+_MUSIC3_QWEN_HEAD_DIM = 128
+_MUSIC3_CACHE_BYTES_PER_VALUE = 2  # bf16
+_MUSIC3_CFG_BATCH_SIZE = 2
+_MUSIC3_SEMANTIC_FRAMES_PER_SECOND = 25
+_MUSIC3_PROMPT_TOKEN_ALLOWANCE = 1200
+_MUSIC3_NON_CACHE_RUNTIME_RESERVE_GB = 6.75
+_MUSIC3_MAX_WEIGHT_BUDGET_GB = 16.0
+_MUSIC3_MIN_WEIGHT_BUDGET_GB = 3.5
 
 
 def _parse_resolution(resolution) -> Optional[tuple]:
@@ -418,11 +466,12 @@ def compute_h3_weight_budget(
     step.  The same class of jobs had worked under the old incidental
     two-stage reserve at roughly a 17.5 GB cap.
 
-    ``runtime_workspace_gb`` is MMGP's transformer's fixed working-VRAM
-    allowance. It is already supplied to MMGP independently, so baseline jobs
-    do not count it twice. When packed-token load materially exceeds the
-    baseline, the excess is scaled to cover the larger Q/K/V and residual
-    tensors. Native canvases use partial scaling to retain useful model
+    ``runtime_workspace_gb`` is MMGP's transformer's measured working-VRAM
+    allowance. MMGP receives it independently, while this function also uses
+    it to keep the residency coefficient from occupying that same device
+    headroom. The allowance blends in near the baseline rather than penalizing
+    short previews, then scales to cover larger Q/K/V and residual tensors.
+    Native canvases use partial excess scaling to retain useful model
     residency; experimental large canvases retain the stricter measured
     scaling that prevents the observed 1080p OOM.
 
@@ -475,20 +524,37 @@ def compute_h3_weight_budget(
         runtime_workspace_gb = max(0.0, float(runtime_workspace_gb or 0.0))
     except (TypeError, ValueError):
         runtime_workspace_gb = 0.0
-    runtime_scaling_active = (
-        runtime_workspace_gb > 0.0
-        and compute_ratio >= _H3_RUNTIME_SCALING_MIN_RATIO
-    )
     large_canvas = pixels >= _H3_LARGE_CANVAS_MIN_PIXELS
     runtime_excess_scale = (
         1.0 if large_canvas else _H3_NATIVE_RUNTIME_EXCESS_SCALE
     )
-    scaled_runtime_workspace_gb = (
-        runtime_workspace_gb
-        * (1.0 + (compute_ratio - 1.0) * runtime_excess_scale)
-        if runtime_scaling_active
-        else 0.0
-    )
+    scaled_runtime_workspace_gb = 0.0
+    runtime_blend = 0.0
+    if runtime_workspace_gb > 0.0 and compute_ratio > _H3_RUNTIME_BLEND_START_RATIO:
+        runtime_blend = min(
+            1.0,
+            max(
+                0.0,
+                (compute_ratio - _H3_RUNTIME_BLEND_START_RATIO)
+                / (
+                    _H3_RUNTIME_BLEND_FULL_RATIO
+                    - _H3_RUNTIME_BLEND_START_RATIO
+                ),
+            ),
+        )
+        raw_runtime_workspace_gb = runtime_workspace_gb * (
+            compute_ratio
+            if compute_ratio <= 1.0
+            else 1.0 + (compute_ratio - 1.0) * runtime_excess_scale
+        )
+        if runtime_blend < 1.0:
+            # Meet the analytical reserve continuously at the beginning of
+            # the ramp instead of introducing another piecewise jump.
+            scaled_runtime_workspace_gb = base_reserve_gb + (
+                raw_runtime_workspace_gb - base_reserve_gb
+            ) * runtime_blend
+        else:
+            scaled_runtime_workspace_gb = raw_runtime_workspace_gb
     try:
         additional_reserve_gb = max(0.0, float(additional_reserve_gb or 0.0))
     except (TypeError, ValueError):
@@ -499,20 +565,24 @@ def compute_h3_weight_budget(
     # margin; native canvases use a smaller one to preserve useful residency.
     runtime_safety_margin_gb = 0.0
     if scaled_runtime_workspace_gb > 0:
-        runtime_safety_margin_gb = (
+        runtime_safety_margin_gb = runtime_blend * (
             _H3_LARGE_CANVAS_RUNTIME_SAFETY_MARGIN_GB
             if large_canvas
             else _H3_NATIVE_RUNTIME_SAFETY_MARGIN_GB
         )
     # The analytical reserve already includes any reference-video surcharge.
-    # Treat the runtime measurement as a lower bound rather than adding it a
-    # second time.  At the ordinary H3 canvas this mirrors MMGP's workingVRAM
-    # cap; at 1080p it tightens model residency in proportion to the larger
-    # packed sequence.
+    # Treat the runtime measurement as an alternative lower bound rather than
+    # adding both estimates together. At 1080p it tightens model residency in
+    # proportion to the larger packed sequence.
+    analytical_reserve_gb = base_reserve_gb + reference_reserve_gb
+    runtime_reserve_gb = (
+        scaled_runtime_workspace_gb + runtime_safety_margin_gb
+    )
+    runtime_scaling_active = runtime_reserve_gb > analytical_reserve_gb
     requested_reserve_gb = max(
-        base_reserve_gb + reference_reserve_gb,
-        scaled_runtime_workspace_gb,
-    ) + runtime_safety_margin_gb + additional_reserve_gb
+        analytical_reserve_gb,
+        runtime_reserve_gb,
+    ) + additional_reserve_gb
 
     # Always leave enough room to stream at least a small transformer slice.
     max_reserve_gb = max(0.0, total_vram_gb - _H3_MIN_WEIGHT_BUDGET_GB)
@@ -531,6 +601,78 @@ def compute_h3_weight_budget(
         "runtime_scaling_active": runtime_scaling_active,
         "runtime_safety_margin_gb": runtime_safety_margin_gb,
         "additional_reserve_gb": additional_reserve_gb,
+    }
+
+
+def compute_music3_weight_budget(
+    total_vram_gb: float,
+    duration_seconds: float,
+    prompt_token_allowance: int = _MUSIC3_PROMPT_TOKEN_ALLOWANCE,
+) -> dict:
+    """Reserve Music3 semantic-cache and runtime VRAM before model loading.
+
+    Music3 uses classifier-free guidance during its autoregressive Qwen pass,
+    so every prompt and generated 25 Hz semantic token retains key/value
+    tensors for a batch of two across all 36 layers. The fixed reserve also
+    covers the co-resident RVQ depth decoder, Qwen workspaces, MMGP's async
+    shuttle, allocator fragmentation, and display/driver headroom.
+
+    The returned weight budget is an absolute MMGP residency cap. Weights
+    beyond it are streamed from reserved RAM; later Music3 stages are smaller
+    than Qwen and therefore remain unaffected by the cap.
+    """
+
+    try:
+        total_vram_gb = max(0.0, float(total_vram_gb or 0.0))
+    except (TypeError, ValueError):
+        total_vram_gb = 0.0
+    try:
+        duration_seconds = min(300.0, max(5.0, float(duration_seconds or 120.0)))
+    except (TypeError, ValueError):
+        duration_seconds = 120.0
+    try:
+        prompt_tokens = max(1, int(prompt_token_allowance or 0))
+    except (TypeError, ValueError):
+        prompt_tokens = _MUSIC3_PROMPT_TOKEN_ALLOWANCE
+
+    semantic_tokens = max(
+        1,
+        int(duration_seconds * _MUSIC3_SEMANTIC_FRAMES_PER_SECOND),
+    )
+    cache_bytes = (
+        2  # key and value
+        * _MUSIC3_QWEN_LAYERS
+        * _MUSIC3_QWEN_KV_HEADS
+        * _MUSIC3_QWEN_HEAD_DIM
+        * _MUSIC3_CACHE_BYTES_PER_VALUE
+        * _MUSIC3_CFG_BATCH_SIZE
+        * (prompt_tokens + semantic_tokens)
+    )
+    kv_cache_gb = cache_bytes / float(1024**3)
+    runtime_reserve_gb = _MUSIC3_NON_CACHE_RUNTIME_RESERVE_GB + kv_cache_gb
+
+    if total_vram_gb <= 0.0:
+        weight_budget_gb = 0.0
+    else:
+        max_reserve_gb = max(
+            0.0,
+            total_vram_gb - _MUSIC3_MIN_WEIGHT_BUDGET_GB,
+        )
+        runtime_reserve_gb = min(runtime_reserve_gb, max_reserve_gb)
+        weight_budget_gb = min(
+            _MUSIC3_MAX_WEIGHT_BUDGET_GB,
+            max(
+                _MUSIC3_MIN_WEIGHT_BUDGET_GB,
+                total_vram_gb - runtime_reserve_gb,
+            ),
+        )
+
+    return {
+        "weight_budget_gb": weight_budget_gb,
+        "runtime_reserve_gb": runtime_reserve_gb,
+        "kv_cache_gb": kv_cache_gb,
+        "duration_seconds": duration_seconds,
+        "prompt_token_allowance": prompt_tokens,
     }
 
 
