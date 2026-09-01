@@ -127,11 +127,15 @@ Build notes:
 - The first generation on each model downloads its weights (the default video model
   is ~18 GB); only requested models are fetched.
 
-**NAS app stores.** Ready-made templates live in
-[packaging/](packaging/): a Community Applications template for **Unraid**,
-and a community-app-store layout for **Umbrel**. Read
+**NAS app stores.** Each store reads its package from a fixed place, so that is
+where they sit: [`templates/museforge.xml`](templates/museforge.xml) plus
+`ca_profile.xml` for **Unraid**, [`gilde-museforge/`](gilde-museforge/) beside
+`umbrel-app-store.yml` for **Umbrel**, and [`store/casaos/`](store/casaos/) and
+[`store/cosmos/`](store/cosmos/) for **CasaOS** and **Cosmos**. Read
 [packaging/README.md](packaging/README.md) first — the GHCR package has to be
-public before either can install anything.
+public before any of them can install anything, and every one of them needs an
+NVIDIA GPU on the host, which is why none of these are submitted to the stores
+themselves.
 
 Manual (non-Docker) install: Python 3.10 venv + torch 2.10/cu128 +
 `app/requirements.txt`, clone the seed-vc component, build `ui/`, run

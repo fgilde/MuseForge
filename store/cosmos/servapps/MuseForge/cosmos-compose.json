@@ -1,0 +1,68 @@
+{
+  "cosmos-installer": {
+    "form": [
+      {
+        "name": "apiToken",
+        "label": "API token for /api and /mcp (leave empty to require none)",
+        "initialValue": "",
+        "type": "password"
+      }
+    ]
+  },
+  "minVersion": "0.13.0",
+  "services": {
+    "{ServiceName}": {
+      "image": "ghcr.io/fgilde/museforge:latest",
+      "container_name": "{ServiceName}",
+      "restart": "unless-stopped",
+      "environment": [
+        "TZ=auto",
+        "HF_HOME=/data/huggingface",
+        "NVIDIA_VISIBLE_DEVICES=all",
+        "NVIDIA_DRIVER_CAPABILITIES=compute,utility,video",
+        "MUSEFORGE_API_TOKEN={Context.apiToken}"
+      ],
+      "labels": {
+        "cosmos-auto-update": "true",
+        "cosmos-icon": "https://azukaar.github.io/cosmos-servapps-official/servapps/MuseForge/icon.png"
+      },
+      "volumes": [
+        {
+          "source": "{ServiceName}-config",
+          "target": "/data/config",
+          "type": "volume"
+        },
+        {
+          "source": "{ServiceName}-huggingface",
+          "target": "/data/huggingface",
+          "type": "volume"
+        },
+        {
+          "source": "{ServiceName}-ckpts",
+          "target": "/workspace/app/ckpts",
+          "type": "volume"
+        },
+        {
+          "source": "{ServiceName}-outputs",
+          "target": "/workspace/app/outputs",
+          "type": "volume"
+        }
+      ],
+      "routes": [
+        {
+          "name": "{ServiceName}",
+          "description": "Expose {ServiceName} to the web",
+          "useHost": true,
+          "target": "http://{ServiceName}:7860",
+          "mode": "SERVAPP",
+          "Timeout": 14400000,
+          "ThrottlePerMinute": 12000,
+          "BlockCommonBots": true,
+          "SmartShield": {
+            "Enabled": true
+          }
+        }
+      ]
+    }
+  }
+}

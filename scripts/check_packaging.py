@@ -21,9 +21,15 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGE = "ghcr.io/fgilde/museforge:latest"
-UNRAID = os.path.join(ROOT, "packaging", "unraid", "museforge.xml")
-UMBREL = os.path.join(ROOT, "packaging", "umbrel")
-APP_DIR = os.path.join(UMBREL, "gilde-museforge")
+PORT = 7860
+# Each store reads from a fixed place in the repository, so that is where the files live: Umbrel
+# wants umbrel-app-store.yml and the app directory at the root, Community Applications wants
+# ca_profile.xml and templates/, and the two that take a pull request are packaged under store/.
+UNRAID = os.path.join(ROOT, "templates", "museforge.xml")
+UMBREL = ROOT
+APP_DIR = os.path.join(ROOT, "gilde-museforge")
+CASAOS = os.path.join(ROOT, "store", "casaos", "Apps", "MuseForge", "docker-compose.yml")
+COSMOS = os.path.join(ROOT, "store", "cosmos", "servapps", "MuseForge", "cosmos-compose.json")
 
 
 def _yaml(path: str) -> dict:
@@ -153,6 +159,29 @@ def check() -> list[str]:
     if "GPU" not in (app.get("permissions") or []):
         problems.append("umbrel: permissions should declare GPU")
 
+    # -- CasaOS and Cosmos -----------------------------------------------
+    # The same two mistakes are worth catching here: an image that no longer matches what CI
+    # publishes, and a package that quietly drops the GPU an app cannot run without.
+    with open(CASAOS, encoding="utf-8") as handle:
+        casaos = handle.read()
+    if IMAGE not in casaos:
+        problems.append(f"casaos: compose does not use {IMAGE}")
+    if "driver: nvidia" not in casaos:
+        problems.append("casaos: compose does not reserve an nvidia device")
+    if f'port_map: "{PORT}"' not in casaos:
+        problems.append(f"casaos: port_map is not {PORT}")
+
+    import json as _json
+    with open(COSMOS, encoding="utf-8") as handle:
+        cosmos = _json.load(handle)
+    service = cosmos["services"]["{ServiceName}"]
+    if service.get("image") != IMAGE:
+        problems.append(f"cosmos: image is {service.get('image')!r}, expected {IMAGE!r}")
+    if not any(one.startswith("NVIDIA_VISIBLE_DEVICES=") for one in service.get("environment", [])):
+        problems.append("cosmos: the service does not ask for a GPU")
+    if service["routes"][0]["target"] != f"http://{{ServiceName}}:{PORT}":
+        problems.append(f"cosmos: the route does not point at port {PORT}")
+
     return problems
 
 
@@ -161,9 +190,9 @@ def main() -> int:
     for one in problems:
         print(f"  {one}")
     if problems:
-        print(f"\n{len(problems)} problem(s) in packaging/")
+        print(f"\n{len(problems)} problem(s) in the store packages")
         return 1
-    print("packaging: Umbrel and Unraid templates are consistent")
+    print("store packages: Umbrel, Unraid, CasaOS and Cosmos are consistent")
     return 0
 
 

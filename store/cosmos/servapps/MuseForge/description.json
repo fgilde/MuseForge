@@ -1,0 +1,24 @@
+{
+  "name": "MuseForge",
+  "description": "Self-hosted AI studio for video, images, audio and audiobooks Generates video, images, audio, long-form text and complete audiobooks on your own GPU. Requires an NVIDIA card.",
+  "longDescription": "<p>MuseForge generates video, images, audio, long-form text and complete audiobooks on your own hardware. Nothing is sent to a cloud service.</p><p>Beyond single generations there is a Director mode that plans a whole music video or short film from one sentence, a Storywriter for novel-length prose with translation and a continuity audit, and an audiobook producer that turns a document into spoken chapters with a voice per character. Everything the web interface can do is also a REST API, and a built-in MCP endpoint lets an AI agent drive it directly.</p><p><strong>Hardware:</strong> an NVIDIA GPU with at least 6 GB of VRAM and the NVIDIA Container Toolkit on the host. There is no AMD, Apple Silicon or CPU-only mode. Model weights are 50-300 GB depending on which models are used.</p>",
+  "tags": [
+    "ai",
+    "video",
+    "image generation",
+    "audio",
+    "text to speech",
+    "audiobook",
+    "gpu",
+    "nvidia",
+    "stable diffusion",
+    "llm",
+    "mcp",
+    "self-hosted"
+  ],
+  "repository": "https://github.com/fgilde/MuseForge",
+  "image": "https://github.com/fgilde/MuseForge/pkgs/container/museforge",
+  "supported_architectures": [
+    "amd64"
+  ]
+}

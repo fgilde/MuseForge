@@ -1,0 +1,137 @@
+name: museforge
+services:
+  museforge:
+    image: ghcr.io/fgilde/museforge:latest
+    container_name: museforge
+    restart: unless-stopped
+    network_mode: bridge
+    ports:
+      - target: 7860
+        published: "7860"
+        protocol: tcp
+    environment:
+      TZ: $TZ
+      HF_HOME: /data/huggingface
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    volumes:
+      - type: bind
+        source: /DATA/AppData/$AppID/config
+        target: /data/config
+      - type: bind
+        source: /DATA/AppData/$AppID/huggingface
+        target: /data/huggingface
+      - type: bind
+        source: /DATA/AppData/$AppID/ckpts
+        target: /workspace/app/ckpts
+      - type: bind
+        source: /DATA/AppData/$AppID/loras
+        target: /workspace/app/loras
+      - type: bind
+        source: /DATA/AppData/$AppID/outputs
+        target: /workspace/app/outputs
+      - type: bind
+        source: /DATA/AppData/$AppID/uploads
+        target: /workspace/app/uploads
+    deploy:
+      resources:
+        reservations:
+          memory: "8G"
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    x-casaos:
+      envs:
+        - container: HF_HOME
+          description:
+            en_US: "Where downloaded model weights are cached. Tens to hundreds of gigabytes."
+        - container: MUSEFORGE_API_TOKEN
+          description:
+            en_US: "Optional. When set, /api and /mcp require Authorization: Bearer with this value."
+        - container: NVIDIA_VISIBLE_DEVICES
+          description:
+            en_US: "Which GPUs the studio may use. all, or a comma-separated list."
+        - container: TZ
+          description:
+            en_US: "Time zone."
+      ports:
+        - container: "7860"
+          description:
+            en_US: Web UI
+      volumes:
+        - container: /workspace/app/outputs
+          description:
+            en_US: "Generated video, images and audio."
+        - container: /workspace/app/ckpts
+          description:
+            en_US: "Model weights. 50-300 GB depending on which models are used."
+        - container: /data/config
+          description:
+            en_US: "Settings, voices, blueprints and the job history."
+
+x-casaos:
+  id: org.gilde.museforge
+  architectures:
+    - amd64
+  main: museforge
+  author: gilde.org
+  developer: gilde.org
+  category: AI
+  title:
+    en_US: MuseForge
+  tagline:
+    en_US: "Self-hosted AI studio for video, images, audio and audiobooks"
+    de_DE: "Selbst gehostetes KI-Studio fuer Video, Bild, Ton und Hoerbuecher"
+  description:
+    en_US: |
+      MuseForge generates video, images, audio, long-form text and complete audiobooks on
+      your own hardware. Nothing is sent to a cloud service.
+
+      Beyond single generations there is a Director mode that plans a whole music video or
+      short film from one sentence, a Storywriter for novel-length prose with translation and a
+      continuity audit, and an audiobook producer that turns a document into spoken chapters
+      with a voice per character. Everything the web interface can do is also a REST API, and a
+      built-in MCP endpoint lets an AI agent drive it directly.
+
+      READ THIS BEFORE INSTALLING. It needs an NVIDIA GPU with at least 6 GB of VRAM and the
+      NVIDIA Container Toolkit on the host. There is no AMD, Apple Silicon or CPU-only mode.
+      Model weights are 50-300 GB depending on which models you use, and they land in the data
+      directory - point it at a disk that has the room.
+    de_DE: |
+      MuseForge erzeugt Video, Bilder, Ton, lange Texte und komplette Hoerbuecher auf der
+      eigenen Hardware. Nichts geht an einen Cloud-Dienst.
+
+      Ueber einzelne Generierungen hinaus gibt es einen Director-Modus, der aus einem Satz ein
+      ganzes Musikvideo oder einen Kurzfilm plant, einen Storywriter fuer Prosa in Romanlaenge
+      mit Uebersetzung und Kontinuitaetspruefung, und eine Hoerbuch-Produktion, die aus einem
+      Dokument gesprochene Kapitel mit einer Stimme je Figur macht. Alles, was die Oberflaeche
+      kann, ist auch eine REST-API; ein eingebauter MCP-Endpunkt laesst KI-Agenten direkt damit
+      arbeiten.
+
+      VOR DER INSTALLATION LESEN. Noetig sind eine NVIDIA-GPU mit mindestens 6 GB VRAM und das
+      NVIDIA Container Toolkit auf dem Host. Es gibt keinen AMD-, Apple-Silicon- oder Nur-CPU-
+      Modus. Die Modellgewichte belegen je nach Auswahl 50-300 GB im Datenverzeichnis - also
+      eine Platte waehlen, die das hergibt.
+  tips:
+    before_install:
+      en_US: |
+        This needs an NVIDIA GPU with at least 6 GB of VRAM and the NVIDIA Container Toolkit
+        installed on the host; without both the container will not start. Model weights are
+        50-300 GB and go into the data directory, so put that on a disk with room. Set
+        MUSEFORGE_API_TOKEN if anything outside this device should reach the API or the MCP
+        endpoint.
+  icon: https://raw.githubusercontent.com/fgilde/MuseForge/main/store/casaos/Apps/MuseForge/icon.png
+  thumbnail: https://raw.githubusercontent.com/fgilde/MuseForge/main/store/casaos/Apps/MuseForge/thumbnail.png
+  screenshot_link:
+    - https://raw.githubusercontent.com/fgilde/MuseForge/main/store/casaos/Apps/MuseForge/screenshot-1.png
+    - https://raw.githubusercontent.com/fgilde/MuseForge/main/store/casaos/Apps/MuseForge/screenshot-2.png
+    - https://raw.githubusercontent.com/fgilde/MuseForge/main/store/casaos/Apps/MuseForge/screenshot-3.png
+  index: /
+  port_map: "7860"
+  scheme: http
+  version: "1.9.1"
+  website: https://fgilde.github.io/MuseForge/
+  repo: https://github.com/fgilde/MuseForge
+  support: https://github.com/fgilde/MuseForge/issues
+  docs: https://fgilde.github.io/MuseForge/

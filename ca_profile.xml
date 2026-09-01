@@ -1,0 +1,19 @@
+<CommunityApplications>
+  <Profile>
+    **MuseForge** - a self-hosted AI studio for video, images, audio, long-form text and audiobooks.
+
+    Everything is generated on your own hardware; nothing is sent to a cloud service. Besides direct
+    generation there is a Director mode that plans a whole music video or short film from one
+    sentence, a Storywriter for novel-length prose with translation and a continuity audit, and an
+    audiobook producer that turns a document into spoken chapters with a voice per character. The
+    web interface is also a REST API, and a built-in MCP endpoint lets AI agents drive it.
+
+    Hardware, before you install: an NVIDIA GPU with at least 6 GB of VRAM and the NVIDIA Container
+    Toolkit on the host. There is no AMD, Apple Silicon or CPU-only mode. Model weights are 50-300 GB
+    depending on which models you use, so give the appdata share room.
+
+    Support: https://github.com/fgilde/MuseForge/issues
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/fgilde/MuseForge/main/docs/logo.png</Icon>
+  <WebPage>https://fgilde.github.io/MuseForge/</WebPage>
+</CommunityApplications>

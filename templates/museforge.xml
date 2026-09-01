@@ -6,7 +6,7 @@
   <GitHub>https://github.com/fgilde/MuseForge</GitHub>
   <Project>https://fgilde.github.io/MuseForge/</Project>
   <Support>https://github.com/fgilde/MuseForge/issues</Support>
-  <TemplateURL>https://raw.githubusercontent.com/fgilde/MuseForge/main/packaging/unraid/museforge.xml</TemplateURL>
+  <TemplateURL>https://raw.githubusercontent.com/fgilde/MuseForge/main/templates/museforge.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/fgilde/MuseForge/main/docs/logo.png</Icon>
   <Beta>False</Beta>
   <Category>MediaApp:Video MediaApp:Music Productivity:</Category>
