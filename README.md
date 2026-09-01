@@ -18,6 +18,8 @@
   <img src="docs/screenshots/studio.png" alt="MuseForge Studio" width="100%" />
 </p>
 
+[![QuickRun](https://quickrun.org/badge.svg)](https://quickrun.org/run?repo=fgilde/MuseForge)
+
 ---
 
 > **Heritage:** MuseForge is a fork of [Maestro](https://github.com/Blizaine/Maestro) by
