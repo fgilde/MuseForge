@@ -168,13 +168,13 @@ print(f"[MuseForge] WanGP loaded: {len(wgp.displayed_model_types)} models availa
 # stored under app/settings (already gitignored), never in a MuseForge cloud
 # account. Creating them is cheap and does not require Tailscale or Web Push to
 # be installed/enabled.
-_museforge_settings_dir = os.path.join(_app_dir, "settings")
-_web_push = WebPushService(_museforge_settings_dir)
+_maestro_settings_dir = os.path.join(_app_dir, "settings")
+_web_push = WebPushService(_maestro_settings_dir)
 try:
-    _museforge_server_port = int(os.environ.get("SERVER_PORT", "7860"))
+    _maestro_server_port = int(os.environ.get("SERVER_PORT", "7860"))
 except (TypeError, ValueError):
-    _museforge_server_port = 7860
-_tailscale = TailscaleManager(_museforge_settings_dir, _museforge_server_port)
+    _maestro_server_port = 7860
+_tailscale = TailscaleManager(_maestro_settings_dir, _maestro_server_port)
 
 # WanGP's legacy notifier fires at low-level output boundaries, which means a
 # multi-window generation or Director project can chime once per internal

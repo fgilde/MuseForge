@@ -2049,6 +2049,7 @@ def _ensure_library_symlinks(bin_dir: str) -> int:
     itself instead of needing a manual delete. Returns the number of links
     created.
     """
+    import shutil   # local: only this repair path copies files
     import re
 
     if not os.path.isdir(bin_dir):
