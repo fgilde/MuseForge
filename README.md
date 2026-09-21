@@ -30,7 +30,7 @@
 > (currently **Maestro 2.3.0**), so you can tell at a glance how current it is.
 
 Deploy it anywhere with one `docker compose up`, then use it from the browser or
-let an agent drive it over MCP. 197 generation models, an LLM-planned Director
+let an agent drive it over MCP. 205 generation models, an LLM-planned Director
 mode, a long-form Storywriter and a full audiobook producer — one Docker image.
 
 ## Why a separate tool?
@@ -44,7 +44,7 @@ somewhere else — **infrastructure and long-form work instead of a desktop app*
 - **Docker-first.** One `docker compose up` on any CUDA box. No launcher, no Python
   setup, no per-machine install scripts. Prebuilt images ship from GHCR via CI, and
   all state (weights, LoRAs, outputs, settings) lives in named volumes.
-- **Everything is an API.** 192 REST endpoints under `/api/v1` with interactive
+- **Everything is an API.** 246 REST endpoints under `/api/v1` with interactive
   OpenAPI docs — the UI is a client, not the only way in.
 - **Agents are first-class.** A native **MCP endpoint** at `/mcp` exposes **76
   tools**: list models, submit and poll jobs, fetch outputs, write a story, build an
@@ -144,8 +144,9 @@ the exact steps.
 
 ## Using it
 
-- **Studio** — direct control: pick a model (LTX-2.5, Wan, Hunyuan, Flux, Qwen,
-  MiniMax H3, MiniMax-Music3, SCAIL-2, ACE-Step, TTS, …), prompt, LoRAs, advanced
+- **Studio** — direct control: pick a model (LTX-2.5, Wan, Hunyuan, Flux,
+  Qwen Image 2.1, MiniMax H3, YuE2, MiniMax-Music3, SCAIL-2, Viggle Animate,
+  ACE-Step, TTS, …), prompt, LoRAs, advanced
   knobs, hit **Forge**. Work can be queued and held instead of started at once.
 - **Director** — describe a music video or short film; a local LLM plans shots,
   writes prompts per model, generates start frames and runs the full multi-clip
