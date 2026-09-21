@@ -13,6 +13,7 @@ import { PreflightBanner } from './components/PreflightBanner'
 import { WelcomeModal } from './components/WelcomeModal'
 import { ActivityPanel } from './components/ActivityPanel'
 import { RecipesOverlay } from './components/Recipes/RecipesOverlay'
+import { MaestroBrand } from './components/AppModeNavigation'
 import { GlobalQueuePopover } from './components/GlobalQueuePopover'
 import { NotificationCoordinator } from './components/NotificationCoordinator'
 import { NotificationToastHost } from './components/NotificationToastHost'
@@ -22,7 +23,6 @@ import { useStore } from './stores/useStore'
 import { useIsMobile } from './lib/useIsMobile'
 
 function App() {
-  const appVersion = useStore(s => s.systemConfig?.app_version)
   const loadModels = useStore(s => s.loadModels)
   const loadOutputs = useStore(s => s.loadOutputs)
   const loadWorkspaces = useStore(s => s.loadWorkspaces)
@@ -70,15 +70,7 @@ function App() {
           >
             <Menu size={20} />
           </button>
-          <div className="flex items-center gap-2">
-            <img
-              src="/museforge-icon.png"
-              alt=""
-              className="w-7 h-7 rounded-lg"
-            />
-            <span className="font-semibold text-sm">MuseForge</span>
-            {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
-          </div>
+          <MaestroBrand />
           <div className="justify-self-end flex items-center gap-0.5">
             <GlobalQueuePopover iconSize={20} panelAlign="header-edge" />
             <button

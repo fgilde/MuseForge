@@ -19,7 +19,7 @@ export function MaestroBrand({
   return (
     <div className={`flex shrink-0 items-center gap-2 ${className}`}>
       <img
-        src="/maestro-home-icon-orange.png"
+        src="/museforge-icon.png"
         alt=""
         className={`${compact ? 'h-7 w-7 rounded-[7px]' : 'h-8 w-8 rounded-lg'} shrink-0`}
       />

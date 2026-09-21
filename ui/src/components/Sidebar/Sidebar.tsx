@@ -54,7 +54,6 @@ function inputRevealBounds(input: HTMLElement) {
 }
 
 export function Sidebar() {
-  const appVersion = useStore(s => s.systemConfig?.app_version)
   const toggleSettings = useStore(s => s.toggleSettings)
   const generationMode = useStore(s => s.generationMode)
   const imageMode = useStore(s => s.params.image_mode)
@@ -344,11 +343,7 @@ export function Sidebar() {
           className={`maestro-sidebar fixed top-0 h-dvh w-[380px] max-w-[94vw] bg-bg-secondary border-r border-border z-50 flex flex-col transition-[left] duration-300 ease-in-out ${sidebarOpen ? 'left-0' : '-left-full'}`}>
           {/* Header */}
           <div className="shrink-0 px-4 py-3 border-b border-border flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <img src="/museforge-icon.png" alt="" className="w-7 h-7 rounded-lg" />
-              <span className="font-semibold text-sm">MuseForge</span>
-              {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
-            </div>
+            <MaestroBrand compact />
             <div className="flex items-center gap-1.5">
               <AppModeToggle size="sm" />
               <button
@@ -372,11 +367,6 @@ export function Sidebar() {
       {/* Header */}
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
         <MaestroBrand />
-        <div className="flex items-center gap-2">
-          <img src="/museforge-icon.png" alt="" className="w-7 h-7 rounded-lg" />
-          <span className="font-semibold text-sm">MuseForge</span>
-              {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
-        </div>
         <div className="flex items-center gap-2">
           <AppModeToggle />
           <button
