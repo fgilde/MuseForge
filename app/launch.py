@@ -29007,7 +29007,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         # Keep the text, not just print it: this IS the reason
                         # the job failed, and the finish below has to report it
                         # instead of falling back to "no reason given".
-                        stream_error = str(data or "").strip() or stream_error
+                        if str(data or "").strip():
+                            stream_error = str(data).strip()
                         update_job(job, error=str(data), message=f"Error: {data}")
                     elif cmd == "progress":
                         if isinstance(data, list) and len(data) >= 2:
@@ -30188,6 +30189,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                                   "reason. Check the server log for the traceback.")
             else:
                 failure_reason = "Generation failed"
+            if not success:
+                update_job(job, error=failure_reason)
             finish_job(
                 job,
                 "completed" if success else "failed",
@@ -30195,8 +30198,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 step=0,
                 total_steps=0,
                 phase="",
-                message="Done" if success else f"Failed: {failure_reason}",
-                **({} if success else {"error": failure_reason}),
+                message="Done" if success else f"Error: {job['error']}" if job.get("error") else "Generation failed",
             )
             return success and job.get("status") == "completed"
 

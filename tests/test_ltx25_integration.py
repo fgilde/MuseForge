@@ -5,6 +5,8 @@ import importlib.util
 import json
 import sys
 import unittest
+
+from _fork import missing_launcher_files
 from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
@@ -435,12 +437,14 @@ class LTX25HandlerTests(unittest.TestCase):
         self.assertIn("dtype=q.dtype", sdpa_block)
 
     def test_obsolete_sidecar_is_not_advertised_or_updated(self):
-        launcher = PINOKIO_PATH.read_text(encoding="utf-8")
-        updater = UPDATE_PATH.read_text(encoding="utf-8")
+        # The handler half applies everywhere; the launcher half has nothing
+        # to assert against in this fork, which ships no Pinokio scripts.
         handler = HANDLER_PATH.read_text(encoding="utf-8")
-        self.assertNotIn("ltx25_install", launcher)
-        self.assertNotIn("install_ltx25_runtime", updater)
         self.assertNotIn("external_runtime", handler)
+        if missing_launcher_files("pinokio.js", "update.js"):
+            self.skipTest("no Pinokio launcher in this fork")
+        self.assertNotIn("ltx25_install", PINOKIO_PATH.read_text(encoding="utf-8"))
+        self.assertNotIn("install_ltx25_runtime", UPDATE_PATH.read_text(encoding="utf-8"))
 
     def test_video_vae_choice_is_exposed_and_sent_to_generation(self):
         launch = LAUNCH_PATH.read_text(encoding="utf-8")
