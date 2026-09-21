@@ -3,6 +3,7 @@ import { useStore } from '../../stores/useStore'
 import { SystemSettingsPanel } from './SystemSettingsPanel'
 import { ServicesSettingsPanel } from './ServicesSettingsPanel'
 import { McpPanel } from './McpPanel'
+import { NotificationSettingsPanel } from './NotificationSettingsPanel'
 
 export const PROJECT_LINKS = {
   repo: 'https://github.com/fgilde/MuseForge',
@@ -11,14 +12,15 @@ export const PROJECT_LINKS = {
 } as const
 
 /**
- * Settings dialog — global panel for hardware/perf and external-service
- * configuration, presented as a centered animated glass modal. Two tabs
- * in both Studio and Director modes:
+ * Settings drawer — global panel for hardware/perf, external-service,
+ * notification and API/MCP configuration in both Studio and Director modes:
+
  *
  *   Performance    — VRAM coefficient, profile, hardware tier, etc.
  *                    (mounts <SystemSettingsPanel />)
  *   Integrations   — LLM provider, API keys, NSFW master gate, etc.
  *                    (mounts <ServicesSettingsPanel />)
+ *   Notifications  — browser alerts, device chime, host-computer sound.
  *
  * The dialog stays mounted and animates via opacity/scale so opening
  * feels instant and closing doesn't unmount mid-edit; pointer-events
@@ -33,6 +35,7 @@ export function SettingsDrawer() {
   const tabs = [
     { id: 'performance' as const, label: 'System' },
     { id: 'integrations' as const, label: 'Connections' },
+    { id: 'notifications' as const, label: 'Notifications' },
     { id: 'api' as const, label: 'API & MCP' },
   ]
 
@@ -90,6 +93,10 @@ export function SettingsDrawer() {
 
           {settingsTab === 'integrations' && (
             <ServicesSettingsPanel />
+          )}
+
+          {settingsTab === 'notifications' && (
+            <NotificationSettingsPanel />
           )}
 
           {settingsTab === 'api' && (

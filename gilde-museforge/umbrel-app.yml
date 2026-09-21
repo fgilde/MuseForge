@@ -2,7 +2,7 @@ manifestVersion: 1.1
 id: gilde-museforge
 category: ai
 name: MuseForge
-version: "1.9.1"
+version: "2.3.0"
 tagline: Self-hosted AI studio for video, images, audio and audiobooks
 description: >-
   MuseForge generates video, images, audio, long-form text and complete
@@ -34,21 +34,20 @@ description: >-
     downloads its files once, often tens of gigabytes for a video model,
     before anything appears. Later runs start immediately.
 releaseNotes: >-
-  Level with Maestro 1.9.1. A universal queue now spans Studio and Director:
-  work can be held without starting the GPU, reordered, and executed
-  sequentially, and Director saves a full project revision before rendering
-  so a run survives a restart.
+  Level with Maestro 2.3.0. New models: Qwen Image 2.1 7B for generation and
+  editing with up to ten references and transparent PNGs, YuE2 for music
+  with its own training workflow, Viggle Animate, and further MiniMax H3
+  variants.
 
 
-  New models: MiniMax-Music3 for soundtracks, and LTX-2.5. MiniMax H3 gains
-  native motion and audio continuation plus adaptive sequence planning.
+  A universal queue spans Studio and Director, work can be held without
+  starting the GPU, and Director saves a full project revision before
+  rendering so a run survives a restart.
 
 
-  Reliability: CivitAI checkpoint downloads are verified against supported
-  architectures before registration, remote OpenAI-compatible LLMs get their
-  own credential and surface the endpoint's rejection reason, and the
-  llama.cpp runtime resolves the current release correctly on a fresh
-  install.
+  My Music adds a guided recordings-to-song-style training workflow with
+  resumable checkpoints, and music LoRAs get searchable selection with
+  independent strengths.
 
 developer: Florian Gilde
 website: https://gilde.org

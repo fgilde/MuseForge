@@ -60,7 +60,10 @@ got `git add`-ed).
 
 Please use the **Bug report** issue template — it asks for your logs and
 GPU/VRAM/OS, which is almost always what's needed to reproduce a
-local-generation issue.
+local-generation issue. In this Docker-first fork the log is
+`docker compose logs museforge` (add `--tail 200` for the recent part);
+upstream's `logs/api/start.js/latest` path belongs to the Pinokio launcher,
+which MuseForge does not ship.
 
 ## License
 

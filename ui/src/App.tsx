@@ -14,10 +14,15 @@ import { WelcomeModal } from './components/WelcomeModal'
 import { ActivityPanel } from './components/ActivityPanel'
 import { RecipesOverlay } from './components/Recipes/RecipesOverlay'
 import { GlobalQueuePopover } from './components/GlobalQueuePopover'
+import { NotificationCoordinator } from './components/NotificationCoordinator'
+import { NotificationToastHost } from './components/NotificationToastHost'
+import { EditorWorkspace } from './editor/EditorWorkspace'
+import { EditorRoundTripBanner } from './editor/EditorRoundTripBanner'
 import { useStore } from './stores/useStore'
 import { useIsMobile } from './lib/useIsMobile'
 
 function App() {
+  const appVersion = useStore(s => s.systemConfig?.app_version)
   const loadModels = useStore(s => s.loadModels)
   const loadOutputs = useStore(s => s.loadOutputs)
   const loadWorkspaces = useStore(s => s.loadWorkspaces)
@@ -30,13 +35,15 @@ function App() {
   const toggleSidebar = useStore(s => s.toggleSidebar)
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const toggleSettings = useStore(s => s.toggleSettings)
-  const appVersion = useStore(s => s.systemConfig?.app_version)
+  const sidebarMode = useStore(s => s.sidebarMode)
   const isMobile = useIsMobile()
+  const isEditor = sidebarMode === 'editor'
 
   useEffect(() => {
     loadModels()
-    loadWorkspaces()
-    loadOutputs()
+    // Resolve the saved folder before querying its media. Otherwise the
+    // default-folder response can become stale during workspace hydration.
+    void loadWorkspaces().then(() => loadOutputs())
     loadSystemConfig()
     loadServicesConfig()
     loadLlmStatus()
@@ -54,11 +61,12 @@ function App() {
   return (
     <div className="flex flex-col md:flex-row h-full w-full bg-bg-primary">
       {/* Mobile header */}
-      {isMobile && (
-        <header className="h-12 shrink-0 px-4 border-b border-border flex items-center justify-between bg-bg-secondary">
+      {isMobile && !isEditor && (
+        <header className="h-12 shrink-0 grid grid-cols-[1fr_auto_1fr] items-center gap-1 px-2 border-b border-border bg-bg-secondary">
           <button
             onClick={toggleSidebar}
-            className="p-2 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
+            aria-label="Open sidecar"
+            className="justify-self-start p-2 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
           >
             <Menu size={20} />
           </button>
@@ -71,7 +79,7 @@ function App() {
             <span className="font-semibold text-sm">MuseForge</span>
             {appVersion && <span className="text-[10px] text-text-muted font-normal mt-0.5">v{appVersion}</span>}
           </div>
-          <div className="flex items-center gap-1">
+          <div className="justify-self-end flex items-center gap-0.5">
             <GlobalQueuePopover iconSize={20} panelAlign="header-edge" />
             <button
               onClick={() => { setSidebarOpen(false); toggleSettings() }}
@@ -84,9 +92,15 @@ function App() {
         </header>
       )}
 
-      {/* MuseForge layout: content first, control sidebar docked right */}
-      <MainContent />
-      <Sidebar />
+      {isEditor ? (
+        <EditorWorkspace />
+      ) : (
+        /* MuseForge layout: content first, control sidebar docked right */
+        <>
+          <MainContent />
+          <Sidebar />
+        </>
+      )}
       <SettingsDrawer />
       <LoraBrowser />
       <DirectorDashboard />
@@ -114,6 +128,11 @@ function App() {
       <ActivityPanel />
       {/* WelcomeModal — one-time first-run orientation (localStorage-gated). */}
       <WelcomeModal />
+      {/* One observer covers Studio, Director, and the universal queue.
+          Toasts remain useful even when browser notifications are disabled. */}
+      <NotificationCoordinator />
+      <NotificationToastHost />
+      <EditorRoundTripBanner />
     </div>
   )
 }

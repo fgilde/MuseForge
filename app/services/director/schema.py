@@ -134,6 +134,8 @@ class SubjectRef:
     # through to the polish layer so it can substitute screenplay-
     # invented names with descriptors in narrative prose.
     speaker_name: Optional[str] = None
+    # Music-video performance in this shot, independent of camera focus.
+    performance_role: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = {"visual_description": self.visual_description}
@@ -145,6 +147,8 @@ class SubjectRef:
             d["wardrobe"] = self.wardrobe
         if self.speaker_name:
             d["speaker_name"] = self.speaker_name
+        if self.performance_role:
+            d["performance_role"] = self.performance_role
         return d
 
     @staticmethod
@@ -155,6 +159,7 @@ class SubjectRef:
             position_or_relation=d.get("position_or_relation"),
             wardrobe=d.get("wardrobe"),
             speaker_name=d.get("speaker_name"),
+            performance_role=d.get("performance_role"),
         )
 
 
@@ -178,8 +183,14 @@ class DialogueBeat:
 
     @staticmethod
     def from_dict(d: dict) -> "DialogueBeat":
+        # LLM-produced structured output is still untrusted at this boundary.
+        # Some providers satisfy the JSON schema structurally while emitting
+        # ``null`` for an optional/silent dialogue row.  Keep the dataclass
+        # contract truthful so downstream prompt formatters and validators do
+        # not discover a None value hours later during final plan assembly.
+        d = d if isinstance(d, dict) else {}
         return DialogueBeat(
-            spoken_text=d["spoken_text"],
+            spoken_text=str(d.get("spoken_text") or "").strip(),
             speaker_id=d.get("speaker_id"),
             delivery=d.get("delivery"),
             physical_cue=d.get("physical_cue"),
@@ -228,6 +239,8 @@ class AudioPlan:
     vocal_style: Optional[str] = None
     timing_anchor: str = "balanced"  # "audio" | "video" | "balanced"
     lip_sync_critical: bool = False
+    # Analysis evidence, never an LLM-assigned performance or section label.
+    vocal_activity: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = {"mode": self.mode, "timing_anchor": self.timing_anchor, "lip_sync_critical": self.lip_sync_critical}
@@ -237,6 +250,8 @@ class AudioPlan:
             d["effects"] = self.effects
         if self.vocal_style:
             d["vocal_style"] = self.vocal_style
+        if self.vocal_activity in {"active", "silent", "unknown"}:
+            d["vocal_activity"] = self.vocal_activity
         return d
 
     @staticmethod
@@ -248,6 +263,7 @@ class AudioPlan:
             vocal_style=d.get("vocal_style"),
             timing_anchor=d.get("timing_anchor", "balanced"),
             lip_sync_critical=d.get("lip_sync_critical", False),
+            vocal_activity=d.get("vocal_activity"),
         )
 
 
@@ -357,6 +373,16 @@ class ShotPlan:
 
     @staticmethod
     def from_dict(d: dict) -> "ShotPlan":
+        dialogue_beats = []
+        for raw_beat in d.get("dialogue_beats", []) or []:
+            beat = DialogueBeat.from_dict(raw_beat)
+            # Empty rows are not dialogue. They are a common local-LLM way of
+            # representing a silent reaction and are safe to discard; locked
+            # user-written dialogue is checked separately by the Director
+            # fidelity contract before generation can begin.
+            if beat.spoken_text:
+                dialogue_beats.append(beat)
+
         return ShotPlan(
             shot_id=d.get("shot_id", f"shot_{d.get('index', 0)}"),
             index=d.get("index", 0),
@@ -379,7 +405,7 @@ class ShotPlan:
             image_strategy=d.get("image_strategy"),
             continuity_strategy=d.get("continuity_strategy", "independent"),
             performance_beats=d.get("performance_beats"),
-            dialogue_beats=[DialogueBeat.from_dict(db) for db in d.get("dialogue_beats", [])] if d.get("dialogue_beats") else None,
+            dialogue_beats=dialogue_beats or None,
             constraints=d.get("constraints"),
             continuity_refs=d.get("continuity_refs"),
             metadata=d.get("metadata"),

@@ -6,26 +6,13 @@ from pathlib import Path
 import sys
 import unittest
 
+from _fork import needs_launcher
+
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
 if str(APP) not in sys.path:
     sys.path.insert(0, str(APP))
-
-
-def needs_launcher(*names: str):
-    """Skip a test that reads the Pinokio launcher scripts.
-
-    MuseForge is Docker-first and ships no launcher, so these upstream
-    contracts have nothing to assert against here. Skipping states that,
-    where deleting the test would quietly drop coverage upstream still
-    wants -- and keeps the file mergeable when upstream edits it.
-    """
-    missing = [name for name in names if not (ROOT / name).exists()]
-    return unittest.skipIf(
-        missing,
-        f"no Pinokio launcher in this fork (missing {', '.join(missing)})",
-    )
 
 
 class TestSolEngineSourceContracts(unittest.TestCase):
@@ -35,7 +22,8 @@ class TestSolEngineSourceContracts(unittest.TestCase):
         engine = (APP / "wgp.py").read_text(encoding="utf-8")
         attention = (APP / "shared" / "attention.py").read_text(encoding="utf-8")
 
-        self.assertIn('"sol_attention": True', handler)
+        self.assertIn('"sol_attention": not fused_turbo', handler)
+        self.assertIn('"sla_attention": fused_turbo', handler)
         self.assertIn('"sol_attention_status": _sol_attention_status', launch)
         self.assertIn('attn == "sol" and not model_def.get("sol_attention"', engine)
         self.assertIn("get_supported_override_attention_modes", engine)

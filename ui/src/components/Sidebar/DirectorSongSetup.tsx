@@ -1,10 +1,13 @@
 import { useEffect } from 'react'
 import { Music } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import { DurationPresetControl } from './DurationPresetControl'
+import { formatDuration } from '../../lib/durationPlanning'
 
 const DIRECTOR_MUSIC_MODEL_ORDER = [
   'ace_step_v1_5_xl_sft_lm_4b',
   'minimax_music3',
+  'yue2',
 ]
 
 // Director Music Video — "Generate a track" up-front options. The description
@@ -33,7 +36,8 @@ export function DirectorSongSetup() {
     : (musicModels[0]?.model_type || '')
   const selectedModel = musicModels.find(model => model.model_type === effectiveModel)
   const isMusic3 = selectedModel?.architecture === 'minimax_music3'
-  const maximumDuration = isMusic3 ? 300 : 360
+  const isYue2 = selectedModel?.architecture === 'yue2'
+  const maximumDuration = isYue2 ? 600 : isMusic3 ? 300 : 360
 
   useEffect(() => {
     if (effectiveModel && effectiveModel !== musicModel) {
@@ -87,31 +91,27 @@ export function DirectorSongSetup() {
           </>
         ) : (
           <p className="text-[10px] text-amber-400 leading-snug">
-            Enable ACE-Step or MiniMax-Music3 in Settings → System → Enabled Models.
+            Enable a music model in Settings → System → Enabled Models.
           </p>
         )}
       </div>
 
-      <div>
-        <div className="flex items-center justify-between mb-1">
-          <label className="text-[11px] text-text-muted uppercase tracking-wider">Length</label>
-          <span className="text-[10px] text-text-secondary tabular-nums">{duration}s</span>
-        </div>
-        <input
-          type="range"
-          min={5}
-          max={maximumDuration}
-          step={5}
-          value={duration}
-          onChange={e => setDuration(Number(e.target.value))}
-          className="w-full accent-accent-blue"
-        />
-      </div>
+      <DurationPresetControl
+        label={isYue2 ? 'Maximum song length' : 'Song length'}
+        value={duration}
+        onChange={setDuration}
+        minSeconds={5}
+        maxSeconds={maximumDuration}
+        showSingleWindow={false}
+        quantizeToWindows={false}
+        durationIsMaximum={isYue2}
+        modelLimitLabel={isYue2 ? 'The song can finish earlier. The resulting recording determines the video length.' : `${isMusic3 ? 'MiniMax-Music3' : 'ACE-Step'} can generate up to ${formatDuration(maximumDuration)} per song.`}
+      />
 
       <p className="text-[10px] text-text-muted leading-snug">
         Describe your music video in the box below and hit Generate — the song
         {instrumental ? '' : ' + lyrics'} is written for you, then the full video is
-        produced with {isMusic3 ? 'MiniMax-Music3' : 'ACE-Step'}. For hands-on
+        produced with {selectedModel?.name || 'the selected music model'}. For hands-on
         control of style and lyrics, use Studio → Audio → Music.
       </p>
     </div>

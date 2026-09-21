@@ -7,6 +7,33 @@ import { LoraGuideTooltip, LoraAgeChip, LoraSortToggle, sortLoraNames } from './
 import type { LoraDates } from './LoraSelector'
 import type { LoraRecommendedWeights } from '../../types'
 
+function phaseWeights(values: number[] | undefined, phases: number): number[] {
+  return Array.from({ length: phases }, (_, index) => {
+    const value = values?.[index] ?? values?.[values.length - 1] ?? 1.0
+    return Number.isFinite(value) ? value : 1.0
+  })
+}
+
+// Older Director selections may contain empty arrays from a zero guidance
+// phase count. Recipes can also supply only the serialized multipliers.
+function restoreWeights(loras: string[], weights: Record<string, number[]>, multipliers = '') {
+  const parts = multipliers.trim().split(/\s+/)
+  return Object.fromEntries(loras.map((name, index) => [name,
+    weights[name]?.length ? weights[name]
+      : (parts[index] || '1.0').split(';').map(Number),
+  ]))
+}
+
+function serializeDirectorLoraMultipliers(
+  loras: string[],
+  weights: Record<string, number[]>,
+) {
+  return loras.map(name => {
+    const values = weights[name]?.length ? weights[name] : [1.0]
+    return values.map(value => value.toFixed(2)).join(';')
+  }).join(' ')
+}
+
 /**
  * Compact preset picker for Director mode LoRA sections.
  */
@@ -78,40 +105,53 @@ export function DirectorLoraSelector({ mode, modelType }: {
   const sortMode = useStore(s => s.loraPickerSort)
   const setSortSticky = useStore(s => s.setLoraPickerSort)
 
+  const persist = useCallback((newLoras: string[], newWeights: Record<string, number[]>) => {
+    const normalized = Object.fromEntries(newLoras.map(name => [name, phaseWeights(newWeights[name], phases)]))
+    const multipliers = serializeDirectorLoraMultipliers(newLoras, normalized)
+    directorSetLora(mode, newLoras, multipliers, normalized, availableLoras)
+  }, [mode, phases, availableLoras, directorSetLora])
+
+  const updateWeight = useCallback((filename: string, phaseIndex: number, value: number) => {
+    setLoraWeights(prev => {
+      const next = { ...prev }
+      if (!activatedLoras.includes(filename)) return prev
+      next[filename] = phaseWeights(next[filename], phases)
+      // Keep typed values aligned with the slider's supported range and
+      // avoid persisting NaN while a numeric field is temporarily empty.
+      if (!Number.isFinite(value)) return prev
+      next[filename][phaseIndex] = Math.max(0, Math.min(2, Math.round(value * 100) / 100))
+      persist(activatedLoras, next)
+      return next
+    })
+  }, [activatedLoras, phases, persist])
+
   // Load available LoRAs when model changes
   useEffect(() => {
     if (!modelType) return
     let cancelled = false
-    setLoading(true)
+    queueMicrotask(() => { if (!cancelled) setLoading(true) })
     api.fetchLoras(modelType).then(data => {
       if (cancelled) return
-      const newPhases = data.guidance_max_phases ?? 1
+      // Zero means no classifier-free guidance schedule (e.g. H3), not no
+      // LoRA strength. Match Studio's minimum of one editable weight.
+      const newPhases = Math.max(1, data.guidance_max_phases ?? 1)
       setAvailableLoras(data.loras)
       setPhases(newPhases)
-      setActivatedLoras(prev => {
-        const valid = prev.filter(l => data.loras.includes(l))
-        const adjustedWeights: Record<string, number[]> = {}
-        valid.forEach(l => {
-          const existing = loraWeights[l] || Array(newPhases).fill(1.0)
-          if (existing.length < newPhases) {
-            adjustedWeights[l] = [...existing, ...Array(newPhases - existing.length).fill(1.0)]
-          } else {
-            adjustedWeights[l] = existing.slice(0, newPhases)
-          }
-        })
-        if (valid.length !== prev.length || newPhases !== (loraWeights[valid[0]]?.length ?? 1)) {
-          const multipliers = serializeMultipliers(valid, adjustedWeights)
-          directorSetLora(mode, valid, multipliers, adjustedWeights, data.loras)
-        }
-        setLoraWeights(adjustedWeights)
-        return valid
-      })
+      const saved = useStore.getState().savedLoraPerMode[mode]
+      const selected = saved?.activated_loras || []
+      const restored = restoreWeights(selected, saved?.loraWeights || {}, saved?.loras_multipliers)
+      const valid = selected.filter(name => data.loras.includes(name))
+      const adjustedWeights = Object.fromEntries(valid.map(name => [name, phaseWeights(restored[name], newPhases)]))
+      const multipliers = serializeDirectorLoraMultipliers(valid, adjustedWeights)
+      directorSetLora(mode, valid, multipliers, adjustedWeights, data.loras)
+      setActivatedLoras(valid)
+      setLoraWeights(adjustedWeights)
       setLoading(false)
     }).catch(() => {
       if (!cancelled) { setAvailableLoras([]); setLoading(false) }
     })
     return () => { cancelled = true }
-  }, [modelType]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [modelType, mode, directorSetLora])
 
   // Load weight recommendations and guide status
   useEffect(() => {
@@ -134,25 +174,8 @@ export function DirectorLoraSelector({ mode, modelType }: {
       setGuideStatus(prev => ({ ...prev, ...statuses }))
       setLoraDates(dates)
 
-      // Auto-apply recommended defaults to newly activated LoRAs at 1.0 fill
-      for (const lora of activatedLoras) {
-        const rec = recs[lora]
-        if (!rec) continue
-        const currentWeights = loraWeights[lora]
-        if (!currentWeights || !currentWeights.every(w => w === 1.0)) continue
-        const newWeights = currentWeights.map((_, i) => {
-          const phaseRec = rec.phases?.find(p => p.phase === i + 1)
-          const d = phaseRec?.default ?? rec.default
-          const min = phaseRec?.min ?? rec.min
-          const max = phaseRec?.max ?? rec.max
-          if (d != null && d >= min && d <= max) return d
-          if (min != null && max != null) return Math.round(((min + max) / 2) * 20) / 20
-          return d ?? 0.8
-        })
-        for (let i = 0; i < newWeights.length; i++) {
-          updateWeight(lora, i, newWeights[i])
-        }
-      }
+      // Defaults are applied by toggleLora when enabling an adapter. Loading
+      // metadata must not replace a saved or explicitly chosen 1.0 strength.
     }).catch(() => {})
 
     // Check guide status for activated LoRAs
@@ -166,24 +189,16 @@ export function DirectorLoraSelector({ mode, modelType }: {
 
   // Sync from store when savedLora changes externally
   useEffect(() => {
-    if (savedLora) {
+    if (!savedLora) return
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
       setActivatedLoras(savedLora.activated_loras || [])
-      setLoraWeights(savedLora.loraWeights || {})
+      setLoraWeights(restoreWeights(savedLora.activated_loras || [], savedLora.loraWeights || {}, savedLora.loras_multipliers))
       if (savedLora.availableLoras?.length) setAvailableLoras(savedLora.availableLoras)
-    }
+    })
+    return () => { cancelled = true }
   }, [savedLora])
-
-  const serializeMultipliers = (loras: string[], weights: Record<string, number[]>) => {
-    return loras.map(name => {
-      const w = weights[name] || [1.0]
-      return w.map(v => v.toFixed(2)).join(';')
-    }).join(' ')
-  }
-
-  const persist = useCallback((newLoras: string[], newWeights: Record<string, number[]>) => {
-    const multipliers = serializeMultipliers(newLoras, newWeights)
-    directorSetLora(mode, newLoras, multipliers, newWeights, availableLoras)
-  }, [mode, availableLoras, directorSetLora])
 
   const toggleLora = useCallback((filename: string) => {
     setActivatedLoras(prev => {
@@ -211,20 +226,6 @@ export function DirectorLoraSelector({ mode, modelType }: {
       return next
     })
   }, [loraWeights, phases, persist, loraWeightRecs])
-
-  const updateWeight = useCallback((filename: string, phaseIndex: number, value: number) => {
-    setLoraWeights(prev => {
-      const next = { ...prev }
-      if (!next[filename]) return prev
-      next[filename] = [...next[filename]]
-      // Keep typed values aligned with the slider's supported range and
-      // avoid persisting NaN while a numeric field is temporarily empty.
-      if (!Number.isFinite(value)) return prev
-      next[filename][phaseIndex] = Math.max(0, Math.min(2, Math.round(value * 100) / 100))
-      persist(activatedLoras, next)
-      return next
-    })
-  }, [activatedLoras, persist])
 
   const handleGenerateGuide = async (filename: string) => {
     if (!modelType) return
@@ -347,7 +348,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
               )}
               {guideTexts[filename] && (
                 <span>
-                  <LoraGuideTooltip guide={guideTexts[filename]} />
+                  <LoraGuideTooltip guide={guideTexts[filename]} label={`Guide for ${displayName(filename)}`} />
                 </span>
               )}
               {loraWeightRecs[filename] && (
@@ -378,7 +379,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
                       const value = Number.parseFloat(e.target.value)
                       if (Number.isFinite(value)) updateWeight(filename, 0, value)
                     }}
-                    className="w-12 rounded border border-border bg-bg-secondary px-1 py-0.5 text-right text-[10px] tabular-nums text-text-primary focus:border-accent-blue focus:outline-none"
+                    className="w-16 rounded border border-border bg-bg-secondary px-1 py-0.5 text-right text-[10px] tabular-nums text-text-primary focus:border-accent-blue focus:outline-none"
                     aria-label={`${displayName(filename)} LoRA strength`}
                   />
                 </label>
@@ -411,7 +412,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
             </button>
           </div>
           {activatedLoras.map(filename => {
-            const weights = loraWeights[filename] || Array(phases).fill(1.0)
+            const weights = phaseWeights(loraWeights[filename], phases)
             return (
               <div key={filename} className="bg-bg-tertiary border border-border rounded-lg px-2.5 py-2">
                 <div className="flex items-center justify-between mb-1">
@@ -470,7 +471,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
                       >
                         {phases > 1 ? `Phase ${i + 1}` : 'Strength'}
                       </span>
-                      <div className="flex-1 relative">
+                      <div className="min-w-0 flex-1 relative">
                         <div
                           className={`absolute top-1/2 -translate-y-1/2 h-2 rounded-full ${zoneColor} pointer-events-none`}
                           style={{ left: `${zoneLeft}%`, width: `${zoneWidth}%` }}
@@ -497,7 +498,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
                           const value = Number.parseFloat(e.target.value)
                           if (Number.isFinite(value)) updateWeight(filename, i, value)
                         }}
-                        className={`w-12 shrink-0 rounded border border-border bg-bg-secondary px-1 py-0.5 text-right text-[10px] tabular-nums focus:border-accent-blue focus:outline-none ${valueColor}`}
+                        className={`w-16 shrink-0 rounded border border-border bg-bg-secondary px-1 py-0.5 text-right text-[10px] tabular-nums focus:border-accent-blue focus:outline-none ${valueColor}`}
                         aria-label={`${displayName(filename)} ${phases > 1 ? `phase ${i + 1}` : ''} LoRA strength value`.replace(/\s+/g, ' ').trim()}
                       />
                     </div>

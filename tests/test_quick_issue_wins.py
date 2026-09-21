@@ -131,25 +131,28 @@ class TestStudioInterfaceQuickWins(unittest.TestCase):
     def test_lora_selector_is_near_top_of_advanced_panel(self):
         source = _read(_ADVANCED_PATH)
         self.assertEqual(source.count("<LoraSelector />"), 1)
+        self.assertEqual(source.count("<PresetManager />"), 1)
         self.assertLess(
+            source.index("<PresetManager />"),
             source.index("<LoraSelector />"),
-            source.index("H3 Text Encoder"),
         )
         self.assertLess(
             source.index("<LoraSelector />"),
-            source.index("<PresetManager />"),
+            source.index("H3 Text Encoder"),
         )
 
     def test_browser_spellcheck_is_enabled_for_text_inputs(self):
         self.assertIn('<body spellcheck="true">', _read(_INDEX_HTML_PATH))
 
-    def test_main_prompt_grows_automatically_with_its_content(self):
+    def test_main_prompt_uses_css_mirror_instead_of_repeated_height_measurements(self):
         source = _read(_PROMPT_PATH)
         self.assertIn(
-            "const promptTextareaRef = useAutoGrowingTextarea(prompt)",
+            "const promptTextareaRef = useAutoGrowingTextarea(prompt, !compact)",
             source,
         )
         self.assertIn("ref={promptTextareaRef}", source)
+        self.assertIn("studio-prompt-textarea", source)
+        self.assertIn('data-prompt-mirror aria-hidden="true"', source)
         self.assertIn("resize-none overflow-hidden", source)
         self.assertNotIn("resize: 'vertical'", source)
         self.assertNotIn("maxHeight: '70vh'", source)

@@ -1,5 +1,36 @@
 # MiniMax H3 upstream components
 
+Viggle Animate adapts Wan2GP v12.72 at
+`057f9ecab9ad57dfbec9768b2daf7a4426ce986c`: fixed prompt conditioning,
+video-then-edited-image reference ordering, target-only control slicing after
+the motion-history prefix, three Euler evaluations with shift 3, and fixed
+124-frame windows with 18-frame overlap. The dedicated transformer, fixed
+prompt and distillation adapter are pinned to
+`DeepBeepMeep/MiniMax-H3@fa7ed035f21d341439d4dd763a020fc4a2482c43`.
+The upstream rank-8 adapter map is pinned to the same Wan2GP commit and verified
+with SHA-256 `89081fd235e9deff56274ab76b1b01fa4d9aeebcbd0746295b0fd086cf0e0fec`.
+Maestro retains its own queue, media pipeline, MMGP offloading and continuation
+implementation. See `docs/Viggle-Animate.md` and
+`docs/development/Viggle-and-Studio-Controls.md` for usage and validation.
+
+The September 2026 VDN, grouped-row masking/outpainting, audio-only voice
+preset, and six-step audio refinement additions adapt Wan2GP v12.71 at
+`1e1dd2757f24923f008593d9d4ec09062234be20` to Maestro's existing pipeline.
+VDN module and adapter downloads use the immutable Hugging Face revision
+`DeepBeepMeep/MiniMax-H3@304d34f7751f8ba9ca0eb55d5d10044234cdbfe2`.
+See `THIRD_PARTY_NOTICES.md`, `app/LICENSES/WanGP-Community-2.0.txt`, and
+`docs/development/wan2gp-12-71-port-plan.md` for licensing, integration and
+local validation details.
+
+The H3 Voice Audio extension adapts `models/minimax_h3/dialogue.py` at that
+same revision, including Whisper medium loading and speech-boundary alignment.
+Maestro adds automatic splitting of long monologues, complete-script budget
+validation, its shared 2.8 words/second planning pace (maximum 3), private
+temporary voice references, cancellation and native queue progress. Native
+audio passes are limited to 45 seconds and assembled outputs to 300 seconds;
+15 seconds remains the default. Whisper assets reuse the existing Scenema
+`whisper_medium` download and MMGP offloading integration.
+
 The video VAE, audio VAE, scheduler, FL2VA packing, and Ref2VA reference
 preparation/packing in this directory are derived from the Hugging Face
 Diffusers MiniMax H3 implementation at commit
@@ -144,6 +175,30 @@ as a legacy rollback at six evaluations and strength 0.50. Users can tune
 either selected adapter in Advanced. Both are listed virtually for Full and
 Pruned checkpoints, downloaded and hash-verified on first use, and atomically
 published with an integrity receipt.
+
+The selector also exposes Alibaba PAI's Apache-2.0 MiniMax H3 Acc-LoRAs for
+their matching FL2VA and Ref2VA workflows. These adapters use Parallel
+Decoding Distillation rather than an ordinary low-rank-only sampler: 32
+interval-specific video/audio output heads are fused four at a time into eight
+model evaluations. Maestro adapts the official `minimax_h3_pdd.py` recipe from
+`alibaba-pai/MiniMax-H3-Acc-LoRAs` revision
+`78db175437ee05df7ec492ee366f01b68b8d20e6`, keeps the backbone updates in
+MMGP's streamed LoRA path, and retains only the eight fused output-head pairs
+in CPU memory. The head plans are rebuilt from the exact runtime video and
+audio sigma boundaries, matching WanGP's PDD implementation introduced in
+v12.645 instead of assuming that every future scheduler uses the original
+uniform eight-evaluation grid. The FL2VA and Ref2VA files are pinned separately by immutable
+revision, size, and Hugging Face LFS SHA-256; neither can appear for the wrong
+workflow. Both PDD presets remain available on Full and Pruned checkpoints;
+Maestro converts their canonical AdaLN adapters to the selected checkpoint at
+load time. Ref2VA PDD defaults to Diffusers' official 2048px-short-edge
+reference preparation, while an explicit Match output selection remains a
+lower-memory, no-upscale option. Full and Pruned tests showed the same
+composition promotion when the distilled Ref2VA interval heads were fed the
+matched-detail references, ruling out checkpoint width as the cause. Alibaba's
+published Ref2VA PDD examples currently cover 5.18s and 10.13s clips; Maestro
+allows the ordinary H3 maximum but labels longer accelerated clips as
+experimental and reports that fact in the generation log.
 
 `.github/workflows/h3-turbo-upstream.yml` checks the public repository revision
 daily and opens or updates one review issue when upstream changes. It never

@@ -30,6 +30,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .sol_attention import MiniMaxH3SolAttention
+from .sla_attention import MiniMaxH3SLAAttention
 
 MODALITY_VIDEO = 0
 MODALITY_TEXT = 1
@@ -89,6 +90,30 @@ def _activation_chunk_tokens(
     # Stable launch sizes reduce allocator churn between blocks.
     bounded = max(configured, (bounded // 256) * 256)
     return min(length, bounded)
+
+
+def _rms_norm_in_chunks(norm: nn.RMSNorm, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Bound RMSNorm's FP32 temporaries without changing its per-token math."""
+
+    if torch.is_grad_enabled() or hidden_states.ndim < 2 or len(norm.normalized_shape) != 1:
+        return norm(hidden_states)
+    length, width = hidden_states.shape[-2:]
+    chunk = _activation_chunk_tokens(length, width, width)
+    if length <= chunk:
+        return norm(hidden_states)
+
+    # High-detail reference sequences can exceed 260K rows. A full FP32
+    # normalization temporary then costs 5.3 GiB, even though QKV and MLP
+    # projections already stream in chunks. Keep the native norm operation
+    # (including its dtype promotion and MMGP hooks) on bounded token slices.
+    output = None
+    for start in range(0, length, chunk):
+        normalized = norm(hidden_states[..., start:start + chunk, :])
+        if output is None:
+            output = normalized.new_empty(hidden_states.shape)
+        output[..., start:start + chunk, :].copy_(normalized)
+        del normalized
+    return output
 
 
 def _split_contiguous_qkv(src, dim, split_sizes, _context):
@@ -345,16 +370,24 @@ class MiniMaxH3Attention(nn.Module):
         eps: float,
         dtype: torch.dtype,
         sol_attention: MiniMaxH3SolAttention | None = None,
+        sla_attention: MiniMaxH3SLAAttention | None = None,
+        vdn: bool = False,
     ):
         super().__init__()
         self.heads = heads
         self.head_dim = head_dim
         self.sol_attention = sol_attention
+        self.sla_attention = sla_attention
         inner = heads * head_dim
         self.qkv_proj = nn.Linear(hidden_size, inner * 3, bias=False, dtype=dtype)
         self.q_norm = nn.RMSNorm(head_dim, eps=eps, dtype=dtype)
         self.k_norm = nn.RMSNorm(head_dim, eps=eps, dtype=dtype)
         self.out_proj = nn.Linear(inner, hidden_size, bias=False, dtype=dtype)
+        if vdn:
+            from .vdn_attention import VDNHybridAttention
+            self.vdn = VDNHybridAttention(hidden_size, heads, head_dim, dtype=dtype)
+        else:
+            self.vdn = None
 
     def forward(
         self,
@@ -372,6 +405,20 @@ class MiniMaxH3Attention(nn.Module):
                 raise ValueError("MiniMax H3 attention expects one owned input tensor")
             hidden_states = hidden_states.pop()
         batch, length, _ = hidden_states.shape
+        if self.vdn is not None:
+            if batch != 1 or attention_mask is not None:
+                raise ValueError("H3 VDN requires one unpadded packed sequence")
+            shape = (batch, length, self.heads, self.head_dim)
+            if hasattr(self, "q_proj"):
+                raw = [projection(hidden_states).view(shape) for projection in (self.q_proj, self.k_proj, self.v_proj)]
+            else:
+                raw = [part.reshape(shape) for part in self.qkv_proj(hidden_states).chunk(3, dim=-1)]
+            query, key = self.q_norm(raw[0]), self.k_norm(raw[1])
+            if rotary is not None:
+                query, key = _apply_rope_inplace(query, *rotary), _apply_rope_inplace(key, *rotary)
+            result = self.vdn([hidden_states[0]], [part[0] for part in raw],
+                              [query, key, raw[2]], self.out_proj)
+            return result.unsqueeze(0)
         projection_width = (
             self.heads * self.head_dim
             if hasattr(self, "q_proj")
@@ -467,11 +514,18 @@ class MiniMaxH3Attention(nn.Module):
         hidden_states = None
         if attention_mask is not None:
             attention_mask = attention_mask[None, None].to(device=query.device)
+        use_sla = (
+            self.sla_attention is not None
+            and self.sla_attention.use_for_layer(length, attention_mask)
+        )
         use_sol = (
-            self.sol_attention is not None
+            not use_sla
+            and self.sol_attention is not None
             and self.sol_attention.use_for_layer(length, attention_mask)
         )
-        if use_sol:
+        if use_sla:
+            attended = self.sla_attention([query, key, value], True)
+        elif use_sol:
             attended = self.sol_attention([query, key, value], True)
         else:
             attended = _run_h3_attention(
@@ -591,8 +645,8 @@ class MiniMaxH3RefinerBlock(nn.Module):
         self.mlp = MiniMaxH3MLP(hidden_size, ffn_dim, dtype)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = hidden_states + self.attn(self.norm1(hidden_states))
-        return hidden_states + self.mlp(self.norm2(hidden_states))
+        hidden_states = hidden_states + self.attn(_rms_norm_in_chunks(self.norm1, hidden_states))
+        return hidden_states + self.mlp(_rms_norm_in_chunks(self.norm2, hidden_states))
 
 
 class MiniMaxH3TokenRefiner(nn.Module):
@@ -615,7 +669,7 @@ class MiniMaxH3TokenRefiner(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         for block in self.blocks:
             hidden_states = block(hidden_states)
-        return self.final_norm(hidden_states)
+        return _rms_norm_in_chunks(self.final_norm, hidden_states)
 
 
 class MiniMaxH3Block(nn.Module):
@@ -631,6 +685,8 @@ class MiniMaxH3Block(nn.Module):
         *,
         compressed_modulation: bool,
         sol_attention: MiniMaxH3SolAttention | None = None,
+        sla_attention: MiniMaxH3SLAAttention | None = None,
+        vdn: bool = False,
     ):
         super().__init__()
         self.norm1 = nn.RMSNorm(hidden_size, eps=eps, dtype=dtype)
@@ -642,6 +698,8 @@ class MiniMaxH3Block(nn.Module):
             eps,
             dtype,
             sol_attention=sol_attention,
+            sla_attention=sla_attention,
+            vdn=vdn,
         )
         self.mlp = MiniMaxH3MLP(hidden_size, ffn_dim, dtype)
         self.adaln_proj = MiniMaxH3AdaLNProjection(
@@ -668,7 +726,7 @@ class MiniMaxH3Block(nn.Module):
         # it owns the tensor and releases the storage after Q/K/V projection.
         attention_input = [
             _modulate_by_runs(
-                self.norm1(hidden_states),
+                _rms_norm_in_chunks(self.norm1, hidden_states),
                 shift_attn,
                 scale_attn,
                 adaln_runs,
@@ -692,7 +750,7 @@ class MiniMaxH3Block(nn.Module):
         else:
             hidden_states = hidden_states + attn_output
         del attention_input, attn_output
-        normed = _modulate_by_runs(self.norm2(hidden_states), shift_mlp, scale_mlp, adaln_runs)
+        normed = _modulate_by_runs(_rms_norm_in_chunks(self.norm2, hidden_states), shift_mlp, scale_mlp, adaln_runs)
         mlp_output = _scale_by_runs(self.mlp(normed), gate_mlp, adaln_runs)
         if signature is not None:
             signature.add_(mlp_output.reshape(-1)[::signature_stride])
@@ -747,7 +805,7 @@ class MiniMaxH3FinalLayer(nn.Module):
         timestep_runs: tuple[tuple[int, int, int], ...],
     ) -> torch.Tensor:
         shift, scale = self.adaln_proj(curve)
-        normed = self.norm(hidden_states)
+        normed = _rms_norm_in_chunks(self.norm, hidden_states)
         return _modulate_by_runs(normed, shift, scale, timestep_runs)
 
 
@@ -773,6 +831,8 @@ class MiniMaxH3Transformer(nn.Module):
         rope_freq_dim: int = 16,
         eps: float = 1e-5,
         dtype: torch.dtype = torch.bfloat16,
+        sla_config=None,
+        vdn: bool = False,
     ):
         super().__init__()
         video_patch_dim = video_channels * math.prod(patch_size)
@@ -821,6 +881,7 @@ class MiniMaxH3Transformer(nn.Module):
         # One policy object is shared across the 50 main DiT blocks. The
         # token refiner intentionally retains dense attention.
         self.sol_attention = MiniMaxH3SolAttention()
+        self.sla_attention = MiniMaxH3SLAAttention(sla_config)
         self.blocks = nn.ModuleList(
             [
                 MiniMaxH3Block(
@@ -833,6 +894,8 @@ class MiniMaxH3Transformer(nn.Module):
                     dtype,
                     compressed_modulation=self.use_adaln_curves,
                     sol_attention=self.sol_attention,
+                    sla_attention=self.sla_attention,
+                    vdn=vdn,
                 )
                 for _ in range(num_layers)
             ]
@@ -861,8 +924,18 @@ class MiniMaxH3Transformer(nn.Module):
         """
 
         from .lora_affine import convert_adaln_loras
+        from .pdd import is_pdd_state_dict, preprocess_pdd_lora_state_dict
+        from .lora_vdn import normalize_diffusers_lora
 
-        converted = dict(state_dict)
+        pdd_adapter = is_pdd_state_dict(state_dict)
+        converted = (
+            preprocess_pdd_lora_state_dict(
+                state_dict,
+                split_qkv=hasattr(self.blocks[0].attn, "q_proj"),
+            )
+            if pdd_adapter
+            else normalize_diffusers_lora(state_dict, self)
+        )
         started = time.perf_counter()
         count, architecture, source_width, target_width = convert_adaln_loras(
             model_type,
@@ -884,6 +957,12 @@ class MiniMaxH3Transformer(nn.Module):
                 f"[MiniMax H3 LoRA] Converted {count} AdaLN adapter(s) "
                 f"from {source} to {target} in "
                 f"{time.perf_counter() - started:.2f}s."
+            )
+        if pdd_adapter:
+            print(
+                "[MiniMax H3 PDD] Mapped Alibaba PAI's interval adapter "
+                f"to {len(converted)} MMGP-managed low-rank tensors "
+                f"({'split' if hasattr(self.blocks[0].attn, 'q_proj') else 'fused'} QKV)."
             )
         return converted
 
@@ -925,6 +1004,16 @@ class MiniMaxH3Transformer(nn.Module):
         video_indices = video_indices.to(device=device, dtype=torch.long)
         audio_indices = audio_indices.to(device=device, dtype=torch.long)
         text_indices = text_indices.to(device=device, dtype=torch.long)
+        target_order = _kwargs.get("target_video_order")
+        target_inverse = _kwargs.get("target_video_inverse_order")
+        condition_video_rows = int(_kwargs.get("condition_video_rows", 0))
+        if target_order is not None:
+            target_indices = video_indices[condition_video_rows:]
+            position_ids = position_ids.clone()
+            position_ids[target_indices.to(position_ids.device)] = position_ids[
+                target_indices.index_select(0, target_order).to(position_ids.device)]
+            hidden_states = torch.cat((hidden_states[:, :condition_video_rows],
+                hidden_states[:, condition_video_rows:].index_select(1, target_order)), dim=1)
         timestep_indices = timestep_indices.to(device=device, dtype=torch.long)
         token_tags = token_tags.to(device=device, dtype=torch.long)
 
@@ -952,8 +1041,8 @@ class MiniMaxH3Transformer(nn.Module):
             attention_mask = padding[:, None] == padding[None, :]
 
         # All rows before the first generated video row are kept as exact
-        # conditioning keys/values by Sol. This includes text, references,
-        # keyframes, and the synchronized target-audio stream.
+        # conditioning keys/values by sparse H3 backends. This includes text,
+        # references, keyframes, and the synchronized target-audio stream.
         if video_sink_tokens is None:
             video_sink_tokens = (
                 int(video_indices[0].item())
@@ -965,6 +1054,18 @@ class MiniMaxH3Transformer(nn.Module):
             device,
             packed.dtype,
         )
+        self.sla_attention.begin_forward(
+            video_sink_tokens,
+            device,
+            packed.dtype,
+        )
+        if self.blocks[0].attn.vdn is not None:
+            layout = _kwargs.get("packed_layout")
+            latent_shape = _kwargs.get("latent_shape")
+            if layout is None or latent_shape is None:
+                raise ValueError("H3 VDN requires the packed layout and target latent geometry")
+            for block in self.blocks:
+                block.attn.vdn.begin_forward(layout, *latent_shape, self.config.patch_size)
 
         if first_block_cache is None:
             for block in self.blocks:
@@ -1032,6 +1133,9 @@ class MiniMaxH3Transformer(nn.Module):
         video_activations = packed.index_select(1, video_indices).to(torch.float32)
         audio_activations = packed.index_select(1, audio_indices).to(torch.float32)
         video_output = self.final_layer.video_out(video_activations)
+        if target_inverse is not None:
+            video_output = torch.cat((video_output[:, :condition_video_rows],
+                video_output[:, condition_video_rows:].index_select(1, target_inverse)), dim=1)
         audio_output = self.final_layer.audio_out(audio_activations)
         if not return_dict:
             return video_output, audio_output

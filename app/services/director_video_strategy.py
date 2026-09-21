@@ -346,6 +346,8 @@ def build_director_video_execution_profile(
             video_params.get("minimax_h3_turbo_preset") or ""
         ),
         "sol_attention": video_params.get("override_attention") == "sol",
+        "sla_attention": video_params.get("override_attention") == "sla",
+        "fused_turbo": bool(model_def.get("minimax_h3_fused_turbo")),
         "first_block_cache": (
             video_params.get("skip_steps_cache_type") == "first_block"
         ),
@@ -965,6 +967,7 @@ def adapt_bounded_timeline(
     minimum_frames: int,
     maximum_frames: int,
     frame_step: int,
+    cover_source_duration: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Convert a Director plan into bounded model-native independent shots.
 
@@ -973,6 +976,12 @@ def adapt_bounded_timeline(
     durations already lie on the model's frame lattice, so generation,
     Dashboard reruns, and source-audio slicing share exact boundaries.
     """
+
+    if cover_source_duration and planned_clips and all(c.get("music_timing_version") == 1 for c in planned_clips):
+        from services.director_music_timing import prepare_music_timeline
+        return prepare_music_timeline(clip_plans, planned_clips, fps=fps,
+                                      minimum_frames=minimum_frames, maximum_frames=maximum_frames,
+                                      frame_step=frame_step)
 
     try:
         fps = float(fps)
@@ -1035,6 +1044,18 @@ def adapt_bounded_timeline(
         maximum_frames=maximum_frames,
         frame_step=frame_step,
     )
+    if cover_source_duration:
+        # Music must reach the final source sample. Nearest rounding alone
+        # can end a few frames early. Use spare lattice capacity, starting at
+        # the end, while retaining the per-clip maximum.
+        missing = math.ceil(sum(unit["duration"] for unit in segmented) * fps - 1e-7) - sum(schedule)
+        for index in range(len(schedule) - 1, -1, -1):
+            if missing <= 0:
+                break
+            addition = min((maximum_frames - schedule[index]) // frame_step * frame_step,
+                           math.ceil(missing / frame_step) * frame_step)
+            schedule[index] += addition
+            missing -= addition
 
     try:
         cursor = float(planned_clips[0].get("start") or 0) if planned_clips else 0.0

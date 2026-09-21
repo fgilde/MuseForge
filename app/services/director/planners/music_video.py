@@ -18,6 +18,8 @@ from ..schema import (
     SpeakerMapEntry,
 )
 from ..policies import build_character_rules_block, build_camera_style_block
+from ..vocal_activity import classify_vocal_intervals
+from ..music_performance import MUSIC_PERFORMANCE_RULES, PERFORMANCE_ROLES
 from .base import BasePlanner
 
 
@@ -124,8 +126,9 @@ _MUSIC_SHOT_PROPERTIES = {
                 "speaker_name": {"type": "string"},
                 "visual_description": {"type": "string"},
                 "position_or_relation": {"type": "string"},
+                "performance_role": {"type": "string", "enum": list(PERFORMANCE_ROLES)},
             },
-            "required": ["visual_description"],
+            "required": ["visual_description", "performance_role"],
             "additionalProperties": False,
         },
     },
@@ -253,6 +256,8 @@ def _parse_performer_map(scene_description: str) -> dict[str, str]:
 class MusicVideoPlanner(BasePlanner):
     skill_type = "music_video"
 
+    _LONG_FORM_BATCH_SIZE = 12
+
     def plan(
         self,
         clips: list[dict],
@@ -287,6 +292,15 @@ class MusicVideoPlanner(BasePlanner):
             and shot_image_policy in {"prompt_only", "direct_references"}
         )
         performer_map = _parse_performer_map(scene_description)
+        source_audio_drives_vocals = video_model.lower().startswith(
+            ("minimax_h3", "ltx2_25")
+        )
+        vocal_activity = (
+            classify_vocal_intervals(
+                clips, lyrics, kwargs.get("audio_vocals_path")
+            )
+            if source_audio_drives_vocals else []
+        )
 
         # Normalize speaker_mappings: frontend sends list, we need dict
         if isinstance(speaker_mappings, list):
@@ -303,6 +317,27 @@ class MusicVideoPlanner(BasePlanner):
 
         # Build speaker lookup
         speaker_names = self._build_speaker_names(speaker_mappings, lyrics)
+
+        self._configure_planning_runtime(
+            kwargs,
+            kind="music_video",
+            fingerprint_payload={
+                "planner_revision": 5,
+                "scene_description": scene_description,
+                "clips": clips,
+                "lyrics": lyrics or [],
+                "bpm": bpm,
+                "reference_image_path": reference_image_path,
+                "speaker_mappings": speaker_mappings or {},
+                "characters": characters or [],
+                "video_model": video_model,
+                "image_model": kwargs.get("image_model", ""),
+                "shot_image_policy": shot_image_policy,
+                "vocal_activity": vocal_activity,
+                "character_ref_labels": kwargs.get("character_ref_labels") or [],
+                "location_ref_labels": kwargs.get("location_ref_labels") or [],
+            },
+        )
 
         # Build reference assets
         ref_assets = ReferenceAssets(
@@ -324,9 +359,8 @@ class MusicVideoPlanner(BasePlanner):
             performer_map,
             speaker_names,
             speaker_mappings,
-            source_audio_drives_vocals=video_model.lower().startswith(
-                ("minimax_h3", "ltx2_25")
-            ),
+            source_audio_drives_vocals=source_audio_drives_vocals,
+            vocal_activity=vocal_activity,
         )
 
         # Call LLM for creative planning
@@ -451,6 +485,8 @@ class MusicVideoPlanner(BasePlanner):
             performer_map=performer_map,
             lyrics=lyrics,
             speaker_names=speaker_names,
+            vocal_activity=vocal_activity,
+            project_context=scene_description,
         )
 
         total_duration = sum(c.get("end", 0) - c.get("start", 0) for c in clips) if clips else None
@@ -546,11 +582,14 @@ class MusicVideoPlanner(BasePlanner):
         speaker_mappings: Optional[dict],
         *,
         source_audio_drives_vocals: bool = False,
+        vocal_activity: Optional[list[str]] = None,
     ) -> list[str]:
         """Build text descriptions for each clip (context for LLM)."""
+        if source_audio_drives_vocals and vocal_activity is None:
+            vocal_activity = classify_vocal_intervals(clips, lyrics, None)
         contexts = []
         for i, clip in enumerate(clips):
-            section = (clip.get("label") or "verse").lower()
+            section = (clip.get("label") or clip.get("section_label") or "verse").lower()
             beat_count = clip.get("beat_count", 8)
             start_sec = clip.get("start", 0)
             end_sec = clip.get("end", start_sec + 5)
@@ -584,12 +623,40 @@ class MusicVideoPlanner(BasePlanner):
 
             # Vocal info
             if source_audio_drives_vocals:
-                vocal_info = (
-                    "mapped source audio drives this interval; synchronize "
-                    "visible performance and movement to that exact audio; "
-                    "any visible vocalist explicitly lip-syncs every syllable "
-                    "to it without quoting, transcribing, or inventing words"
+                activity = (
+                    vocal_activity[i]
+                    if vocal_activity and i < len(vocal_activity)
+                    else "unknown"
                 )
+                if activity == "active":
+                    vocal_info = (
+                        "mapped source audio drives this interval; vocal "
+                        "activity is present; "
+                        "synchronize visible performance and movement to that "
+                        "exact audio; any visible vocalist explicitly lip-syncs "
+                        "every syllable to it without quoting, transcribing, "
+                        "or inventing words; an instrumentalist cutaway keeps "
+                        "the established singer off screen and the visible "
+                        "musician's mouth closed"
+                    )
+                elif activity == "silent":
+                    vocal_info = (
+                        "the separated vocal stem is silent in this interval; "
+                        "do not depict singing, lip-sync, or an open-mouth "
+                        "vocal performance; keep visible mouths closed except "
+                        "for clearly non-vocal expression; synchronize motion "
+                        "to the supplied soundtrack"
+                    )
+                else:
+                    vocal_info = (
+                        "mapped source audio drives this interval, but vocal "
+                        "activity is unknown; do not invent lyrics or assert "
+                        "visible singing. Stage the lead singer listening or moving "
+                        "with relaxed closed lips by default; any lip movement must "
+                        "follow an actual audible voice in the supplied audio, never "
+                        "a guitar riff. Do not invent a bellow, shout, vocal breath "
+                        "or open-mouth exertion to convey musical energy"
+                    )
             else:
                 vocal_info = (
                     f'lyrics excerpt: "{lyrics_snippet}"'
@@ -597,6 +664,10 @@ class MusicVideoPlanner(BasePlanner):
                 )
 
             ctx = f"Clip {i + 1}: {section}, {beat_count} beats, {vocal_info}.{performer_hint}"
+            from services.director.music_cues import format_music_cues
+            cue_context = format_music_cues(clip)
+            if cue_context:
+                ctx += f" Music timing: {cue_context}"
             contexts.append(ctx)
 
         return contexts
@@ -618,6 +689,87 @@ class MusicVideoPlanner(BasePlanner):
     ) -> list[dict]:
         """Call LLM to generate structured shot plans."""
         from ..nsfw_guidance import inject_nsfw_if_enabled
+
+        if (
+            len(clips) > self._LONG_FORM_BATCH_SIZE
+            and not kwargs.get("_bounded_music_batch")
+        ):
+            forwarded_kwargs = {
+                key: value for key, value in kwargs.items()
+                if key not in {
+                    "_bounded_music_batch",
+                    "_planning_progress_callback",
+                    "_planning_checkpoint_callback",
+                    "_planning_cancelled_callback",
+                    "_planning_checkpoint",
+                }
+            }
+
+            def call_batch(
+                batch_number: int,
+                start: int,
+                batch_clips: list[dict],
+                previous: Optional[dict],
+            ) -> list[dict]:
+                end = start + len(batch_clips)
+                previous_ending = (
+                    str((previous or {}).get("ending_beat") or "").strip()
+                    or "No prior clip; establish the opening cleanly."
+                )
+                batch_concept = (
+                    f"{scene_description}\n\n"
+                    "LONG-FORM TIMELINE CONTRACT:\n"
+                    f"This is planning batch {batch_number}, covering global "
+                    f"clips {start + 1}-{end} of {len(clips)}. Continue the "
+                    "same music video; do not restart its visual premise or "
+                    "repeat completed clip ideas. Preserve performer identity, "
+                    "wardrobe, world, and established visual grammar unless "
+                    "the song section motivates a visible change.\n"
+                    f"Previous planned ending: {previous_ending}"
+                )
+                return self._plan_with_llm(
+                    clips=batch_clips,
+                    clip_contexts=clip_contexts[start:end],
+                    scene_description=batch_concept,
+                    bpm=bpm,
+                    has_reference=has_reference,
+                    reference_image_path=reference_image_path,
+                    char_profiles=char_profiles,
+                    performer_map=performer_map,
+                    nsfw=nsfw,
+                    _bounded_music_batch=True,
+                    **forwarded_kwargs,
+                )
+
+            return self._run_checkpointed_json_batches(
+                items=clips,
+                batch_size=self._LONG_FORM_BATCH_SIZE,
+                checkpoint_key="music_video_batches",
+                stage="music_video_batch",
+                progress_label="music-video",
+                call_batch=call_batch,
+                fallback_factory=lambda index, clip: {
+                    "scene_goal": (
+                        f"Continue the {str(clip.get('label') or 'music')} "
+                        f"section at global clip {index + 1}"
+                    ),
+                    "scene_type": (
+                        "atmospheric"
+                        if str(clip.get("label") or "").lower()
+                        == "instrumental" else "performance"
+                    ),
+                    "subjects_on_screen": [],
+                    "environment": "",
+                    "visual_style": "",
+                    "lighting": "",
+                    "mood": "",
+                    "action_beats": [],
+                    "camera_plan": {"framing": "medium shot"},
+                    "ending_beat": "The performance continues into the next clip",
+                    "video_prompt": scene_description,
+                    "window_prompts": [],
+                },
+            )
 
         num_character_refs = len(kwargs.get("character_ref_paths", []) or [])
         num_location_refs = len(kwargs.get("location_ref_paths", []) or [])
@@ -665,8 +817,10 @@ class MusicVideoPlanner(BasePlanner):
             "visible traits, wardrobe, performance, camera, lighting, ambience, "
             "effects, and music.\n"
             "- The per-shot source-audio slice is mapped as driving audio. "
-            "Describe visible singing, lip movement, dance, action, and camera "
-            "that synchronize to it; do not invent or transcribe lyrics.\n"
+            "Synchronize instrument playing, dance, action and camera to it. "
+            "Only assigned visible vocalists sing or lip-sync; on instrument "
+            "cutaways the singer remains off screen and the musician's mouth "
+            "stays closed. Do not invent or transcribe lyrics.\n"
             "- Character/location references are soft guidance, not fixed first "
             "frames. Describe the finished target shot.\n"
             "- Do not create image_prompt, image_source, visual_changes, or "
@@ -708,7 +862,7 @@ The user's main reference is visual ground truth. Every image_prompt and video_p
 Character references define identity and location references define the setting. Follow their labels and the Scene Concept in every self-contained video prompt; do not invent conflicting identities or settings."""
         else:
             scene_anchoring_rules = """SCENE-ANCHORING (avoid off-topic content):
-No visual reference was provided. Invent one consistent performer and setting that fit the Scene Concept, then reuse the same artist and world across every clip. Show the performer delivering vocals on lyric clips and do not drift off-concept."""
+No visual reference was provided. Invent consistent performers and a setting that fit the Scene Concept, then reuse the same artists, roles and world across every clip. Show the assigned singer delivering vocals in singer-focused shots; instrument cutaways keep that voice off screen."""
 
         system_prompt = f"""You are a music video director. Plan each clip AND write its prompts. Output ONLY the JSON array.
 
@@ -727,6 +881,8 @@ MUSIC VIDEO RULES:
 
 {music_video_rules}
 
+{MUSIC_PERFORMANCE_RULES}
+
 {h3_direct_rules}
 
 {image_prompt_rules}
@@ -737,7 +893,7 @@ OUTPUT — respond with ONLY a JSON array:
   {{
     "scene_goal": "What this clip achieves",
     "scene_type": "performance|narrative|atmospheric",
-    "subjects_on_screen": [{{"visual_description": "the woman in red", "position_or_relation": "center frame"}}],
+    "subjects_on_screen": [{{"visual_description": "the woman in red", "position_or_relation": "center frame", "performance_role": "vocalist"}}],
     "environment": "Setting details",
     "visual_style": "Style",
     "lighting": "Lighting",
@@ -806,7 +962,12 @@ Write {len(clips)} structured shot plans. Go:"""
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             max_tokens=max_tokens,
-            thinking_budget=4096,
+            # A long timeline is already divided into a bounded, explicit clip
+            # batch. Keep that structured transformation grammar-constrained
+            # and spend reasoning only on the historical short-form path.
+            thinking_budget=(
+                0 if kwargs.get("_bounded_music_batch") else 4096
+            ),
             image_paths=image_paths,
             json_schema=_music_shot_schema(
                 len(clips),
@@ -828,12 +989,14 @@ Write {len(clips)} structured shot plans. Go:"""
         performer_map: dict[str, str],
         lyrics: Optional[list[dict]],
         speaker_names: dict[str, str],
+        vocal_activity: Optional[list[str]] = None,
+        project_context: str = "",
     ) -> list[ShotPlan]:
         """Convert raw LLM JSON output into validated ShotPlan objects."""
         shots = []
         for i, clip in enumerate(clips):
-            raw = shot_dicts[i] if i < len(shot_dicts) else {}
-            section = (clip.get("label") or "verse").lower()
+            raw = dict(shot_dicts[i]) if i < len(shot_dicts) else {}
+            section = (clip.get("label") or clip.get("section_label") or "verse").lower()
             strategy = _SECTION_VISUAL_STRATEGY.get(section, _SECTION_VISUAL_STRATEGY["verse"])
             duration = clip.get("end", 0) - clip.get("start", 0)
 
@@ -865,7 +1028,33 @@ Write {len(clips)} structured shot plans. Go:"""
                 mode=audio_raw.get("mode", "music_driven"),
                 ambience=audio_raw.get("ambience"),
                 timing_anchor="audio",
+                vocal_activity=(
+                    vocal_activity[i]
+                    if vocal_activity and i < len(vocal_activity) else None
+                ),
             )
+
+            # Keep all generated views of a performance consistent, including
+            # its start image and ending pose. The final H3 compiler repeats
+            # this after any later polish, using the persisted audio evidence.
+            from ..music_performance import constrain_music_performance, music_performance_direction
+            for key in ("video_prompt", "image_prompt", "spatial_setup", "ending_beat"):
+                if isinstance(raw.get(key), str):
+                    raw[key] = constrain_music_performance(
+                        raw[key], subjects, audio.vocal_activity, project_context=project_context,
+                    )
+            for key in ("window_prompts", "keyframe_prompts", "action_beats", "performance_beats"):
+                if isinstance(raw.get(key), list):
+                    raw[key] = [
+                        constrain_music_performance(value, subjects, audio.vocal_activity, project_context=project_context)
+                        if isinstance(value, str) else value for value in raw[key]
+                    ]
+            if audio.vocal_activity is not None:
+                direction = music_performance_direction(subjects, audio.vocal_activity, project_context=project_context)
+                if raw.get("video_prompt"):
+                    raw["video_prompt"] = f"{raw['video_prompt']} {direction}"
+                if raw.get("window_prompts"):
+                    raw["window_prompts"] = [f"{value} {direction}" if isinstance(value, str) else value for value in raw["window_prompts"]]
 
             # Parse dialogue beats if present
             dialogue_beats = None

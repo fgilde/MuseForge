@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect, useMemo } from 'react'
-import { Film, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, Layers, ChevronDown, ChevronUp } from 'lucide-react'
+import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, Layers, ChevronDown, ChevronUp } from 'lucide-react'
 import { TabFilter } from './TabFilter'
 import { MediaGrid } from './MediaGrid'
 import { ChatView } from './ChatView'
@@ -8,11 +8,14 @@ import { VoicesView } from './VoicesView'
 import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
 import { useIsMobile } from '../../lib/useIsMobile'
+import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
+import { PROMPT_ENHANCEMENT_ACTIVITY } from '../../lib/promptEnhancementActivity'
 import type { GenerationJob } from '../../types'
 
 function WorkspaceSelector() {
   const workspaces = useStore(s => s.workspaces)
   const activeWorkspace = useStore(s => s.activeWorkspace)
+  const browsingAllFolders = useStore(s => s.browsingAllFolders)
   const browsingUploads = useStore(s => s.browsingUploads)
   const switchWorkspace = useStore(s => s.switchWorkspace)
   const createWorkspace = useStore(s => s.createWorkspace)
@@ -79,7 +82,7 @@ function WorkspaceSelector() {
         title="Switch workspace"
       >
         <FolderOpen size={12} />
-        <span className="max-w-[120px] truncate">{browsingUploads ? 'Uploads' : activeWorkspace}</span>
+        <span className="max-w-[120px] truncate">{browsingAllFolders ? 'All folders' : browsingUploads ? 'Uploads' : activeWorkspace}</span>
       </button>
 
       {open && (
@@ -87,17 +90,25 @@ function WorkspaceSelector() {
           <div className="px-2 py-1.5 border-b border-border">
             <span className="text-[10px] text-text-muted uppercase tracking-wider">Workspaces</span>
           </div>
+          <button
+            onClick={() => { switchWorkspace('__all__'); setOpen(false) }}
+            className={`w-full text-left px-3 py-2 text-xs flex items-center justify-between hover:bg-bg-hover ${browsingAllFolders ? 'text-accent-blue' : 'text-text-secondary'}`}
+            title="Browse and search every output folder. New generations keep their current destination."
+          >
+            <span className="flex items-center gap-1.5"><FolderOpen size={12} /> All folders</span>
+            {browsingAllFolders && <Check size={12} />}
+          </button>
           <div className="max-h-[200px] overflow-y-auto">
             {workspaces.map(ws => (
               <div key={ws.name} className="flex items-center group hover:bg-bg-hover transition-colors">
                 <button
                   onClick={() => { switchWorkspace(ws.name); setOpen(false) }}
                   className={`flex-1 min-w-0 text-left px-3 py-2 text-xs flex items-center justify-between ${
-                    ws.name === activeWorkspace && !browsingUploads ? 'text-accent-blue' : 'text-text-secondary'
+                    ws.name === activeWorkspace && !browsingUploads && !browsingAllFolders ? 'text-accent-blue' : 'text-text-secondary'
                   }`}
                 >
                   <span className="truncate">{ws.name}</span>
-                  {ws.name === activeWorkspace && !browsingUploads && <Check size={12} className="shrink-0" />}
+                  {ws.name === activeWorkspace && !browsingUploads && !browsingAllFolders && <Check size={12} className="shrink-0" />}
                 </button>
                 {/* default IS the outputs folder itself — not deletable */}
                 {ws.name !== 'default' && (
@@ -177,22 +188,33 @@ function stripTimeSuffix(msg: string): string {
   return msg.replace(/\s*\|\s*\d+:\d+.*$/, '').trim()
 }
 
-function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop: () => void; onDismiss: () => void }) {
+function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop?: () => void; onDismiss: () => void }) {
   const hasSteps = job.totalSteps > 0
   const progressPct = hasSteps ? (job.step / job.totalSteps) * 100 : job.progress * 100
   const phase = stripTimeSuffix(job.phase || job.message)
   const isFailed = job.status === 'failed' || job.status === 'cancelled'
+  const isPromptPlanning = job.kind === 'prompt_enhancement'
   const errorText = job.error || job.message || (job.status === 'cancelled' ? 'Cancelled' : 'Generation failed')
-  const [showH3Prompts, setShowH3Prompts] = useState(false)
+  const h3PlanSignature = job.h3WindowPlan?.signature
+  const [h3PromptDisclosure, setH3PromptDisclosure] = useState({
+    signature: h3PlanSignature,
+    open: false,
+  })
+  const showH3Prompts = (
+    h3PromptDisclosure.signature === h3PlanSignature && h3PromptDisclosure.open
+  )
   const h3WindowMatch = (job.phase || job.message || '').match(/Sliding Window\s+(\d+)\/(\d+)/i)
-  const activeH3Window = h3WindowMatch ? Number(h3WindowMatch[1]) : 1
+  const activeH3Window = job.currentWindow ?? (h3WindowMatch ? Number(h3WindowMatch[1]) : 1)
+  const totalStudioWindows = job.totalWindows ?? (h3WindowMatch ? Number(h3WindowMatch[2]) : 1)
+  const isMultiWindow = totalStudioWindows > 1
+  const isMultiClip = (job.totalClips ?? 1) > 1
+  const windowEta = formatEtaDuration(job.windowEtaSeconds)
+  const windowClock = formatEstimatedClock(job.windowCompletionAt)
+  const generationEta = formatEtaDuration(job.generationEtaSeconds)
+  const generationClock = formatEstimatedClock(job.generationCompletionAt)
   const activeH3PlanWindow = job.h3WindowPlan?.windows.find(
     window => window.index === activeH3Window,
   ) || job.h3WindowPlan?.windows[0]
-
-  useEffect(() => {
-    setShowH3Prompts(false)
-  }, [job.h3WindowPlan?.signature])
 
   return (
     <div className={`rounded-xl border overflow-hidden ${
@@ -214,7 +236,13 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
 
           <div className="text-center w-full">
             <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : 'text-text-secondary'}`}>
-              {isFailed ? (job.status === 'cancelled' ? 'Cancelled' : 'Generation Failed') : job.status === 'queued' ? 'Queued...' : 'Generating...'}
+              {isFailed
+                ? (job.status === 'cancelled' ? 'Cancelled' : 'Generation Failed')
+                : isPromptPlanning
+                  ? 'Planning with AI...'
+                  : job.status === 'queued'
+                    ? 'Queued...'
+                    : 'Generating...'}
             </p>
             {!isFailed && phase && (
               <p className="text-xs mt-1 truncate">{phase}</p>
@@ -223,6 +251,35 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
               <p className="text-[10px] text-text-muted mt-0.5">
                 Step {job.step}/{job.totalSteps}
               </p>
+            )}
+            {!isFailed && job.status === 'running' && (
+              <div className="mt-1 space-y-0.5 text-[10px] text-text-muted">
+                {isMultiClip && (
+                  <p>
+                    Clip {job.currentClip ?? 1}/{job.totalClips}
+                    {isMultiWindow ? ` · Window ${activeH3Window}/${totalStudioWindows}` : ''}
+                  </p>
+                )}
+                {isMultiWindow && windowEta && (
+                  <p>
+                    Window {activeH3Window}/{totalStudioWindows} · {windowEta} remaining
+                    {windowClock ? ` · around ${windowClock}` : ''}
+                  </p>
+                )}
+                {generationEta ? (
+                  <p>
+                    {isMultiWindow || isMultiClip ? 'Full Studio render' : 'Estimated'} {generationEta}
+                    {generationClock ? ` · around ${generationClock}` : ''}
+                  </p>
+                ) : job.etaConfidence === 'calibrating' ? (
+                  <p>Calibrating ETA…</p>
+                ) : null}
+                {(job.etaHistorySamples ?? 0) > 0 && (
+                  <p>
+                    Learned from {job.etaHistorySamples} {job.etaHistoryMatch === 'exact' ? 'matching' : 'related'} local render{job.etaHistorySamples === 1 ? '' : 's'}
+                  </p>
+                )}
+              </div>
             )}
             {isFailed && (
               <p className="text-[11px] text-text-secondary mt-2 max-h-24 overflow-y-auto px-2 leading-relaxed whitespace-pre-wrap break-words">
@@ -255,7 +312,10 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
             </span>
             <button
               type="button"
-              onClick={() => setShowH3Prompts(open => !open)}
+              onClick={() => setH3PromptDisclosure(current => ({
+                signature: h3PlanSignature,
+                open: current.signature === h3PlanSignature ? !current.open : true,
+              }))}
               className="flex items-center gap-1 text-accent-blue hover:text-accent-blue/80"
             >
               {showH3Prompts ? 'Hide all' : 'View all'}
@@ -298,7 +358,7 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
         <div className="text-[11px] text-text-muted truncate flex-1">
           {isFailed ? 'Click × to dismiss — the tile stays so you can see what failed' : phase || 'Preparing...'}
         </div>
-        {!isFailed && (
+        {!isFailed && onStop && (
           <button
             onClick={onStop}
             className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors shrink-0 ml-2"
@@ -316,13 +376,18 @@ function PipelinePlaceholder() {
   const pipelineStatus = useStore(s => s.pipelineStatus)
   const pipelineId = useStore(s => s.pipelineId)
   const stopPipeline = useStore(s => s.stopPipeline)
+  const resumePipeline = useStore(s => s.resumePipeline)
+  const reattachDirectorPipeline = useStore(s => s.reattachDirectorPipeline)
+  const [resuming, setResuming] = useState(false)
 
   if (!pipelineId || !pipelineStatus) return null
-  if (pipelineStatus.status === 'completed' || pipelineStatus.status === 'failed' || pipelineStatus.status === 'cancelled') return null
+  if (pipelineStatus.status === 'completed') return null
 
   const phase = pipelineStatus.phase || 'planning'
   const progress = pipelineStatus.progress
   const message = progress?.message || phase
+  const isFailed = pipelineStatus.status === 'failed' || pipelineStatus.status === 'cancelled'
+  const errorText = pipelineStatus.error || message || 'Director pipeline stopped'
 
   const hasSteps = (progress?.total_steps ?? 0) > 0
   const progressPct = hasSteps
@@ -331,51 +396,132 @@ function PipelinePlaceholder() {
       ? (progress.current / progress.total) * 100
       : 0
   const phaseLabel = stripTimeSuffix(message)
+  const currentClip = progress?.current_clip
+  const totalClips = progress?.total_clips
+  const clipEta = formatEtaDuration(progress?.clip_eta_seconds)
+  const clipClock = formatEstimatedClock(progress?.clip_completion_at)
+  const projectEta = formatEtaDuration(progress?.project_eta_seconds)
+  const projectClock = formatEstimatedClock(progress?.project_completion_at)
 
   return (
-    <div className="rounded-xl overflow-hidden border border-accent-blue/30 bg-bg-tertiary">
-      <div className="w-full aspect-video flex items-center justify-center">
+    <div className={`rounded-xl overflow-hidden border ${isFailed ? 'border-red-500/30' : 'border-accent-blue/30'} bg-bg-tertiary`}>
+      <div className="w-full aspect-video flex items-center justify-center relative">
+        {isFailed && (
+          <button
+            type="button"
+            onClick={() => useStore.setState({ pipelineId: null, pipelineStatus: null, directorError: null })}
+            className="absolute top-2 right-2 p-1.5 rounded-full bg-bg-active text-text-secondary hover:bg-red-600 hover:text-white transition-colors z-10"
+            title="Dismiss"
+          >
+            <X size={14} />
+          </button>
+        )}
         <div className="flex flex-col items-center gap-3 text-text-muted w-full max-w-xs px-4">
-          <Film size={40} className="animate-pulse" />
+          <Film size={40} className={isFailed ? 'text-red-400' : 'animate-pulse'} />
 
           <div className="text-center w-full">
-            <p className="text-sm font-medium text-text-secondary">
-              {pipelineStatus?.status === 'paused' ? 'Paused — Review' : 'Director'}
+            <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : 'text-text-secondary'}`}>
+              {isFailed
+                ? (pipelineStatus.status === 'cancelled' ? 'Director Cancelled' : 'Director Failed')
+                : pipelineStatus.status === 'paused' ? 'Paused — Review' : 'Director'}
             </p>
-            <p className="text-xs mt-1 truncate">{phaseLabel}</p>
-            {hasSteps && (
+            {!isFailed && <p className="text-xs mt-1 truncate">{phaseLabel}</p>}
+            {hasSteps && !isFailed && (
               <p className="text-[10px] text-text-muted mt-0.5">
                 Step {progress!.step}/{progress!.total_steps}
               </p>
             )}
+            {!isFailed && currentClip ? (
+              <div className="mt-1 space-y-0.5 text-[10px] text-text-muted">
+                <p>
+                  Clip {currentClip}/{totalClips || '?'}
+                  {clipEta
+                    ? ` · ${clipEta} remaining${clipClock ? ` · around ${clipClock}` : ''}`
+                    : ' · Calibrating ETA…'}
+                </p>
+                {projectEta && (
+                  <p>
+                    Full Director render {projectEta}
+                    {projectClock ? ` · around ${projectClock}` : ''}
+                  </p>
+                )}
+                {(progress?.eta_history_samples ?? 0) > 0 && (
+                  <p>
+                    Learned from {progress!.eta_history_samples} {progress!.eta_history_match === 'exact' ? 'matching' : 'related'} local render{progress!.eta_history_samples === 1 ? '' : 's'}
+                  </p>
+                )}
+              </div>
+            ) : null}
+            {isFailed && (
+              <>
+                {progress && progress.total > 0 && (
+                  <p className="mt-1 text-[10px] text-text-muted">
+                    Saved progress: {progress.current}/{progress.total}
+                  </p>
+                )}
+                <p className="text-[11px] text-text-secondary mt-2 max-h-24 overflow-y-auto px-2 leading-relaxed whitespace-pre-wrap break-words">
+                  {errorText}
+                </p>
+              </>
+            )}
           </div>
 
           {/* Progress bar */}
-          <div className="w-full bg-bg-active rounded-full h-1.5 overflow-hidden">
-            {progressPct > 0 ? (
-              <div
-                className="h-full bg-accent-green rounded-full transition-all duration-300"
-                style={{ width: `${progressPct}%` }}
-              />
-            ) : (
-              <div className="h-full bg-accent-green/60 rounded-full animate-pulse w-full" />
-            )}
-          </div>
+          {!isFailed && (
+            <div className="w-full bg-bg-active rounded-full h-1.5 overflow-hidden">
+              {progressPct > 0 ? (
+                <div
+                  className="h-full bg-accent-green rounded-full transition-all duration-300"
+                  style={{ width: `${progressPct}%` }}
+                />
+              ) : (
+                <div className="h-full bg-accent-green/60 rounded-full animate-pulse w-full" />
+              )}
+            </div>
+          )}
         </div>
       </div>
 
       {/* Bottom bar with stop button */}
       <div className="px-3 py-2 min-h-[40px] flex items-center justify-between">
         <div className="text-[11px] text-text-muted truncate flex-1">
-          {phaseLabel || 'Preparing...'}
+          {isFailed ? 'The saved Director checkpoint can be resumed' : phaseLabel || 'Preparing...'}
         </div>
-        <button
-          onClick={() => stopPipeline()}
-          className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors shrink-0 ml-2"
-        >
-          <Square size={11} />
-          Stop
-        </button>
+        {isFailed ? (
+          <div className="flex items-center gap-2 shrink-0 ml-2">
+            <button
+              type="button"
+              onClick={() => void reattachDirectorPipeline(pipelineId, true)}
+              className="text-xs text-text-secondary hover:text-text-primary transition-colors"
+            >
+              Open Director
+            </button>
+            <button
+              type="button"
+              disabled={resuming}
+              onClick={async () => {
+                setResuming(true)
+                try {
+                  await resumePipeline(pipelineId)
+                } finally {
+                  setResuming(false)
+                }
+              }}
+              className="flex items-center gap-1 rounded-md bg-accent-blue px-2 py-1 text-xs text-white hover:bg-accent-blue-hover disabled:opacity-50"
+            >
+              {resuming ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
+              Resume
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => stopPipeline()}
+            className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors shrink-0 ml-2"
+          >
+            <Square size={11} />
+            Stop
+          </button>
+        )}
       </div>
     </div>
   )
@@ -389,6 +535,7 @@ export function MainContent() {
   const loadedCount = useStore(s => s.outputs.length)
   const outputsTotal = useStore(s => s.outputsTotal)
   const jobs = useStore(s => s.jobs)
+  const isEnhancing = useStore(s => s.isEnhancing)
   const generationMode = useStore(s => s.generationMode)
   const audioSubMode = useStore(s => s.audioSubMode)
   const stopGeneration = useStore(s => s.stopGeneration)
@@ -397,8 +544,15 @@ export function MainContent() {
   // focused on media plus useful live/error cards instead of large blank
   // placeholders for every job that has not started yet.
   const galleryJobs = useMemo(
-    () => jobs.filter(job => job.status !== 'held' && job.status !== 'queued'),
-    [jobs],
+    () => {
+      const visibleJobs = jobs.filter(job => (
+        job.status !== 'held'
+        && job.status !== 'completed'
+        && (job.status !== 'queued' || job.showInGallery === true)
+      ))
+      return isEnhancing ? [PROMPT_ENHANCEMENT_ACTIVITY, ...visibleJobs] : visibleJobs
+    },
+    [isEnhancing, jobs],
   )
 
   // The virtualizer that used to live here is gone: measured heights, an
@@ -477,7 +631,7 @@ export function MainContent() {
               <JobPlaceholder
                 key={j.id || `pending-${i}`}
                 job={j}
-                onStop={() => stopGeneration(j.id)}
+                onStop={j.kind === 'prompt_enhancement' ? undefined : () => stopGeneration(j.id)}
                 onDismiss={() => dismissJob(j.id)}
               />
             ))}

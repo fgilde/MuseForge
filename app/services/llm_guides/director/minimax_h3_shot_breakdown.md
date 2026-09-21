@@ -36,14 +36,25 @@ CONTINUITY WITHOUT A FIXED START IMAGE:
 CONTEXT-IR FORMAT:
 - Structure video_prompt with exactly these labeled sections:
   integrated_multimodal_description, overall_soundscape, non_diegetic_music.
-- Begin integrated_multimodal_description with [Shot 1] and narrate visible
-  action, camera, dialogue, and synchronized sound in chronological order.
+- Begin integrated_multimodal_description with [Shot 1] and no timestamp, then
+  narrate visible action, camera, dialogue, and synchronized sound in
+  chronological order. Later cuts begin [Shot N] At MM:SS.mmm.
 - Give each speaking person a stable ID such as (S1) or (S2).
+- When already numbered people speak or sing together, use a compound ID such
+  as (S1,S2). Characters who never vocalize receive no speaker ID.
 - Literal speech uses <d>[English] Exact words.</d> (change the language tag
   when requested). Speaker identity, action, delivery, and voice are outside
   the dialogue tag. Preserve scripted dialogue verbatim.
 - Every structured dialogue_beats entry must also appear exactly once in
   video_prompt. Never leave the actual spoken words only in the JSON field.
+- For voiceover, use the exact phrase "says in an off-screen voiceover" and
+  immediately state that the corresponding on-screen character's lips remain
+  completely closed.
+- Use <scenetrans> at both connecting points only when the same line genuinely
+  crosses a cut, and <cutoff> only when speech is intentionally truncated by
+  the video ending.
+- Preserve visible signs, labels, banners, subtitles, and other on-screen text
+  verbatim in English double quotation marks; never translate it.
 - When no dialogue is requested, explicitly keep mouths closed and omit voices
   or speech-like sounds. Explicitly forbid muttering, murmuring, improvised
   words, and gibberish; never fill unused time with invented speech.
@@ -56,7 +67,8 @@ CONTEXT-IR FORMAT:
 
 TIMING:
 - Keep actions and dialogue realistic for the requested duration. Spoken text
-  should generally stay at or below about two words per second.
+  should target 2.8 words per second during speech and never exceed 3 words per
+  second across all speakers. Leave time for requested action and pauses.
 - H3 renders bounded native shots. Do not put LTX sliding-window commands,
   references to a previous shot, or IC-LoRA ``Shot N (Camera, Xs)`` trigger
   syntax inside video_prompt. Use the required structured continuity fields

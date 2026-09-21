@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from services.dialogue_timing import DIALOGUE_MAX_WORDS_PER_SECOND
 from ..schema import (
     ShotPlan, ProductionPlan,
     VALID_SKILL_TYPES, VALID_SOURCE_MODES, VALID_IMAGE_STRATEGIES, VALID_CONTINUITY_STRATEGIES,
@@ -89,12 +90,33 @@ def validate_shot_plan(shot: ShotPlan, plan: Optional[ProductionPlan] = None) ->
 
     # ── Dialogue budget check ────────────────────────────────────
     if shot.dialogue_beats:
-        total_words = sum(len(db.spoken_text.split()) for db in shot.dialogue_beats)
-        budget = int(shot.duration_sec * 2.5)
-        if total_words > budget * 1.5:
+        # Dialogue can originate in third-party/local structured LLM output,
+        # not only in our typed constructors. Never let one null or blank
+        # silent row crash an otherwise completed long-form plan during its
+        # final validation pass.
+        normalized_dialogue = []
+        removed_empty = 0
+        for beat in shot.dialogue_beats:
+            spoken_text = str(getattr(beat, "spoken_text", None) or "").strip()
+            if not spoken_text:
+                removed_empty += 1
+                continue
+            beat.spoken_text = spoken_text
+            normalized_dialogue.append(beat)
+        if removed_empty:
+            shot.dialogue_beats = normalized_dialogue or None
+            auto_fixes.append(
+                f"Removed {removed_empty} empty dialogue beat"
+                f"{'s' if removed_empty != 1 else ''}"
+            )
+        total_words = sum(
+            len(beat.spoken_text.split()) for beat in normalized_dialogue
+        )
+        budget = int(shot.duration_sec * DIALOGUE_MAX_WORDS_PER_SECOND)
+        if total_words > budget:
             warnings.append(
                 f"Dialogue over-budget: {total_words} words for {shot.duration_sec}s shot "
-                f"(budget ~{budget} words at ~2 words/sec)"
+                f"(budget {budget} words at {DIALOGUE_MAX_WORDS_PER_SECOND:g} words/sec)"
             )
 
     # ── Action beat count check ──────────────────────────────────

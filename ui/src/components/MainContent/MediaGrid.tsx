@@ -418,7 +418,8 @@ function DetailDialog({ index, onClose, onStep }: {
             file={file}
             index={index}
             isActive
-            onVisible={() => {}}
+            onActivate={() => {}}
+            onPlaybackStart={() => {}}
             onMeasured={() => {}}
           />
         </div>

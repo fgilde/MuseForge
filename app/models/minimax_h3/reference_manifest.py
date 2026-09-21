@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 
 
 MINIMAX_H3_MAX_REFERENCE_IMAGES = 9
@@ -22,6 +23,7 @@ _VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 _AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 _AUDIO_INTENTS = {"voice", "drive", "style"}
 _IMAGE_INTENTS = {"identity", "scene", "style", "composition"}
+_VIDEO_INTENTS = {"character", "motion", "scene"}
 _AUDIO_REFERENCE_TAG_RE = re.compile(
     r"(?P<tag><Audio\s+(?P<tag_index>\d+)>)|(?P<plain>\bAudio\s+(?P<plain_index>\d+)\b)",
     re.IGNORECASE,
@@ -79,6 +81,28 @@ def validate_reference_manifest(
         item["type"] = kind
         item["path"] = path
         item["role"] = str(raw.get("role") or "").strip()[:500]
+        refmod_path = str(raw.get("refmod_path") or "").strip()
+        if refmod_path:
+            if kind == "audio":
+                raise ValueError("RefMods attach to visual references; use the saved voice as a separate audio reference.")
+            resolved = Path(refmod_path).resolve()
+            library_root = (Path.cwd() / "uploads" / "characters").resolve()
+            if not resolved.is_relative_to(library_root):
+                raise ValueError("Import this RefMod into Maestro's character library first.")
+            if require_files:
+                from services.refmod import inspect_refmod
+                info = inspect_refmod(resolved)
+                if info["refmod"]["kind"] != kind:
+                    raise ValueError("The RefMod and its visual reference have different media kinds.")
+            item["refmod_path"] = str(resolved)
+            if raw.get("remove_background"):
+                raise ValueError("Background removal cannot change an encoded RefMod. Use an original image reference for that option.")
+        library_character_id = str(raw.get("library_character_id") or "").strip()[:128]
+        character_name = str(raw.get("character_name") or "").strip()[:120]
+        if library_character_id:
+            item["library_character_id"] = library_character_id
+        if character_name:
+            item["character_name"] = character_name
         if kind == "image":
             image_intent = str(raw.get("image_intent") or "identity").strip().lower()
             if image_intent not in _IMAGE_INTENTS:
@@ -88,6 +112,23 @@ def validate_reference_manifest(
                     f"{image_intent!r}; expected one of: {choices}."
                 )
             item["image_intent"] = image_intent
+            remove_background = raw.get("remove_background")
+            if remove_background is None:
+                # Preserve the original image and its lighting by default.
+                # Isolation is useful when a source background leaks into the
+                # target, but it can make the result look composited, so it is
+                # always an explicit per-reference choice.
+                remove_background = False
+            elif not isinstance(remove_background, bool):
+                raise ValueError(
+                    f"Reference {index + 1} remove_background must be true or false."
+                )
+            # Background removal is intentionally unavailable to locations,
+            # styles, and composition references: their surroundings are the
+            # information the model is meant to retain.
+            item["remove_background"] = bool(
+                remove_background and image_intent == "identity"
+            )
         if kind == "audio":
             audio_intent = str(raw.get("audio_intent") or "voice").strip().lower()
             if audio_intent not in _AUDIO_INTENTS:
@@ -100,6 +141,14 @@ def validate_reference_manifest(
             if audio_intent == "drive":
                 drive_audio_count += 1
         if kind == "video":
+            video_intent = str(raw.get("video_intent") or "motion").strip().lower()
+            if video_intent not in _VIDEO_INTENTS:
+                choices = ", ".join(sorted(_VIDEO_INTENTS))
+                raise ValueError(
+                    f"Reference {index + 1} has invalid video intent "
+                    f"{video_intent!r}; expected one of: {choices}."
+                )
+            item["video_intent"] = video_intent
             item["include_audio"] = bool(raw.get("include_audio", True))
             audio_path = str(raw.get("audio_path") or "").strip()
             if audio_path:
