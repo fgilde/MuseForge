@@ -11,6 +11,22 @@
 <meta property="og:type" content="website" />
 <link rel="icon" href="logo.png" />
 <link rel="stylesheet" href="assets/style.css" />
+<script type="module" src="https://connect.gilde.org/widgets/v1.js"></script>
+<script>
+  // The widgets take a static theme attribute while this site follows the
+  // operating system, so keep every embedded widget in step with it.
+  (function () {
+    var query = window.matchMedia('(prefers-color-scheme: light)');
+    function apply() {
+      var theme = query.matches ? 'light' : 'dark';
+      document.querySelectorAll('gilde-contact, gilde-support')
+        .forEach(function (el) { el.setAttribute('theme', theme); });
+    }
+    apply();
+    query.addEventListener('change', apply);
+    document.addEventListener('DOMContentLoaded', apply);
+  })();
+</script>
 </head>
 <body>
 
@@ -21,6 +37,7 @@
       <a href="#what" class="hide-sm">Features</a>
       <a href="#start">Install</a>
       <a href="#agents" class="hide-sm">Agents</a>
+      <a href="#connect" class="hide-sm">Contact</a>
       <a href="docs/">Docs</a>
       <a href="https://github.com/fgilde/MuseForge">GitHub</a>
       <span class="lang"><a class="on" href="./">EN</a><a href="de/">DE</a></span>
@@ -162,6 +179,10 @@
         <img src="screenshots/studio.png" alt="The Studio workspace" />
         <figcaption>Studio — gallery, queue and the control dock in one view.</figcaption>
       </figure>
+      <figure>
+        <img src="screenshots/about.png" alt="Settings, About tab" />
+        <figcaption>Settings → About — contact and support, in the app's own accent.</figcaption>
+      </figure>
     </div>
   </div>
 </section>
@@ -204,6 +225,41 @@ docker compose up -d</code></pre>
       Released under the WanGP Non-Commercial Evaluation License 1.1. Free for
       non-commercial use; your generated outputs are yours.
     </p>
+  </div>
+</section>
+
+<section id="connect">
+  <div class="wrap">
+    <h2>Questions, or want to help?</h2>
+    <p class="sub">
+      Write directly — bug report, feature idea, or just how you are using it.
+      MuseForge is free and stays that way; supporting it is optional and
+      keeps the GPUs that test each release running.
+    </p>
+    <p class="sub" style="margin-top:-18px">
+      The same two forms sit inside the app under <strong>Settings → About</strong>,
+      painted in whatever accent colour your theme is using.
+    </p>
+    <div class="connect">
+      <div>
+        <gilde-contact project="fgilde/MuseForge" widget="contact" inline theme="dark"
+          accent="#38bdf8" language="en" title="Contact MuseForge"
+          width="560" radius="18" padding="28"
+          show-logo="true" show-description="false" show-homepage="false"
+          show-preview-notice="false" show-footer="false"
+          footer-brand="MuseForge" footer-tagline="gilde.org">Contact MuseForge</gilde-contact>
+      </div>
+      <div>
+        <gilde-support project="fgilde/MuseForge" widget="support" inline theme="dark"
+          accent="#a78bfa" language="en"
+          width="560" radius="18" padding="28"
+          show-logo="true" show-description="false" show-homepage="false"
+          show-preview-notice="false" show-footer="false"
+          footer-brand="MuseForge" footer-tagline="gilde.org"
+          show-support-hint="false" support-layout="rows"
+          show-support-icons="true" show-support-qr="true">Support MuseForge</gilde-support>
+      </div>
+    </div>
   </div>
 </section>
 

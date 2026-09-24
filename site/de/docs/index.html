@@ -7,6 +7,22 @@
 <meta name="description" content="MuseForge installieren, benutzen und automatisieren: Studio, Director, Storywriter, Hörbücher, Stimmen, Blueprints, LoRAs, REST-API und MCP." />
 <link rel="icon" href="../../logo.png" />
 <link rel="stylesheet" href="../../assets/style.css" />
+<script type="module" src="https://connect.gilde.org/widgets/v1.js"></script>
+<script>
+  // The widgets take a static theme attribute while this site follows the
+  // operating system, so keep every embedded widget in step with it.
+  (function () {
+    var query = window.matchMedia('(prefers-color-scheme: light)');
+    function apply() {
+      var theme = query.matches ? 'light' : 'dark';
+      document.querySelectorAll('gilde-contact, gilde-support')
+        .forEach(function (el) { el.setAttribute('theme', theme); });
+    }
+    apply();
+    query.addEventListener('change', apply);
+    document.addEventListener('DOMContentLoaded', apply);
+  })();
+</script>
 </head>
 <body>
 
@@ -45,6 +61,7 @@
     <a href="#updates">Aktualisieren</a>
     <a href="#sicherheit">Erreichbarkeit &amp; Sicherheit</a>
     <a href="#probleme">Fehlerbehebung</a>
+    <a href="#kontakt">Hilfe bekommen</a>
   </aside>
 
   <article>
@@ -441,6 +458,30 @@ git fetch upstream &amp;&amp; git merge upstream/main</code></pre>
     wählen. Die Auto-Tune-Funktion vermisst die GPU beim ersten Start und wählt
     Offload- und Quantisierungseinstellungen; Karten mit wenig VRAM funktionieren,
     nur langsam.
+  </p>
+
+  <h2 id="kontakt">Hilfe bekommen</h2>
+  <p>
+    Fehlermeldungen und Wünsche gehören in die
+    <a href="https://github.com/fgilde/MuseForge/issues">GitHub-Issues</a>, dort
+    bleiben sie für die Nächsten auffindbar. Für alles andere — eine Frage, eine
+    Korrektur an diesen Seiten, oder was du damit gebaut hast — schreib direkt:
+  </p>
+  <p class="connect-buttons">
+    <gilde-contact project="fgilde/MuseForge" widget="contact" theme="dark"
+      accent="#38bdf8" language="de" title="Kontakt MuseForge"
+      width="560" radius="18" padding="28"
+      show-logo="true" show-description="true" show-homepage="true"
+      show-preview-notice="false" show-footer="true"
+      footer-brand="MuseForge" footer-tagline="gilde.org">Kontakt</gilde-contact>
+    <gilde-support project="fgilde/MuseForge" widget="support" theme="dark"
+      accent="#a78bfa" language="de"
+      width="560" radius="18" padding="28"
+      show-logo="true" show-description="true" show-homepage="true"
+      show-preview-notice="false" show-footer="true"
+      footer-brand="MuseForge" footer-tagline="gilde.org"
+      show-support-hint="false" support-layout="rows"
+      show-support-icons="true" show-support-qr="true">MuseForge unterstützen</gilde-support>
   </p>
 
   </article>

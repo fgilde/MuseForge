@@ -11,6 +11,22 @@
 <meta property="og:type" content="website" />
 <link rel="icon" href="../logo.png" />
 <link rel="stylesheet" href="../assets/style.css" />
+<script type="module" src="https://connect.gilde.org/widgets/v1.js"></script>
+<script>
+  // The widgets take a static theme attribute while this site follows the
+  // operating system, so keep every embedded widget in step with it.
+  (function () {
+    var query = window.matchMedia('(prefers-color-scheme: light)');
+    function apply() {
+      var theme = query.matches ? 'light' : 'dark';
+      document.querySelectorAll('gilde-contact, gilde-support')
+        .forEach(function (el) { el.setAttribute('theme', theme); });
+    }
+    apply();
+    query.addEventListener('change', apply);
+    document.addEventListener('DOMContentLoaded', apply);
+  })();
+</script>
 </head>
 <body>
 
@@ -21,6 +37,7 @@
       <a href="#was" class="hide-sm">Funktionen</a>
       <a href="#start">Installation</a>
       <a href="#agenten" class="hide-sm">Agenten</a>
+      <a href="#kontakt" class="hide-sm">Kontakt</a>
       <a href="docs/">Doku</a>
       <a href="https://github.com/fgilde/MuseForge">GitHub</a>
       <span class="lang"><a href="../">EN</a><a class="on" href="./">DE</a></span>
@@ -170,6 +187,10 @@
         <img src="../screenshots/studio.png" alt="Das Studio" />
         <figcaption>Studio — Galerie, Warteschlange und Steuerleiste in einer Ansicht.</figcaption>
       </figure>
+      <figure>
+        <img src="../screenshots/about.png" alt="Einstellungen, Bereich About" />
+        <figcaption>Einstellungen → About — Kontakt und Unterstützen im Akzent der App.</figcaption>
+      </figure>
     </div>
   </div>
 </section>
@@ -213,6 +234,41 @@ docker compose up -d</code></pre>
       Veröffentlicht unter der WanGP Non-Commercial Evaluation License 1.1. Frei für
       nicht-kommerzielle Nutzung; die erzeugten Ausgaben gehören dir.
     </p>
+  </div>
+</section>
+
+<section id="kontakt">
+  <div class="wrap">
+    <h2>Fragen, oder unterstützen?</h2>
+    <p class="sub">
+      Schreib direkt — Fehlermeldung, Wunsch, oder einfach wofür du es benutzt.
+      MuseForge ist kostenlos und bleibt es; Unterstützung ist freiwillig und
+      hält die GPUs am Laufen, auf denen jedes Release getestet wird.
+    </p>
+    <p class="sub" style="margin-top:-18px">
+      Dieselben zwei Formulare stecken in der App unter
+      <strong>Einstellungen → About</strong>, jeweils in der Akzentfarbe deines Themes.
+    </p>
+    <div class="connect">
+      <div>
+        <gilde-contact project="fgilde/MuseForge" widget="contact" inline theme="dark"
+          accent="#38bdf8" language="de" title="Kontakt MuseForge"
+          width="560" radius="18" padding="28"
+          show-logo="true" show-description="false" show-homepage="false"
+          show-preview-notice="false" show-footer="false"
+          footer-brand="MuseForge" footer-tagline="gilde.org">Kontakt MuseForge</gilde-contact>
+      </div>
+      <div>
+        <gilde-support project="fgilde/MuseForge" widget="support" inline theme="dark"
+          accent="#a78bfa" language="de"
+          width="560" radius="18" padding="28"
+          show-logo="true" show-description="false" show-homepage="false"
+          show-preview-notice="false" show-footer="false"
+          footer-brand="MuseForge" footer-tagline="gilde.org"
+          show-support-hint="false" support-layout="rows"
+          show-support-icons="true" show-support-qr="true">MuseForge unterstützen</gilde-support>
+      </div>
+    </div>
   </div>
 </section>
 

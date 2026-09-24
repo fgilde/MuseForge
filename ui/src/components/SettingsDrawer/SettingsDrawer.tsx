@@ -3,6 +3,7 @@ import { useStore } from '../../stores/useStore'
 import { SystemSettingsPanel } from './SystemSettingsPanel'
 import { ServicesSettingsPanel } from './ServicesSettingsPanel'
 import { McpPanel } from './McpPanel'
+import { AboutPanel } from './AboutPanel'
 import { NotificationSettingsPanel } from './NotificationSettingsPanel'
 
 export const PROJECT_LINKS = {
@@ -37,6 +38,7 @@ export function SettingsDrawer() {
     { id: 'integrations' as const, label: 'Connections' },
     { id: 'notifications' as const, label: 'Notifications' },
     { id: 'api' as const, label: 'API & MCP' },
+    { id: 'about' as const, label: 'About' },
   ]
 
   return (
@@ -101,6 +103,10 @@ export function SettingsDrawer() {
 
           {settingsTab === 'api' && (
             <McpPanel />
+          )}
+
+          {settingsTab === 'about' && (
+            <AboutPanel />
           )}
         </div>
 

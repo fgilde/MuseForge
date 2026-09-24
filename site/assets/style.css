@@ -198,3 +198,28 @@ footer.site .spacer { margin-left: auto; }
   nav.top { gap: 14px; }
   nav.top a.hide-sm { display: none; }
 }
+
+/* ── Connect widgets ────────────────────────────────────────────────── */
+/* The gilde Connect elements render their own surface, so the page only
+   provides the grid and a frame that matches the cards around them. */
+
+.connect {
+  display: grid; gap: 22px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  align-items: start;
+}
+/* The widgets draw their own bordered card, so the grid cell stays bare —
+   a wrapper with its own border framed each one twice. */
+.connect > div { min-width: 0; }
+/* Inline widgets fill their grid cell; the button variant is a button and
+   must stay on the text baseline beside its sibling. */
+.connect gilde-contact, .connect gilde-support { display: block; width: 100%; }
+.connect-buttons gilde-contact, .connect-buttons gilde-support {
+  display: inline-block; width: auto;
+}
+
+/* Until the module has defined the elements they are empty inline boxes;
+   reserving height stops the section from jumping when they appear. */
+.connect gilde-contact:not(:defined), .connect gilde-support:not(:defined) { min-height: 240px; }
+
+.connect-buttons { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
