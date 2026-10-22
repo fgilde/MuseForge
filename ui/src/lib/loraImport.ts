@@ -18,6 +18,11 @@ export function suggestLoraImportDirectory(url: string): string {
   if (compact.includes('ltx25')) return 'ltx25'
   if (compact.includes('ltx2') || compact.includes('ltxvideo2')) return 'ltx2'
   if (compact.includes('ltxv') || compact.includes('ltxvideo')) return 'ltxv'
+  if (/(?<![a-z0-9])moss[\s._-]*image(?![a-z0-9])/.test(identity)) return 'moss_image'
+  // FLUX 3 also names larger/API and video families; only Klein is local here.
+  if (/(?<![a-z0-9])flux[\s._-]*3(?![a-z0-9])/.test(identity)) {
+    return compact.includes('klein') ? 'flux3_klein' : ''
+  }
   if (compact.includes('klein')) {
     if (compact.includes('4b')) return 'flux2_klein_4b'
     if (compact.includes('9b')) return 'flux2_klein_9b'
@@ -27,6 +32,7 @@ export function suggestLoraImportDirectory(url: string): string {
   if (compact.includes('kontext')) return 'flux_dev_kontext'
   if (/\bflux(?:[\s._-]*1)?\b/.test(identity)) return 'flux'
   if (compact.includes('krea2')) return 'krea2'
+  if (/(?<![a-z0-9])qwen[\s._-]*(?:image[\s._-]*)?2[._-]1(?![a-z0-9])/.test(identity)) return 'qwen21'
   if (/\bqwen(?:[\s._-]*image)?\b/.test(identity)) return 'qwen'
   if (compact.includes('zimage')) return 'z_image'
   if (/\bwan[\s._-]*2/.test(identity)) {
@@ -40,5 +46,12 @@ export function suggestLoraImportDirectory(url: string): string {
 }
 
 export function resolveLoraImportDirectory(url: string, manualDirectory: string): string {
-  return manualDirectory || suggestLoraImportDirectory(url)
+  if (manualDirectory) return manualDirectory
+  try {
+    // A CivitAI model can contain versions for different architectures. Its
+    // title/slug is shared; let the backend resolve the chosen version's base.
+    const host = new URL(url.trim()).hostname.toLowerCase().replace(/^www\./, '')
+    if (host === 'civitai.com') return ''
+  } catch { /* Leave invalid URLs to the import endpoint's validation. */ }
+  return suggestLoraImportDirectory(url)
 }

@@ -11,8 +11,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from typing import Any
+from services.h3_performance_audio import (
+    PERFORMANCE_AUDIO_DIRECTION,
+    has_h3_performance_audio,
+    performance_audio_item_duration_seconds,
+)
 
 from services.h3_story_ledger import (
     H3DialogueTimingError,
@@ -30,6 +36,7 @@ from services.h3_story_ledger import (
     plan_h3_story_segments,
     recover_h3_plain_story,
 )
+from services.lora_guidance import lora_guidance_fingerprint
 from services.h3_window_planner import (
     _UNREQUESTED_SPECTACLE_PATTERNS,
     _compact,
@@ -47,7 +54,7 @@ from services.h3_window_planner import (
 # is persisted with reviewed/generated window prompts, so this prevents a run
 # restored from gallery metadata from silently reusing pre-fix dialogue and
 # reference bindings.
-_H3_SEQUENCE_PLANNER_VERSION = 6 + H3_STORY_LEDGER_VERSION
+_H3_SEQUENCE_PLANNER_VERSION = 9 + H3_STORY_LEDGER_VERSION
 _H3_CLIP_BOUNDARY = "\n---CLIP_BOUNDARY---\n"
 
 
@@ -187,6 +194,7 @@ def h3_sequence_plan_signature(
     overlap_frames: int = 0,
     native_continuation: bool = False,
     planning_style: str = "faithful",
+    lora_system_hint: str = "",
 ) -> str:
     reference_contract = [
         {
@@ -217,6 +225,9 @@ def h3_sequence_plan_signature(
         "native_continuation": bool(native_continuation),
         "planning_style": normalize_h3_planning_style(planning_style),
     }
+    guidance_fingerprint = lora_guidance_fingerprint(lora_system_hint)
+    if guidance_fingerprint:
+        payload["lora_guidance_fingerprint"] = guidance_fingerprint
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
 
@@ -234,6 +245,7 @@ def reviewed_h3_sequence_plan_matches(
     overlap_frames: int,
     native_continuation: bool,
     planning_style: str = "faithful",
+    lora_system_hint: str = "",
 ) -> bool:
     """Return whether a visible Omni sequence plan still fits this request."""
 
@@ -266,6 +278,8 @@ def reviewed_h3_sequence_plan_matches(
     if int(plan.get("overlap_frames") or 0) != int(overlap_frames):
         return False
     if normalize_h3_planning_style(plan.get("planning_style")) != normalize_h3_planning_style(planning_style):
+        return False
+    if plan.get("lora_guidance_fingerprint") != lora_guidance_fingerprint(lora_system_hint):
         return False
     if [int(value) for value in (plan.get("per_clip_frames") or [])] != [
         int(item.get("frames") or 0) for item in geometry
@@ -420,7 +434,10 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
     """Return relationship, retention, and official task-type summaries."""
 
     from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order
-    from models.minimax_h3.reference_manifest import validate_reference_manifest
+    from models.minimax_h3.reference_manifest import (
+        object_reference_prompt_contract,
+        validate_reference_manifest,
+    )
 
     # Enhancement is useful before the generation manifest is complete. The
     # actual Ref2VA generation path still performs strict file + visual-media
@@ -441,11 +458,17 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
     pending_voice: list[tuple[int, dict, str]] = []
     for item in items:
         kind = item["type"]
-        role = item.get("role") or f"the supplied {kind} reference"
+        # Roles are prose within one reference row, not additional metadata
+        # lines (including the machine-generated soundtrack clock).
+        role = " ".join(str(item.get("role") or f"the supplied {kind} reference").split())
         if kind == "image":
             picture += 1
             intent = item.get("image_intent", "identity")
-            if intent == "composition":
+            if intent == "object":
+                definition, analysis = object_reference_prompt_contract(f"<Picture {picture}>", role)
+                relationships.append(definition)
+                retention.append(analysis)
+            elif intent == "composition":
                 relationships.append(
                     f"<Picture {picture}> is a composition and blocking reference for {role}, not an identity source."
                 )
@@ -530,6 +553,15 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                     f"The exact target soundtrack supplies the performance and timing for {role}; "
                     "preserve its waveform and audible timeline exactly and synchronize visible action to it."
                 )
+                duration_seconds = performance_audio_item_duration_seconds(item)
+                if duration_seconds is not None:
+                    # This explicit machine line is the only duration source
+                    # consumed by local-window clock guidance. Keep role prose
+                    # and guessed/natural-language lengths out of the parser.
+                    relationships.append(
+                        "H3_PERFORMANCE_AUDIO_CLOCK "
+                        f"duration_seconds={repr(duration_seconds)}"
+                    )
                 # This is Maestro's target conditioning track, not an Omni
                 # reference tensor, so it intentionally has no <Audio N>
                 # label in the full-reference media manifest.
@@ -542,6 +574,19 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                     f"<Audio {audio}> supplies sound, music, rhythm, or texture style for {role}, without copying its signal."
                 )
                 retention.append(f"<Audio {audio}>: weak_reference")
+                if "audio reference" not in task_types:
+                    task_types.append("audio reference")
+            elif intent == "sound":
+                audio += 1
+                relationships.append(
+                    f"<Audio {audio}> is a reusable sound-effect reference for {role}; "
+                    "generate matching effects for the requested actions using its timbre "
+                    "and texture, with timing determined by those actions in each window."
+                )
+                retention.append(
+                    f"<Audio {audio}>: reference - retain the sound effect's timbre and "
+                    "texture without copying its waveform or original timing."
+                )
                 if "audio reference" not in task_types:
                     task_types.append("audio reference")
             else:
@@ -580,6 +625,65 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
         if "audio reference" not in task_types:
             task_types.append("audio reference")
     return "\n".join(relationships), "\n".join(retention), " + ".join(task_types)
+
+
+def _image_reference_roles(
+    references: list[dict[str, Any]],
+    image_paths: list[str] | None,
+) -> list[dict[str, Any]] | None:
+    """Bind attached story-planning images to normalized manifest roles.
+
+    The attached image list follows the manifest's image order. Keep the
+    canonical ``<Picture N>`` index so a downstream scoped summary cannot
+    relabel or swap image roles. ``None`` means a path could not be matched to
+    a validated manifest entry.
+    """
+
+    attached = [str(path).strip() for path in (image_paths or []) if str(path).strip()]
+    if not attached:
+        return []
+
+    from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order
+    from models.minimax_h3.reference_manifest import validate_reference_manifest
+
+    items = validate_reference_manifest(
+        references,
+        require_files=False,
+        require_visual=False,
+        allow_empty=True,
+    )
+    _prompt, items, _order_remap = canonicalize_ref2va_reference_order("", items)
+    images: list[dict[str, Any]] = []
+    image_index = 0
+    for item in items:
+        if item.get("type") != "image":
+            continue
+        image_index += 1
+        images.append({
+            "path": str(item.get("path") or ""),
+            "image_index": image_index,
+            "image_intent": str(item.get("image_intent") or "identity").strip().lower(),
+            "role": " ".join(str(item.get("role") or "").split())[:500],
+        })
+
+    def path_key(value: str) -> str:
+        return os.path.normcase(os.path.normpath(os.path.abspath(value)))
+
+    by_path: dict[str, list[dict[str, Any]]] = {}
+    for item in images:
+        key = path_key(item["path"])
+        if not key:
+            return None
+        by_path.setdefault(key, []).append(item)
+
+    aligned: list[dict[str, Any]] = []
+    for path in attached:
+        candidates = by_path.get(path_key(path)) or []
+        if not candidates:
+            return None
+        item = candidates.pop(0)
+        aligned.append({**item, "path": path})
+    return aligned
 
 
 def _ref2va_style_opening(style: str) -> str:
@@ -701,9 +805,10 @@ def _ref2va_prompt_bindings(
     ):
         subject = int(match.group(1))
         name = re.sub(r"\s+", " ", match.group(2)).strip(" ,;:.-")
-        if name and name.casefold() not in {
+        if name and not name.casefold().startswith((
+            "the environment", "the location", "the visual style", "the visual treatment",
             "the supplied image reference", "the supplied video reference",
-        }:
+        )):
             aliases[name.casefold()] = subject
 
     audio_by_subject: dict[int, int] = {}
@@ -1225,6 +1330,29 @@ def _plan_violations(
     return violations
 
 
+def _ref2va_recap_handoff(value: str) -> bool:
+    """Internal completion receipts describe history, not a new visual action."""
+    return bool(re.match(
+        r"(?i)^\s*(?:continue from the visible result of|visible result after the final "
+        r"assigned action|the immediate visible state is the result of this event)\s*:",
+        str(value or ""),
+    ))
+
+
+def _ref2va_stable_context(value: str, *, visual_style: bool = False) -> str:
+    """Keep static shared direction without replaying a global journey."""
+    from services.h3_window_context import stable_h3_window_context
+    return stable_h3_window_context(value, visual_style=visual_style)
+
+
+def _ref2va_local_setting(global_setting: str, item: dict[str, Any], *, multiple: bool) -> str:
+    """Keep a stable setting, but leave a whole itinerary in planner context."""
+    local = sanitize_h3_prompt_text(item.get("setting_continuity") or item.get("setting"))
+    if local:
+        return local.rstrip('.')
+    return _ref2va_stable_context(global_setting) if multiple else global_setting
+
+
 def compile_h3_reference_sequence_prompts(
     plan: dict[str, Any],
     clips: list[dict[str, Any]],
@@ -1261,6 +1389,7 @@ def compile_h3_reference_sequence_prompts(
     # itself; visual prose belongs in the chronological shot description.
     raw_subjects = str(plan.get("subject_definitions") or "").strip()
     canonical_subjects = str(reference_relationships or "").strip()
+    audio_driven = has_h3_performance_audio(canonical_subjects)
     canonical_subjects = canonicalize_h3_reference_names(
         canonical_subjects,
         _merge_h3_cast_names(
@@ -1309,8 +1438,18 @@ def compile_h3_reference_sequence_prompts(
             retention_clauses.append(clause.strip())
             seen_retention.add(key)
     retention = "\n".join(retention_clauses) or "N/A"
-    setting = sanitize_h3_prompt_text(plan.get("setting_continuity")).rstrip('.')
+    global_setting = sanitize_h3_prompt_text(plan.get("setting_continuity")).rstrip('.')
+    from services.h3_reference_view_groups import extract_h3_reference_view_groups
+    reference_view_groups = extract_h3_reference_view_groups(source_prompt, subjects)
+    object_continuity = " ".join(
+        f"{' and '.join(f'<Picture {number}>' for number in group['picture_indices'])} "
+        f"describe views of one persistent {group['entity']}; use each design view "
+        "for its matching shot. The current shot determines this object's position and viewpoint."
+        for group in reference_view_groups
+    )
     style = sanitize_h3_prompt_text(plan.get("visual_style")).rstrip('.')
+    if len(clips) > 1:
+        style = _ref2va_stable_context(style, visual_style=True)
     ambient = sanitize_h3_prompt_text(plan.get("ambient_audio") or "Natural location ambience").rstrip('.')
     music = sanitize_h3_prompt_text(plan.get("music") or "N/A")
     source_intent = (
@@ -1329,9 +1468,14 @@ def compile_h3_reference_sequence_prompts(
         if not isinstance(item, dict):
             raise ValueError(f"H3 Omni sequence clip {geometry['index']} is invalid.")
         duration = float(geometry["duration_seconds"])
+        setting = _ref2va_local_setting(global_setting, item, multiple=len(clips) > 1)
         shots = _normalized_window_shots(item, duration)
         if not shots:
             raise ValueError(f"H3 Omni sequence clip {geometry['index']} has no shots.")
+        if audio_driven:
+            for shot in shots:
+                shot["dialogue"] = []
+                shot["sound_effects"] = "N/A"
         _stabilize_ref2va_hold_shots(shots)
         # MiniMax speaker IDs are scoped to one generated clip/window and are
         # assigned by first vocal-event order. Subject IDs remain stable across
@@ -1389,21 +1533,29 @@ def compile_h3_reference_sequence_prompts(
             blocking_contract = ""
         coverage = sanitize_h3_prompt_text(item.get("coverage") or "cinematic editorial coverage")
         pacing = _compact(item.get("pacing") or "natural real-time pacing", 180)
-        opening = sanitize_h3_prompt_text(
-            _clean_ref2va_state(
-                item.get("opening_state") or "The scene begins in a clear composition"
-            ),
-        )
-        closing = sanitize_h3_prompt_text(
-            _clean_ref2va_state(
-                item.get("closing_state") or "The beat settles in a clear final composition"
-            ),
-        )
+        raw_opening = str(item.get("opening_state") or "")
+        raw_closing = str(item.get("native_closing_state") or item.get("closing_state") or "")
+        # Completion receipts remain intact in the planner/checkpoint. Render
+        # an accepted concrete endpoint instead of reciting the prior action.
+        if _ref2va_recap_handoff(raw_opening):
+            raw_opening = (
+                compiled[-1]["closing_state"] if compiled else
+                "The supplied opening composition establishes the current physical state"
+            )
+        if _ref2va_recap_handoff(raw_closing):
+            raw_closing = "The final composition preserves the visible outcome reached in this window"
+        opening = sanitize_h3_prompt_text(_clean_ref2va_state(
+            raw_opening or "The scene begins in a clear composition"
+        ))
+        closing = sanitize_h3_prompt_text(_clean_ref2va_state(
+            raw_closing or "The beat settles in a clear final composition"
+        ))
         pacing_sentence = f"Coverage is {coverage}; pacing is {pacing}."
         if "slow motion" not in pacing.casefold():
             pacing_sentence += " Slow motion occurs only when explicitly requested."
         preamble = " ".join(part for part in (
             f"{setting}." if setting else "",
+            object_continuity,
             f"Cast contract: {cast_contract}." if cast_contract else "",
             f"Blocking contract: {blocking_contract}." if blocking_contract else "",
             f"Opening state: {opening}.",
@@ -1447,8 +1599,10 @@ def compile_h3_reference_sequence_prompts(
             if any(term in clip_performance for term in nonverbal_terms)
             else ""
         )
-        nonverbal_clause = f" {local_nonverbal}." if local_nonverbal else ""
-        if has_dialogue:
+        nonverbal_clause = f" {local_nonverbal}." if local_nonverbal and not audio_driven else ""
+        if audio_driven:
+            detailed += " " + PERFORMANCE_AUDIO_DIRECTION
+        elif has_dialogue:
             detailed += " The tagged dialogue is performed once in the listed order."
         elif not local_nonverbal:
             detailed += " The characters remain silent during this clip."
@@ -1474,6 +1628,9 @@ def compile_h3_reference_sequence_prompts(
             ]
         effects = "; ".join(unique_effects)
         soundscape = ambient + (f". Synchronized effects: {effects}" if effects else "")
+        if audio_driven:
+            soundscape = "The supplied target soundtrack, preserved exactly with its original vocals, music and timing"
+            music = "N/A — music is already in the supplied target soundtrack"
         summary = _clean_ref2va_action(
             item.get("summary") or item.get("title") or "The requested story advances",
             setting=setting,
@@ -1503,6 +1660,8 @@ def compile_h3_reference_sequence_prompts(
             "active_cast": active_cast,
             "cast_contract": cast_contract,
             "blocking_contract": blocking_contract,
+            "setting_continuity": setting,
+            "reference_view_groups": reference_view_groups,
             "shot_count": len(shots),
             "shots": shots,
             "prompt": prompt,
@@ -1568,6 +1727,7 @@ def plan_h3_reference_sequence(
     overlap_frames: int = 0,
     native_continuation: bool = False,
     planning_style: str = "faithful",
+    lora_system_hint: str = "",
     retry_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Plan H3 Omni windows that share canonical references."""
@@ -1615,7 +1775,9 @@ def plan_h3_reference_sequence(
         overlap_frames=overlap_frames,
         native_continuation=native_continuation,
         planning_style=planning_style,
+        lora_system_hint=lora_system_hint,
     )
+    guidance_fingerprint = lora_guidance_fingerprint(lora_system_hint)
     from services.h3_plan_retry import finish_retry_plan, retry_fingerprint, validate_retry_plan
     fingerprint = retry_fingerprint(signature, image_paths, nsfw)
     resume = validate_retry_plan(retry_plan, fingerprint=fingerprint, count=len(clips))
@@ -1636,6 +1798,7 @@ def plan_h3_reference_sequence(
             "native_continuation": bool(native_continuation),
             "windows": [],
             "window_prompts": [],
+            **({"lora_guidance_fingerprint": guidance_fingerprint} if guidance_fingerprint else {}),
         }
 
     expect_dialogue = (
@@ -1653,6 +1816,7 @@ def plan_h3_reference_sequence(
     planning_diagnostics: list[str] = []
     planning_notes: list[str] = []
     dialogue_fragments: list[dict[str, Any]] = []
+    image_reference_roles = _image_reference_roles(references, image_paths)
     try:
         staged = plan_h3_story_segments(
             prompt,
@@ -1670,7 +1834,9 @@ def plan_h3_reference_sequence(
             expect_dialogue=expect_dialogue,
             planning_style=planning_style,
             image_paths=image_paths,
+            image_reference_roles=image_reference_roles,
             nsfw=nsfw,
+            lora_system_hint=lora_system_hint,
             resume=resume,
         )
         planned_by = staged["planned_by"]
@@ -1681,6 +1847,9 @@ def plan_h3_reference_sequence(
         dialogue_fragments = list(staged.get("dialogue_fragments") or [])
         source_intent = staged.get("source_intent") or source_intent
         story_ledger = staged["ledger"]
+        stable_camera_context = story_ledger.get("stable_camera_context")
+        if not isinstance(stable_camera_context, dict):
+            stable_camera_context = story_ledger
         planned_clips = []
         for index, segment in enumerate(staged["segments"]):
             planned_clips.append({
@@ -1689,10 +1858,10 @@ def plan_h3_reference_sequence(
             })
         plan = {
             "source_prompt": prompt,
-            "subject_definitions": story_ledger.get("subject_continuity", ""),
+            "subject_definitions": stable_camera_context.get("subject_continuity", ""),
             "retention_analysis": default_retention,
-            "setting_continuity": story_ledger.get("setting_continuity", ""),
-            "visual_style": story_ledger.get("visual_continuity", ""),
+            "setting_continuity": stable_camera_context.get("setting_continuity", ""),
+            "visual_style": stable_camera_context.get("visual_continuity", ""),
             "ambient_audio": story_ledger.get("ambient_audio", ""),
             "music": story_ledger.get("music", "N/A"),
             "source_intent": source_intent,
@@ -1767,4 +1936,5 @@ def plan_h3_reference_sequence(
         "source_intent": source_intent,
         "windows": compiled,
         "window_prompts": [item["prompt"] for item in compiled],
+        **({"lora_guidance_fingerprint": guidance_fingerprint} if guidance_fingerprint else {}),
     }, retry_plan, fingerprint)

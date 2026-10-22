@@ -87,6 +87,71 @@ Apache-2.0-licensed SLA utilities and kernels from **ModelTC/LightX2V**.
 - The Apache License 2.0 text covering the adapted LightX2V portions is
   distributed at `app/shared/sol_attn/saganaki/LICENSE`.
 
+## Experimental Windows 10 direct DLSS backend
+
+The optional Windows 10 integration calls the native ABI of **lisitskyaa/ComfyUI-DLSS5-NR**
+v0.3.1, pinned to commit `41dcdfa593cb61b6a98c65bb8ed27606260bb598`.
+Its MIT-licensed bridge/caller libraries are obtained by an explicit installer;
+they are not bundled in Maestro's source. Maestro's worker follows its native
+parameter and channel-order contracts, with separate process isolation.
+
+- Source: https://github.com/lisitskyaa/ComfyUI-DLSS5-NR/tree/41dcdfa593cb61b6a98c65bb8ed27606260bb598
+- MIT text: `app/LICENSES/ComfyUI-DLSS5-NR-MIT.txt`.
+- Upstream third-party notices, including NIGos optical-flow attribution:
+  `app/LICENSES/ComfyUI-DLSS5-NR-THIRD-PARTY.md`.
+- `app/scripts/install_dlss5_direct.py` pins package and extracted-file hashes.
+
+The separate SR worker comes from the same WanGP DLSS worker release already
+used by the Windows 11 integration. Its included DLSS5-Feeder license is
+installed alongside it. NVIDIA-derived SR and modified unsigned NR runtime
+binaries retain their own terms; the bridge's MIT license grants no rights in
+NVIDIA software. Driver NGX and optical-flow libraries are loaded from the
+installed driver and are not redistributed. See `docs/DLSS5.md` for the explicit
+opt-in and experimental limitations.
+
+The explicit installer obtains the NVIDIA-derived runtime assets from these
+community-hosted **RankFTW/rhi-repo** release archives:
+
+- Modified NR: [dlssnr-310.8.SF-v2](https://github.com/RankFTW/rhi-repo/releases/download/dlssnr-310.8.SF-v2/nvngx_dlssnr_310.8.SF-v2.zip).
+  Archive SHA-256: `1da35941894994eb087e017577829e492454e9bae3a6a9397027069ceb74955c`.
+- SR: [dlss-310.8.0](https://github.com/RankFTW/rhi-repo/releases/download/dlss-310.8.0/nvngx_dlss_310.8.0.zip).
+  Archive SHA-256: `fb481660f7e952b87f91760e3afd7f9dc14cd2c3361b470e948d6346e4323009`.
+
+These pinned archives contain no separate license or notice file. They are
+runtime downloads, not source assets redistributed in Maestro; neither this
+attribution nor the bridge's MIT license grants a license to NVIDIA software.
+
+## Tiny VAE generation previews
+
+The optional generation-preview integration adapts Wan2GP's live previews,
+contributed by **GOvEy1nw**, from revision
+`b8b18f8114e432eea8f3d7e853a51dd91fa99571`.
+
+- Upstream preview integration: https://github.com/deepbeepmeep/Wan2GP/tree/b8b18f8114e432eea8f3d7e853a51dd91fa99571
+- **madebyollin/taesd** and **madebyollin/taehv** decoder implementations retain
+  their MIT licenses in `app/shared/tinyvae/LICENSES/taesd-MIT.txt` and
+  `app/shared/tinyvae/LICENSES/taehv-MIT.txt`.
+- The H3 approximate decoder's Apache-2.0 license text is distributed in
+  `app/shared/tinyvae/LICENSES/taeh3-Apache-2.0.txt`; its pinned weight source is
+  **Kijai/MiniMax-H3-TAE**.
+- Decoder weight download identities and SHA-256 values are recorded in
+  `app/shared/tinyvae/decoders.json`; revision-pinned upstream reference sources
+  are recorded in `app/shared/tinyvae/sources.json`.
+
+Decoder weights download on demand and are not redistributed in this source
+repository. Their source/model terms remain separate from Maestro's application
+license. See `docs/Generation-preview.md` for support and behavior.
+
+## DaSiWa and imported community checkpoints
+
+DaSiWa checkpoints are user-selected imports rather than built-in model
+selections. No checkpoint weights are redistributed. Official source links
+and family import limits are documented in `docs/DaSiWa-models.md`.
+Imported CivitAI H3 files retain
+creator/source provenance and verification receipts. Underlying model licenses
+and creator distribution terms continue to apply; Maestro's application license
+does not grant rights in these weights. See `docs/H3-checkpoint-import.md`.
+
 ## MATLOWAI MiniMax H3 fused four-step checkpoint
 
 The optional experimental model definitions
@@ -113,3 +178,51 @@ Source: https://huggingface.co/Kijai/MiniMax-H3-experimental/blob/a3e7d8da4ae7ba
 Users must review the linked model license and NOTICE before downloading or
 using this optional checkpoint; its terms and geographic scope differ from
 Maestro's application license.
+
+## Wan2GP v17.17 H3 performance patterns
+
+The bounded H3 plain-text embedding cache and two-tile VAE decode path adapt
+performance patterns from **deepbeepmeep/Wan2GP** v17.17, commit
+`6479db36bdc2619a904a852bba9c2d78e1a83f82` (8 October 2026). Maestro retains
+its model loader, reference conditioning, tiled blending and memory guards.
+The upstream WanGP Community License 2.0 is preserved in
+`app/LICENSES/WanGP-Community-2.0.txt`; older Diffusers-derived VAE components
+retain their Apache-2.0 notices.
+
+Source: https://github.com/deepbeepmeep/Wan2GP/tree/6479db36bdc2619a904a852bba9c2d78e1a83f82/models/minimax_h3
+
+## Black Forest Labs FLUX 3 Image Klein
+
+The optional native FLUX 3 integration adapts Black Forest Labs' reference
+DiT, autoencoder, sampling and reference-preparation code from revision
+`45e57c9fb06f9751cdced29a65c5d2171003be05`. Its Apache-2.0 license is preserved
+in `app/models/flux3/LICENSE`, with adaptation details in
+`app/models/flux3/THIRD_PARTY_NOTICES.md`. Qwen3-VL model code is provided by
+the existing Transformers dependency.
+
+Source: https://github.com/black-forest-labs/flux-3-image-klein/tree/45e57c9fb06f9751cdced29a65c5d2171003be05
+
+Model weights download on demand from separately licensed public WanGP mirrors
+and are not redistributed in Maestro's source. The BFL model license and notice
+are preserved in `app/models/flux3/WEIGHTS_LICENSE.md` and `WEIGHTS_NOTICE.md`.
+The pinned weight revision and download verification are documented in
+`docs/Flux-3-Klein.md`. The optional BFL prompt-upsampler weights are not
+installed by this integration.
+
+## WanGP v18.10 options
+
+H3 LightVAE loading, the dated TaoMate FL2VA profile, optional WGPKernels
+dispatch, ConvRot embeddings and Fish Drama 3 integration adapt WanGP revision
+`de302eec64b692dc83949d687cadf7d60bd74091`. WanGP contributions retain its
+Community License 2.0 at `app/LICENSES/WanGP-Community-2.0.txt`. Fish Audio
+and codec source retain their separate license texts in
+`app/models/TTS/fish_audio/LICENSE_FISH_AUDIO` and `LICENSE_DAC`.
+The Fish port includes WanGP's small native CPU expert libraries and source,
+with their license and hashes in `app/models/TTS/fish_audio/native_cpu/`.
+Portable PyTorch expert math remains a fallback. The optional vLLM path is
+capability-gated and graph-free; it does not include upstream CUDA Graphs or
+partial expert GPU residency.
+WGPKernels is an optional separately downloaded package; its upstream package
+license applies. Model weights retain their respective model licenses.
+
+Source: https://github.com/deepbeepmeep/WanGP/tree/de302eec64b692dc83949d687cadf7d60bd74091

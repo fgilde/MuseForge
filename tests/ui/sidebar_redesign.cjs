@@ -21,7 +21,7 @@ const root = path.resolve(__dirname, '../..');
 const base = process.argv[2];
 if (!base) throw new Error('Pass the running Maestro URL; browser actions never reach it.');
 const esbuild = require(path.join(root, 'ui/node_modules/esbuild'));
-const playwright = require(process.env.MAESTRO_PLAYWRIGHT || 'C:/Users/bliza/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const playwright = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
 const output = path.join(root, '.codex-tmp/sidebar-validation');
 fs.mkdirSync(output, {recursive: true});
 const read = async endpoint => {
@@ -92,15 +92,28 @@ const read = async endpoint => {
         llmRequests.push({endpoint, ...body});
         const windowFrames = body.sequence_clip_frames || body.window_frames;
         const overlap = body.overlap_frames || 0;
-        const count = Math.max(1, Math.ceil((body.total_frames - windowFrames) / (windowFrames - overlap)) + 1);
+        const isH3Windows = endpoint.endsWith('/plan-h3-windows');
+        const discard = isH3Windows ? Number(body.discard_frames || 0) : 0;
+        const stride = Math.max(1, windowFrames - overlap - discard);
+        const count = isH3Windows
+          ? Math.max(1, 1 + Math.ceil((body.total_frames - windowFrames + discard) / stride))
+          : Math.max(1, Math.ceil((body.total_frames - windowFrames) / (windowFrames - overlap)) + 1);
+        let nextStart = 0;
         const windows = Array.from({length: count}, (_, i) => {
-          const start = i * (windowFrames - overlap), end = Math.min(body.total_frames, start + windowFrames);
+          const start = isH3Windows ? nextStart : i * (windowFrames - overlap);
+          const span = isH3Windows
+            ? i === 0 ? windowFrames - (count > 1 ? discard : 0) : stride
+            : windowFrames;
+          const end = Math.min(body.total_frames, start + span);
+          if (isH3Windows) nextStart = end;
           return {index: i + 1, title: `Scene ${i + 1}`, start_frame: start, end_frame: end, start_seconds: start / 24,
             end_seconds: end / 24, opening_state: '', closing_state: '', prompt: `Planned ${body.planning_style} window ${i + 1}.`};
         });
         return json({...body, source_prompt: body.prompt, signature: `plan-${llmRequests.length}`, planned_by: 'llm',
           plan_kind: endpoint.endsWith('sequence') ? 'reference_sequence' : 'sliding_window', native_continuation: body.sequence_continuity,
-          window_frames: windowFrames, window_count: count, windows, window_prompts: windows.map(window => window.prompt)});
+          window_frames: windowFrames, effective_window_frames: isH3Windows ? windowFrames : undefined,
+          total_frames: body.total_frames, overlap_frames: overlap, discard_frames: discard,
+          window_count: count, windows, window_prompts: windows.map(window => window.prompt)});
       }
       if (endpoint === '/api/v1/generate') {
         requests.push(route.request().postDataJSON());
@@ -121,6 +134,8 @@ const read = async endpoint => {
       window.resetFixture = (id = 'minimax_h3_ref2va_fused_turbo', mode = 'video', workflow = 'references') => {
         const options = window.options[id];
         window.store.setState({models: catalogue.models, families: catalogue.families, enabledModels: new Set(catalogue.models.map(model => model.model_type)),
+          // This harness intentionally enables every model, including legacy multi-phase LoRA fixtures.
+          modelVisibilityOverrides: {},
           modelOptions: options, generationMode: mode, sidebarMode: 'studio', sidebarOpen: true,
           studioVideoWorkflow: workflow, studioImageWorkflow: 'generate', audioSubMode: 'speech',
           selectedModelPerMode: {[mode]: id}, durationSeconds: 124 / 24, slidingWindowSeconds: 243 / 24, slidingWindowOverlap: 18,

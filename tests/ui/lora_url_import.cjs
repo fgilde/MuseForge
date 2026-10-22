@@ -23,11 +23,27 @@ const cases = [
   ['https://huggingface.co/creator/LTX-2.3-Motion', 'ltx2'],
   ['https://huggingface.co/creator/FLUX.2-Klein-9B-Film', 'flux2_klein_9b'],
   ['https://huggingface.co/creator/FLUX.2-Klein-4B-Film', 'flux2_klein_4b'],
+  ['https://huggingface.co/creator/FLUX.3-Klein-5.6B-Film', 'flux3_klein'],
+  ['https://huggingface.co/creator/flux-3-image-klein-base-style', 'flux3_klein'],
+  ['https://huggingface.co/creator/Flux3-Style', ''],
+  ['https://huggingface.co/creator/FLUX.3-Video-Style', ''],
+  ['https://huggingface.co/creator/MOSS-Image-Base-Film', 'moss_image'],
+  ['https://huggingface.co/creator/moss_image_sft_style', 'moss_image'],
+  ['https://civitai.com/models/123/flux-3-klein-style', 'flux3_klein'],
   ['https://huggingface.co/creator/Klein-Film', ''],
   ['https://huggingface.co/creator/Wan2.1-I2V-Film', 'wan_i2v'],
   ['https://huggingface.co/creator/Wan2.2-I2V-Film', 'wan'],
   ['https://huggingface.co/creator/Minimax-Music-3', 'minimax_music3_music'],
+  ['https://huggingface.co/creator/Qwen-Image-2.1-Film', 'qwen21'],
+  ['https://huggingface.co/creator/Qwen2.1-Image-Film', 'qwen21'],
+  ['https://civitai.com/models/123/qwen-2.1-film', 'qwen21'],
+  ['https://huggingface.co/creator/Qwen-Image-Edit-2511-Film', 'qwen'],
+  ['https://huggingface.co/creator/Qwen-Image-v2.1', 'qwen'],
+  ['https://huggingface.co/creator/Qwen-Image-2.10', 'qwen'],
   ['https://huggingface.co/creator/Film-LoRA?token=minimax', ''],
+  ['https://huggingface.co/creator/Film-LoRA?token=flux3', ''],
+  ['https://huggingface.co/MossImageCreator/Film-LoRA', ''],
+  ['https://huggingface.co/Flux3Creator/Film-LoRA', ''],
   ['https://huggingface.co/creator/Film-H3', ''],
   ['https://huggingface.co/MiniMaxCreator/LTX-2.3-Film', 'ltx2'],
   ['https://example.com/creator/minimax', ''],
@@ -54,5 +70,22 @@ for (const [url, expected] of cases) assert.equal(suggest(url), expected, url);
   const unknown = 'https://civitai.com/models/123';
   await client.importHuggingFaceLora(unknown, resolve(unknown, ''));
   assert.equal(requests.at(-1).body.target_dir, ''); // Preserve backend metadata detection.
-  console.log(`${cases.length} URL suggestions and 4 import destination requests passed`);
+  const olderVersion = 'https://civitai.com/models/123/qwen-2.1-film?modelVersionId=20';
+  await client.importHuggingFaceLora(olderVersion, resolve(olderVersion, ''));
+  assert.equal(requests.at(-1).body.target_dir, '', 'Version metadata beats the shared CivitAI slug');
+  const qwen21 = 'https://huggingface.co/creator/Qwen-Image-2.1-Film';
+  await client.importHuggingFaceLora(qwen21, resolve(qwen21, ''));
+  assert.equal(requests.at(-1).body.target_dir, 'qwen21');
+  const flux3 = 'https://huggingface.co/creator/FLUX.3-Klein-5.6B-Film';
+  await client.importHuggingFaceLora(flux3, resolve(flux3, ''));
+  assert.equal(requests.at(-1).body.target_dir, 'flux3_klein');
+  const flux3Civitai = 'https://civitai.com/models/123/flux-3-klein-style?modelVersionId=21';
+  await client.importHuggingFaceLora(flux3Civitai, resolve(flux3Civitai, ''));
+  assert.equal(requests.at(-1).body.target_dir, '', 'CivitAI version metadata still determines the Flux 3 destination');
+  await client.importHuggingFaceLora(flux3, resolve(flux3, 'custom_adapters'));
+  assert.equal(requests.at(-1).body.target_dir, 'custom_adapters');
+  const moss = 'https://huggingface.co/creator/MOSS-Image-Base-Film';
+  await client.importHuggingFaceLora(moss, resolve(moss, ''));
+  assert.equal(requests.at(-1).body.target_dir, 'moss_image');
+  console.log(`${cases.length} URL suggestions and ${requests.length} import destination requests passed`);
 })().catch(error => { console.error(error); process.exitCode = 1; });

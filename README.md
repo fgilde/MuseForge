@@ -27,7 +27,7 @@
 > [Wan2GP](https://github.com/deepbeepmeep/Wan2GP) generation pipeline. Full credits
 > [below](#credits) — this README covers what MuseForge does differently.
 > The `VERSION` file tracks the upstream release the engine is level with
-> (currently **Maestro 2.3.0**), so you can tell at a glance how current it is.
+> (currently **Maestro 3.1.0**), so you can tell at a glance how current it is.
 
 Deploy it anywhere with one `docker compose up`, then use it from the browser or
 let an agent drive it over MCP. 205 generation models, an LLM-planned Director
@@ -145,8 +145,8 @@ the exact steps.
 ## Using it
 
 - **Studio** — direct control: pick a model (LTX-2.5, Wan, Hunyuan, Flux,
-  Qwen Image 2.1, MiniMax H3, YuE2, MiniMax-Music3, SCAIL-2, Viggle Animate,
-  ACE-Step, TTS, …), prompt, LoRAs, advanced
+  FLUX 3 Klein, Qwen Image 2.1, MOSS Image, MiniMax H3, YuE2, MiniMax-Music3,
+  SCAIL-2, Viggle Animate, ACE-Step, TTS, …), prompt, LoRAs, advanced
   knobs, hit **Forge**. Work can be queued and held instead of started at once.
 - **Director** — describe a music video or short film; a local LLM plans shots,
   writes prompts per model, generates start frames and runs the full multi-clip

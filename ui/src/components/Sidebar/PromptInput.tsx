@@ -11,8 +11,16 @@ import {
   continuationFirstWindowFrames,
   durationWindowPlan,
 } from '../../lib/durationPlanning'
+import {
+  h3SlidingWindowPlanMatchesTiming,
+  normalizeSlidingWindowFrames,
+  normalizeSlidingWindowOverlap,
+  resolveH3StoryboardDiscardFrames,
+} from '../../lib/h3WindowTiming'
 import { ComposerContext, ComposerToolbarItem } from './SidebarPanels'
 import { SidebarMenu } from './SidebarMenu'
+import { Flux3PromptHelper } from './Flux3PromptHelper'
+import { MossImagePromptHelper } from './MossImagePromptHelper'
 
 const placeholders: Record<string, string> = {
   image: 'Describe your image...',
@@ -161,6 +169,8 @@ export function PromptInput() {
   const slidingWindowLocked = useStore(s => s.slidingWindowLocked)
   const modelOptions = useStore(s => s.modelOptions)
   const resolution = useStore(s => s.params.resolution)
+  const modelType = useStore(s => s.params.model_type)
+  const customSettings = useStore(s => s.params.custom_settings)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const imageMode = useStore(s => s.params.image_mode)
   const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
@@ -206,8 +216,27 @@ export function PromptInput() {
   const enhanceStatus = useEnhanceStatus(isEnhancing)
   const fps = modelOptions?.fps ?? 16
   const swDefaults = (modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
-  const discardFrames = swDefaults?.discard_last_frames ?? 0
-  const overlapSec = slidingWindowOverlap / fps
+  const extendedDuration = useStore(s => s.params.minimax_h3_extended_duration === true)
+  const nativeMaximumFrames = h3MaximumFrames(modelOptions, extendedDuration)
+  const isH3FirstLast = (
+    String(modelOptions?.architecture || '').startsWith('minimax_h3')
+    && modelOptions?.omni_reference !== true
+  )
+  const h3StoryboardTiming = isH3FirstLast && h3FirstLastMultiWindow
+  const storyboardWindowDefaults = h3StoryboardTiming && extendedDuration && nativeMaximumFrames != null
+    ? { ...swDefaults, window_max: nativeMaximumFrames }
+    : swDefaults
+  const windowFrames = h3StoryboardTiming
+    ? normalizeSlidingWindowFrames(Math.round(slidingWindowSeconds * fps), storyboardWindowDefaults)
+    : Math.max(1, Math.round(slidingWindowSeconds * fps))
+  const overlapFrames = h3StoryboardTiming
+    ? normalizeSlidingWindowOverlap(slidingWindowOverlap, swDefaults)
+    : Math.max(0, Math.round(slidingWindowOverlap))
+  const discardFrames = h3StoryboardTiming
+    ? resolveH3StoryboardDiscardFrames(swDefaults, customSettings)
+    : swDefaults?.discard_last_frames ?? 0
+  const windowSeconds = windowFrames / fps
+  const overlapSec = overlapFrames / fps
   const discardSec = discardFrames / fps
   const supportsSlidingWindows = modelOptions?.sliding_window === true
   const firstWindowSeconds = (
@@ -215,20 +244,16 @@ export function PromptInput() {
     && supportsSlidingWindows
   )
     ? continuationFirstWindowFrames(
-        Math.round(slidingWindowSeconds * fps),
-        slidingWindowOverlap,
+        windowFrames,
+        overlapFrames,
       ) / fps
-    : slidingWindowSeconds
+    : windowSeconds
   const plannedDuration = durationWindowPlan(
     durationSeconds,
-    slidingWindowSeconds,
+    windowSeconds,
     overlapSec,
     discardSec,
     firstWindowSeconds,
-  )
-  const isH3FirstLast = (
-    String(modelOptions?.architecture || '').startsWith('minimax_h3')
-    && modelOptions?.omni_reference !== true
   )
   const isLtxSequence = modelOptions?.multi_window_sequence_controls === true
   const windowCount = supportsSlidingWindows
@@ -241,8 +266,6 @@ export function PromptInput() {
     usesWindows
     && modelOptions?.sliding_window_auto_prompt_pacing === true
   )
-  const extendedDuration = useStore(s => s.params.minimax_h3_extended_duration === true)
-  const nativeMaximumFrames = h3MaximumFrames(modelOptions, extendedDuration)
   const sequenceClipFrames = nativeMaximumFrames != null
     ? effectiveH3OmniSequenceFrames({
         policy: modelOptions?.omni_sequence_memory_policy,
@@ -305,12 +328,32 @@ export function PromptInput() {
   const expectedPlanCount = usesH3SequencePlanner ? sequenceClipCount : windowCount
   const expectedWindowFrames = usesH3SequencePlanner
     ? Math.max(1, Number(sequenceClipFrames || 1))
-    : Math.max(1, Math.round(slidingWindowSeconds * fps))
+    : windowFrames
+  const plannedWindowFrames = h3WindowPlan?.effective_window_frames
+    ?? h3WindowPlan?.window_frames
+  const h3FramesPlanIsStale = !!h3WindowPlan
+    && isH3FirstLast
+    && studioVideoWorkflow === 'frames'
+    && h3WindowPlan.plan_kind !== 'reference_sequence'
+    && (
+      !usesH3WindowPlanner
+      || !h3FirstLastMultiWindow
+      || !h3SlidingWindowPlanMatchesTiming(h3WindowPlan, {
+        sourcePrompt: prompt,
+        modelType,
+        resolution,
+        totalFrames: Math.max(1, Math.round(durationSeconds * fps)),
+        windowFrames,
+        overlapFrames,
+        discardFrames,
+        cameraCoverage: h3CameraCoverage,
+      })
+    )
   const h3PlanIsStale = !!h3WindowPlan && (
     h3WindowPlan.source_prompt.trim() !== prompt.trim()
     || h3WindowPlan.window_count !== expectedPlanCount
     || h3WindowPlan.total_frames !== Math.max(1, Math.round(durationSeconds * fps))
-    || h3WindowPlan.window_frames !== expectedWindowFrames
+    || plannedWindowFrames !== expectedWindowFrames
     || (h3WindowPlan.camera_coverage || 'auto') !== h3CameraCoverage
     || (usesH3SequencePlanner
       ? h3WindowPlan.plan_kind !== 'reference_sequence'
@@ -320,6 +363,7 @@ export function PromptInput() {
     || (usesH3SequencePlanner
       && h3NativeSequence
       && Number(h3WindowPlan.overlap_frames || 0) !== slidingWindowOverlap)
+    || h3FramesPlanIsStale
   )
   const matchingActiveH3Phase = (
     h3WindowPlan?.signature === activeH3JobPlanSignature
@@ -392,7 +436,7 @@ export function PromptInput() {
           {promptEnhanceError}
         </div>
       )}
-      {usesH3Plan && h3WindowPlan && (
+      {(usesH3Plan || h3FramesPlanIsStale) && h3WindowPlan && (
         <div className="mb-1.5">
           <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border bg-bg-tertiary/70">
             <button
@@ -535,10 +579,16 @@ export function PromptInput() {
               ? (isLtxSequence
                   ? `Describe your complete video, then press Enhance to plan ${windowCount} LTX windows.`
                   : `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`)
-            : modePlaceholder}
+            : studioVideoWorkflow === 'avatar' && generationMode === 'video'
+              ? 'Describe the people, setting and motion. Voice audio supplies their speech.'
+              : modePlaceholder}
           className={`studio-prompt-textarea block w-full resize-none px-3 py-2 text-base md:text-sm text-text-primary placeholder:text-text-muted focus:outline-none transition-colors ${compact ? 'min-h-[72px] bg-transparent border border-transparent rounded-lg focus:border-border-light' : `${composer?.expanded ? 'min-h-[260px]' : 'min-h-[104px]'} bg-bg-tertiary border border-border rounded-xl focus:border-accent-blue`}`}
         />
-        <ComposerToolbarItem>{isAudioOnly ? (
+        {/* One portal keeps conditional helpers before the existing enhancer after model switches. */}
+        <ComposerToolbarItem><div className={`${composer ? 'relative' : 'absolute right-2 bottom-2'} flex items-center justify-end gap-2`}>
+        {generationMode === 'image' && modelType.startsWith('flux3') && <Flux3PromptHelper />}
+        {generationMode === 'image' && modelOptions?.moss_image_prompt_helper && <MossImagePromptHelper />}
+        {isAudioOnly ? (
           /* TTS: mode-aware split button. Main button uses default mode based
              on voice-slot count; dropdown exposes both Speech and Dialogue
              explicitly so the user can override regardless of voice count.
@@ -547,7 +597,7 @@ export function PromptInput() {
              slots — bad UX trap especially with audio_mode_from_voice_count
              models like Scenema where the user may want a generated-voice
              dialogue script as a starting point. */
-          <div ref={menuRef} className={composer ? 'relative' : 'absolute right-2 bottom-2'}>
+          <div ref={menuRef} className="relative">
             <div className="flex items-center">
               <button
                 onClick={() => enhancePrompt(defaultMode)}
@@ -607,7 +657,7 @@ export function PromptInput() {
             )}
           </div>
         ) : (
-          <div ref={setEnhanceAnchor} className={`${composer ? 'relative' : 'absolute right-2 bottom-2'} flex items-center`}>
+          <div ref={setEnhanceAnchor} className="relative flex items-center">
             <button type="button" onClick={() => enhancePrompt()}
               disabled={isEnhancing || !prompt.trim()} aria-label="Enhance prompt" title="Enhance now — preserve your requirements and develop your idea"
               className="min-h-8 rounded-l-md p-2 text-text-muted hover:text-accent-blue hover:bg-bg-hover disabled:opacity-40">
@@ -634,7 +684,7 @@ export function PromptInput() {
               </button>}
             </SidebarMenu>
           </div>
-        )}</ComposerToolbarItem>
+        )}</div></ComposerToolbarItem>
       </div>
     </div>
   )

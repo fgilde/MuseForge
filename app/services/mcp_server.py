@@ -951,7 +951,7 @@ def cancel_download(file_id: str = "") -> dict:
     pre-download begun with download_model — use this for those.
     """
     return _post("/api/v1/downloads/cancel",
-                 json={"file_id": file_id} if file_id else {})
+                 json={"file_id": file_id} if file_id else {"all": True})
 
 
 @mcp.tool()

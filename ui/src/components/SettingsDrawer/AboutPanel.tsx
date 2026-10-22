@@ -33,7 +33,8 @@ function useConnectWidgets(): 'loading' | 'ready' | 'unavailable' {
   )
 
   useEffect(() => {
-    if (customElements.get('gilde-contact')) { setState('ready'); return }
+    // Already defined: the initial state said 'ready', nothing to load.
+    if (customElements.get('gilde-contact')) return
 
     let cancelled = false
     const done = (next: 'ready' | 'unavailable') => { if (!cancelled) setState(next) }

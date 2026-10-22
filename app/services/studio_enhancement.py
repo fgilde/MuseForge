@@ -18,16 +18,23 @@ _request_context: ContextVar[dict | None] = ContextVar("studio_enhancement", def
 _disk_lock = threading.RLock()
 SETTING_KEYS = (
     "llm_provider", "llm_model_id", "llm_device", "llm_remote_url",
+    "llm_mtp_acceleration",
     "enhance_llm_model_id", "enhance_llm_device", "nsfw_mode",
+    "enhance_fidelity_retries", "enhance_fidelity_auto_continue",
 )
 
 
 def captured_settings(services: dict) -> dict:
     # Credentials are resolved at execution, never copied into jobs/sidecars.
     defaults = {"llm_provider": "local", "llm_remote_url": "", "llm_device": "cuda",
-                "enhance_llm_model_id": "", "enhance_llm_device": "cuda", "nsfw_mode": False}
+                "llm_mtp_acceleration": False,
+                "enhance_llm_model_id": "", "enhance_llm_device": "cuda", "nsfw_mode": False,
+                "enhance_fidelity_retries": 1, "enhance_fidelity_auto_continue": False}
     result = {key: deepcopy(services.get(key, defaults.get(key))) for key in SETTING_KEYS}
     result["nsfw_mode"] = bool(result["nsfw_mode"])
+    result["llm_mtp_acceleration"] = result["llm_mtp_acceleration"] is True
+    result["enhance_fidelity_retries"] = fidelity_retry_limit(result)
+    result["enhance_fidelity_auto_continue"] = result["enhance_fidelity_auto_continue"] is True
     if result["enhance_llm_model_id"]:
         result.update(llm_model_id=result["enhance_llm_model_id"],
                       llm_device=result["enhance_llm_device"], llm_provider="local", llm_remote_url="")
@@ -36,7 +43,22 @@ def captured_settings(services: dict) -> dict:
 
 def current_settings(services: dict) -> dict:
     context = _request_context.get()
-    return {**services, **{key: value for key, value in context["settings"].items() if value is not None}} if context else services
+    if context:
+        return {
+            **services,
+            **{key: value for key, value in context["settings"].items() if value is not None},
+            # Legacy snapshots predate the experimental toggle and retain
+            # ordinary decoding even if the live preference changes later.
+            "llm_mtp_acceleration": context["settings"].get("llm_mtp_acceleration") is True,
+        }
+    return services
+
+
+def fidelity_retry_limit(settings: dict | None = None) -> int:
+    """Repairs after the initial draft; legacy jobs retain the one-repair default."""
+    settings = current_settings({}) if settings is None else settings
+    value = settings.get("enhance_fidelity_retries", 1)
+    return min(5, max(0, value)) if type(value) is int else 1
 
 
 def check_cancelled() -> None:
@@ -58,6 +80,21 @@ def record_review_warning(message: str) -> None:
 def enhancement_warnings() -> list[str]:
     context = _request_context.get()
     return list(context["warnings"]) if context else []
+
+
+def record_continuity_review(review: dict) -> None:
+    """Keep advisory diagnostics without turning them into a review gate."""
+    context = _request_context.get()
+    if context:
+        context["continuity_reviews"].append(deepcopy({
+            key: review.get(key)
+            for key in ("status", "checked", "repaired", "issues", "reference_groups", "state_handoffs", "diagnostic")
+        }))
+
+
+def enhancement_continuity_reviews() -> list[dict]:
+    context = _request_context.get()
+    return deepcopy(context["continuity_reviews"]) if context else []
 
 
 def cancellable_lines(response, **kwargs):
@@ -133,7 +170,8 @@ def close_response(response) -> None:
 
 @contextmanager
 def enhancement_context(settings: dict, cancelled: Callable[[], bool]):
-    token = _request_context.set({"settings": settings, "cancelled": cancelled, "warnings": []})
+    token = _request_context.set({"settings": settings, "cancelled": cancelled,
+                                  "warnings": [], "continuity_reviews": []})
     try:
         check_cancelled()
         yield
@@ -156,7 +194,7 @@ def new_enhancement(params: dict, services: dict) -> dict:
 def public_enhancement(record: dict | None, *, summary: bool = False) -> dict | None:
     if not record:
         return None
-    keys = ["version", "state", "warnings", "error"]
+    keys = ["version", "state", "warnings", "error", "continuity_reviews"]
     if not summary:
         keys.extend(["original_prompt", "enhanced_prompt"])
     return {key: deepcopy(record.get(key)) for key in keys}
@@ -164,6 +202,7 @@ def public_enhancement(record: dict | None, *, summary: bool = False) -> dict | 
 
 def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
     """Construct the same native writer inputs used by interactive Enhance."""
+    mode = params.get("generation_mode") or ("image" if model.get("image_outputs") else "video")
     h3 = str(model.get("architecture") or "").startswith("minimax_h3")
     omni = bool(model.get("omni_reference"))
     fps = float(model.get("fps") or (24 if h3 else 16))
@@ -185,6 +224,11 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         relationships, retention, _ = _reference_context(references)
         context.extend([relationships, retention])
         images.extend(ref["path"] for ref in references if ref.get("type") == "image" and ref.get("path"))
+    elif mode == "image":
+        if params.get("image_guide") and "V" in str(params.get("video_prompt_type") or ""):
+            images.append(params["image_guide"])
+            context.append("Picture 1 is the source/control image. Preserve the requested structure and change only what the user asks to edit.")
+        images.extend(params.get("image_refs") or [])
     else:
         for field, time in (("image_start", "0.00"), ("image_end", f"{total / fps:.2f}")):
             if params.get(field):
@@ -195,11 +239,10 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         for path, position in zip(keyframes, positions):
             images.append(path)
             context.append(f"<Picture {len(images)}> is an exact injected frame at timeline position {position}.")
-        if params.get("generation_mode") == "image" and not images:
-            images.extend(params.get("image_refs") or [])
     payload = {
         "prompt": str(params.get("prompt") or ""),
-        "mode": params.get("generation_mode") or "video", "model_type": params.get("model_type"),
+        "mode": mode, "model_type": params.get("model_type"),
+        "resolution": params.get("resolution") if mode == "image" else None,
         "planning_style": "adaptive" if h3 else "faithful",
         "duration_seconds": total / fps, "window_count": 1, "window_size_seconds": window / fps,
         "image_paths": images, "reference_context": "\n".join(context),
@@ -247,11 +290,16 @@ async def prepare_enhanced_job(params: dict, model: dict, enhance, prepare, *, p
         raise ValueError("Enhancement did not produce valid generation settings.")
     plan = prepared.get("h3_window_plan") or {}
     warnings = list(dict.fromkeys([*(plan.get("planning_warnings") or []), *result_warnings, *enhancement_warnings()]))
-    # A fallback draft remains reviewable, but unattended generation must never
-    # pass it off as a successful AI enhancement. Timing notes alone are fine.
+    # Keep warnings/provenance even when the user elects to generate a usable
+    # draft without pausing. Exceptions, empty prompts and invalid settings
+    # above still fail normally; this option only changes the review gate.
     if "fallback" in str(plan.get("planned_by") or "") or warnings:
-        prepared["enhancement_review_required"] = True
+        auto_continue = current_settings({}).get("enhance_fidelity_auto_continue") is True
+        prepared["enhancement_review_required"] = not auto_continue
+        if auto_continue:
+            prepared["enhancement_review_bypassed"] = True
     prepared["enhancement_warnings"] = warnings
+    prepared["enhancement_continuity_reviews"] = enhancement_continuity_reviews()
     return prepared
 
 

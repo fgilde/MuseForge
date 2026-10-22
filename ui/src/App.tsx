@@ -20,7 +20,7 @@ import { NotificationToastHost } from './components/NotificationToastHost'
 import { EditorWorkspace } from './editor/EditorWorkspace'
 import { EditorRoundTripBanner } from './editor/EditorRoundTripBanner'
 import { useStore } from './stores/useStore'
-import { useIsMobile } from './lib/useIsMobile'
+import { useIsMobileSidecar } from './lib/useIsMobile'
 
 function App() {
   const loadModels = useStore(s => s.loadModels)
@@ -36,7 +36,7 @@ function App() {
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const toggleSettings = useStore(s => s.toggleSettings)
   const sidebarMode = useStore(s => s.sidebarMode)
-  const isMobile = useIsMobile()
+  const isMobile = useIsMobileSidecar()
   const isEditor = sidebarMode === 'editor'
 
   useEffect(() => {
@@ -59,7 +59,7 @@ function App() {
   }, [loadLlmStatus])
 
   return (
-    <div className="flex flex-col md:flex-row h-full w-full bg-bg-primary">
+    <div className={`flex ${isMobile && !isEditor ? 'flex-col' : 'flex-col md:flex-row'} h-full w-full bg-bg-primary`}>
       {/* Mobile header */}
       {isMobile && !isEditor && (
         <header className="h-12 shrink-0 grid grid-cols-[1fr_auto_1fr] items-center gap-1 px-2 border-b border-border bg-bg-secondary">
@@ -108,8 +108,8 @@ function App() {
           environment is missing ffmpeg / CUDA or low on disk. Renders
           nothing when everything checks out. */}
       <PreflightBanner />
-      {/* DownloadStatusBanner — fixed bottom-right overlay, polls
-          /api/v1/downloads/active every 2s. Renders nothing unless
+      {/* DownloadStatusBanner — fixed bottom-right overlay, long-polls
+          /api/v1/downloads/active. Renders nothing unless
           a model file is being downloaded. Highlights stalled
           downloads in amber so users know the system is recovering
           rather than frozen. */}

@@ -48,7 +48,8 @@ class GalleryActiveMediaTests(unittest.TestCase):
             ROOT / "ui" / "src" / "components" / "MainContent" / "MediaFeedItem.tsx"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("Show generation details", feed_item)
+        self.assertIn("Show media details", feed_item)
+        self.assertIn("<MediaMetadataDetails", feed_item)
         self.assertIn("Active LoRAs", feed_item)
         self.assertIn("Optimizations", feed_item)
         self.assertIn("Turbo preset", feed_item)
@@ -94,20 +95,30 @@ class GalleryActiveMediaTests(unittest.TestCase):
         self.assertIn("Four persistent controls", feed_item)
         self.assertIn('aria-label="More clip actions"', feed_item)
         self.assertIn('aria-label="Clip actions"', feed_item)
-        self.assertIn("spaceBelow > spaceAbove", feed_item)
-        self.assertIn("actionMenuOpensDown ? 'top-full mt-2' : 'bottom-full mb-2'", feed_item)
+        self.assertIn("window.visualViewport", feed_item)
+        self.assertIn("below > above", feed_item)
+        self.assertIn("menu.style.maxHeight", feed_item)
+        self.assertIn("menu.style.top", feed_item)
+        self.assertIn("createPortal(", feed_item)
         for label in (
             "Save as Recipe",
             "Regenerate with same settings",
             "Retake a time region",
             "Extend this video",
             "Copy prompt",
-            "Use current frame as reference",
             "Download",
             "Move to workspace",
             "Delete output",
         ):
             self.assertIn(label, feed_item)
+        self.assertIn(
+            "Use ${target.kind === 'image' ? 'current frame' : 'video'} as ${target.label}",
+            feed_item,
+        )
+        self.assertIn(
+            "Use ${file.type === 'audio' ? 'audio ' : ''}as ${target.label}",
+            feed_item,
+        )
 
         self.assertIn("Click again to delete", feed_item)
         self.assertIn("No other workspaces", feed_item)
@@ -132,9 +143,11 @@ class GalleryActiveMediaTests(unittest.TestCase):
             ROOT / "ui" / "src" / "components" / "MainContent" / "MainContent.tsx"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("const [measureEpoch, setMeasureEpoch] = useState(0)", main_content)
-        self.assertIn("estimatedItemHeight, measureEpoch]", main_content)
-        self.assertIn("setMeasureEpoch(e => e + 1)", main_content)
+        self.assertIn("const [measuredHeights, setMeasuredHeights] = useState", main_content)
+        self.assertIn("measuredHeights.get(outputIds[index])", main_content)
+        self.assertIn("[outputIds, measuredHeights, containerWidth, estimatedItemHeight]", main_content)
+        self.assertIn("next.set(id, { height, width: containerWidth })", main_content)
+        self.assertIn("scheduleCenteredSelection()", main_content)
 
 
 if __name__ == "__main__":

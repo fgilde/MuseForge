@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { MediaFinishingControls } from './MediaFinishingControls'
-import { dlssSpatialOptions, trackMediaFlowJobs } from '../../lib/mediaFlow'
+import { dlssSpatialOptions, trackMediaFlowJobs, useDlssAvailability } from '../../lib/mediaFlow'
 
 export function MediaFlowPanel({ image = false }: { image?: boolean }) {
+  const dlss = useDlssAvailability()
   const [files, setFiles] = useState<Array<{ path: string; name: string }>>([])
   const [spatial, setSpatial] = useState(image ? 'dlss5*1' : '')
   const [temporal, setTemporal] = useState(image ? '' : 'rife2')
@@ -47,8 +48,8 @@ export function MediaFlowPanel({ image = false }: { image?: boolean }) {
       <p className="text-text-muted">Process a collection with the same settings. Each result is saved as a new file; video audio is retained.</p>
       <input type="file" multiple accept={image ? 'image/*' : 'video/*'} disabled={busy}
         onChange={event => { void addFiles(event.target.files); event.target.value = '' }} className="w-full text-xs" />
-      <button className="text-accent-blue disabled:opacity-40" disabled={!current || current.type !== (image ? 'image' : 'video') || busy}
-        onClick={() => { if (current) setFiles(previous => [...previous, { path: current.name, name: current.name }]) }}>Add selected gallery {image ? 'image' : 'video'}</button>
+      {!image && <button className="text-accent-blue disabled:opacity-40" disabled={!current || current.type !== 'video' || busy}
+        onClick={() => { if (current) setFiles(previous => [...previous, { path: current.name, name: current.name }]) }}>Add selected gallery video</button>}
       {files.length > 0 && <div className="max-h-40 overflow-y-auto space-y-1">
         {files.map((file, index) => <div className="flex gap-2" key={`${file.path}-${index}`}>
           <span className="truncate flex-1">{file.name}</span>
@@ -58,7 +59,7 @@ export function MediaFlowPanel({ image = false }: { image?: boolean }) {
       <label className="block">Neural Rendering / spatial scaling
         <select className="w-full bg-bg-tertiary border border-border rounded-lg p-2" value={spatial} onChange={event => setSpatial(event.target.value)}>
           {!image && <option value="">Original resolution</option>}
-          {dlssSpatialOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          {dlssSpatialOptions.map(option => <option key={option.value} value={option.value} disabled={dlss.disabled(option.value)}>{dlss.label(option.value, option.label)}</option>)}
           {[1.5, 2, 3, 4].map(scale => <option key={scale} value={`lanczos${scale}`}>Lanczos ×{scale}</option>)}
         </select>
       </label>

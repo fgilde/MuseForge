@@ -15,6 +15,7 @@ export interface DirectorCapabilityResult {
 
 export interface DirectorModelCompatibility {
   image: DirectorCapabilityResult
+  image_reference_mode?: '' | 'I' | 'KI'
   video: Record<DirectorPipelineType | 'seamless', DirectorCapabilityResult>
   supports_audio_input: boolean
   generates_audio: boolean
@@ -29,6 +30,13 @@ export interface DirectorModelCompatibility {
   clip_max_frames?: number | null
   clip_frame_step?: number | null
   max_image_refs: number | null
+}
+
+/** Native generation-preview support published for a model by the backend. */
+export interface GenerationPreviewSupport {
+  rgb: boolean
+  tiny_vae_frames: boolean
+  tiny_vae_video: boolean
 }
 
 export interface ModelDef {
@@ -51,11 +59,15 @@ export interface ModelDef {
   supports_ref_images?: boolean
   /** Native MiniMax H3 Ref2VA/Omni reference workflow. */
   omni_reference?: boolean
+  /** Imported H3 variants sharing the same verified checkpoint. */
+  h3_companion_models?: { frames?: string; references?: string }
   /** Image-suite capability flags published by the model definition. */
   supports_image_edit?: boolean
   requires_image_reference?: boolean
   supports_image_inpaint?: boolean
   supports_image_outpaint?: boolean
+  /** Native preview decoders supported by this model, when reported by the backend. */
+  preview_support?: GenerationPreviewSupport
   director?: DirectorModelCompatibility
   is_downloaded?: boolean
   // True when this model is only available with Mature Mode enabled.
@@ -82,6 +94,7 @@ export interface GenerateParams {
   video_length: number
   num_inference_steps: number
   guidance_scale: number
+  sample_solver?: string
   seed: number
   image_mode: number
   negative_prompt: string
@@ -104,8 +117,8 @@ export interface GenerateParams {
   skip_steps_multiplier?: number
   /** Percentage of denoising steps to run before caching may begin. */
   skip_steps_start_step_perc?: number
-  /** Per-generation attention override. Sol is H3-only and experimental. */
-  override_attention?: '' | 'sol' | 'sla' | 'sdpa'
+  /** Per-generation attention override. Sol and Veda are H3-only experiments. */
+  override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa'
   guidance_phases?: number
   video_prompt_type?: string
   audio_prompt_type?: string
@@ -118,6 +131,7 @@ export interface GenerateParams {
   voice_reference?: string
   identity_guidance_scale?: number
   video_guide?: string
+  video_frame_offset?: number
   video_mask?: string
   /** Still-image control inputs used by Image Edit/Inpaint/Outpaint. */
   image_guide?: string
@@ -164,6 +178,8 @@ export interface GenerateParams {
   _viggle_prepare_only?: boolean
   // TTS-specific
   audio_guide2?: string
+  /** Ordered speaker regions as Left:Top:Right:Bottom percentages. */
+  speakers_locations?: string
   audio_guide3?: string
   audio_guide4?: string
   audio_guide5?: string
@@ -236,6 +252,7 @@ export interface GenerateParams {
   /** Add bounded generated look/blocking references between sequence clips. */
   minimax_h3_sequence_continuity?: boolean
   minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
+  minimax_h3_video_vae?: 'auto' | 'full' | 'full_int8' | 'lightvae' | 'lightvae_int8'
   /** LTX-2.5 video decoder. Fast ConvVAE is recommended; NAD is experimental. */
   ltx25_video_vae?: 'fast' | 'nad'
   /** One-click managed H3 Turbo recipe for Full or Pruned H3. */
@@ -277,7 +294,7 @@ export interface LTXWindowPlan {
 }
 
 export type MiniMaxH3ReferenceType = 'image' | 'video' | 'audio'
-export type MiniMaxH3AudioIntent = 'voice' | 'drive' | 'style'
+export type MiniMaxH3AudioIntent = 'voice' | 'drive' | 'style' | 'sound'
 
 export interface MiniMaxH3Reference {
   id: string
@@ -287,9 +304,10 @@ export interface MiniMaxH3Reference {
   url?: string
   role?: string
   audio_intent?: MiniMaxH3AudioIntent
-  image_intent?: 'identity' | 'scene' | 'style' | 'composition'
+  image_intent?: 'identity' | 'scene' | 'style' | 'composition' | 'object'
   remove_background?: boolean
   video_intent?: 'character' | 'motion' | 'scene'
+  follow_timeline?: boolean
   library_character_id?: string
   character_name?: string
   refmod_path?: string
@@ -444,6 +462,7 @@ export interface H3WindowPlan {
   per_clip_frames?: number[]
   trim_tail_frames?: number
   overlap_frames?: number
+  discard_frames?: number
   native_continuation?: boolean
   resolution: string
   model_type: string
@@ -481,6 +500,19 @@ export interface PromptEnhancementRecord {
   error?: string | null
 }
 
+export type GenerationPreviewMode = 'off' | 'rgb' | 'tiny_vae_frames' | 'tiny_vae_video'
+
+export interface GenerationPreview {
+  url: string
+  kind: 'image' | 'video'
+  revision: number
+  mode: Exclude<GenerationPreviewMode, 'off'>
+  window: number
+  total_windows: number
+  clip: number
+  total_clips: number
+}
+
 export interface GenerationJob {
   enhancement?: PromptEnhancementRecord | null
   id: string
@@ -488,6 +520,10 @@ export interface GenerationJob {
   restoredFromHistory?: boolean
   /** Direct submissions stay visible while the backend is queued/planning. */
   showInGallery?: boolean
+  /** Owning Director pipeline when this job is one of its render children. */
+  directorPipelineId?: string | null
+  /** Detached Director repairs/reruns keep an independent progress card. */
+  directorDetachedOperation?: boolean
   kind?: 'generation' | 'editor_export' | string
   status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
@@ -497,6 +533,9 @@ export interface GenerationJob {
   message: string
   outputFiles: string[]
   error: string | null
+  /** Small, job-scoped in-progress preview. Absent on older backends. */
+  preview?: GenerationPreview | null
+  previewNotice?: string | null
   /** Present only on failed jobs that look like CUDA OOMs (see OomInfo). */
   oomInfo?: OomInfo | null
   /** Exact prompts assigned to an in-flight H3 sliding-window generation. */
@@ -540,6 +579,12 @@ export interface OutputFile {
   metadata_ready?: boolean
   /** Sidecar modification time used to invalidate an in-progress metadata view. */
   metadata_updated_at?: number | null
+  /** Joined Director final that owns the individual per-shot gallery rows. */
+  director_group?: { pipeline_id: string; clip_count: number } | null
+  /** Director project owning an individual shot take. */
+  director_pipeline_id?: string | null
+  /** Zero-based shot position for an individual Director take. */
+  director_clip_index?: number | null
 }
 
 export type AppMode = 'director' | 'studio' | 'editor'
@@ -621,6 +666,8 @@ export interface EditorDirectorClipSource {
   clip_index: number
   pipeline_type: string
   workspace: string
+  /** Prompt being prepared for a future rerun; kept separate from the last rendered prompt below. */
+  draft_video_prompt?: string
   video_prompt: string
   window_prompts?: string[]
 }
@@ -777,7 +824,7 @@ export interface EditorExportCapabilities {
 
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'
 export type AspectRatio = 'auto' | '21:9' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
-export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '768p' | '1080p'
+export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '768p' | '1080p' | '2k'
 export type ScailResolutionProfile = '480p' | '512p' | '704p'
 /** Backward-compatible name for saved Recast/API callers. */
 export type RecastResolutionProfile = ScailResolutionProfile
@@ -795,6 +842,7 @@ export type TextSubMode = 'chat' | 'story'
  */
 export type StudioVideoWorkflow =
   | 'animate'
+  | 'avatar'
   | 'frames'
   | 'references'
   | 'extend'
@@ -807,11 +855,12 @@ export type StudioVideoWorkflow =
   | 'upscale'
   | 'film_grain'
 /**
- * Internal media intent inside Studio Video's Frames/References workflows.
+ * Internal media intent inside Studio Video's Frames, References, and Avatar workflows.
  * Frames derives text, fixed-frame, and audio-drive routing from its inputs;
  * References always resolves to the native H3 Omni route.
+ * Avatar keeps its image-and-voice models in a separate route.
  */
-export type StudioVideoEffectiveCreateRoute = 'generate' | 'guided' | 'audio' | 'omni'
+export type StudioVideoEffectiveCreateRoute = 'generate' | 'guided' | 'audio' | 'omni' | 'avatar'
 /** Backward-compatible persisted shape; new sessions always use Auto. */
 export type StudioVideoCreateRoute = 'auto' | StudioVideoEffectiveCreateRoute
 /** User-facing Studio Image workflow. */
@@ -865,7 +914,27 @@ export interface ChoiceConfig {
 }
 
 export interface SlidingWindowMemoryPolicy {
-  checkpoint?: 'full' | 'pruned'
+  checkpoint?: 'full' | 'pruned' | 'fused_4step' | 'fused_4step_references'
+  /** RAM/VRAM/canvas recommendations shared with the backend. */
+  resource_recommendations?: {
+    version: string | number
+    tiers: Array<{
+      checkpoint: string
+      min_vram_gb: number
+      max_vram_gb: number
+      min_ram_gb: number
+      max_ram_gb?: number
+      min_pixels?: number
+      max_pixels: number
+      frames: number | null
+      fallback_resolution?: string
+      basis?: 'tested' | 'reported' | 'estimated' | 'conservative'
+      note?: string
+      evidence?: string[]
+      /** Reference headroom already accounted for in this tested tier. */
+      reference_margin_steps?: number
+    }>
+  }
   manual_override?: boolean
   /** Legal H3 frame steps reserved for Ref2VA reference-context headroom. */
   reference_margin_steps?: number
@@ -889,6 +958,7 @@ export interface ModelOptions {
   video_continuation?: boolean
   motion_amplitude: boolean
   flow_shift: boolean
+  moss_image_prompt_helper?: boolean
   tea_cache: boolean
   first_block_cache?: boolean
   sol_attention?: boolean
@@ -901,8 +971,20 @@ export interface ModelOptions {
     minimum_triton?: string
     first_run_compiles_kernels?: boolean
   } | null
+  veda_attention?: boolean
+  veda_attention_experimental?: boolean
+  veda_attention_status?: {
+    installed: boolean
+    supported: boolean
+    reason?: string | null
+    capability?: string
+    triton_version?: string | null
+    first_run_compiles_kernels?: boolean
+    safe_dense_fallback?: boolean
+  } | null
   sla_attention?: boolean
   sla_attention_default?: boolean
+  sla_attention_experimental?: boolean
   sla_attention_status?: {
     installed: boolean
     supported: boolean
@@ -921,6 +1003,8 @@ export interface ModelOptions {
     protect_audio: boolean
   } | null
   minimax_h3_fused_turbo?: boolean
+  minimax_h3_full_checkpoint?: boolean
+  minimax_h3_baked_turbo?: boolean
   loras_disabled?: boolean
   skip_steps_multiplier_choices?: [string, number][] | null
   skip_steps_multiplier_label?: string
@@ -964,6 +1048,8 @@ export interface ModelOptions {
     recommended?: boolean
   }[] | null
   minimax_h3_text_encoder_default?: string
+  minimax_h3_video_vae_choices?: { value: 'auto' | 'full' | 'full_int8' | 'lightvae' | 'lightvae_int8'; label: string; description?: string }[] | null
+  minimax_h3_video_vae_default?: 'auto'
   ltx25_video_vae_choices?: {
     value: 'fast' | 'nad'
     label: string
@@ -976,6 +1062,9 @@ export interface ModelOptions {
     label: string
     experimental: boolean
     preset_id: string
+    /** Selected model recommends this recipe on first selection. */
+    default_enabled?: boolean
+    unaccelerated_steps?: number | null
     version_label: string
     steps: number
     weight: number
@@ -1034,6 +1123,20 @@ export interface ModelOptions {
   background_removal_label: string | null
   max_image_refs?: number | null
   sample_solvers: [string, string][] | null
+  qwen21_acceleration_profiles?: Record<string, {
+    label: string
+    sample_solver: string
+    steps: number
+    guidance: number
+  }> | null
+  qwen21_turbo_checkpoint?: boolean
+  image_ref_inpaint?: boolean
+  model_modes?: {
+    choices: [string, number][]
+    default: number
+    label: string
+    image_modes?: number[]
+  } | null
   self_refiner: boolean
   self_refiner_max_plans: number
   sliding_window_defaults: Record<string, number> | null
@@ -1065,6 +1168,8 @@ export interface ModelOptions {
   hide_resolution_presets: boolean
   input_video_strength_label: string
   vae_upsampler_modes: number[]
+  /** Per-method image modes supported by optional VAE spatial upsamplers. */
+  vae_upsamplers?: Record<string, number[]> | null
   // TTS-specific
   audio_only: boolean
   duration_slider: { label: string; min: number; max: number; increment: number; default: number } | null
@@ -1097,6 +1202,29 @@ export interface SystemConfig {
   prompt_enhancer_quantization: string
   attention_modes_available: string[]
   vram_safety_coefficient: number
+  ram_allocator?: 'default' | 'mmgp'
+  ram_allocator_active?: 'default' | 'mmgp'
+  ram_allocator_fallback_reason?: string | null
+  ram_allocator_restart_required?: boolean
+  ram_allocator_cli_override?: string | null
+  vram_allocator?: 'default' | 'vmm' | 'vmm_spill'
+  int8_kernels?: 'disabled' | 'auto' | 'triton' | 'kitchen' | 'wgpkernels'
+  vram_allocator_active?: 'default' | 'vmm' | 'vmm_spill'
+  vram_allocator_fallback_reason?: string | null
+  vram_allocator_restart_required?: boolean
+  vram_allocator_cli_override?: string | null
+  smart_memory_pinning?: boolean
+  read_ahead?: boolean
+  perc_reserved_mem_max?: number
+  attention_head_split?: number
+  video_preload_mode?: 'default' | 'dynamic' | 'manual'
+  image_preload_mode?: 'default' | 'dynamic' | 'manual'
+  audio_preload_mode?: 'default' | 'dynamic' | 'manual'
+  video_preload_in_VRAM?: number
+  image_preload_in_VRAM?: number
+  audio_preload_in_VRAM?: number
+  /** Opt-in low-resolution preview generation; older backends omit it. */
+  generation_preview?: GenerationPreviewMode
   /** Plays once on the computer hosting MuseForge, independent of browser
    * notification permissions and per-browser preferences. */
   host_notification_sound_enabled: boolean
@@ -1125,6 +1253,36 @@ export interface MultiWindowTiming {
   total_generation_seconds: number
 }
 
+export interface OutputMediaInfo {
+  width?: number
+  height?: number
+  fps?: number
+  frames?: number
+  duration_seconds?: number
+  size_bytes?: number
+}
+
+export interface OutputTimestamp {
+  /** Unix timestamp in seconds. */
+  value: number
+  kind: 'generated' | 'processed' | 'uploaded' | 'file_modified'
+}
+
+export interface OutputProcessingInfo {
+  method?: string
+  method_label?: string
+  multiplier?: number
+  temporal_method?: string
+  temporal_label?: string
+  frame_multiplier?: number
+  source_name?: string
+  input?: OutputMediaInfo
+  output?: OutputMediaInfo
+  elapsed_seconds?: number
+  completed_at?: number
+  options?: Record<string, unknown>
+}
+
 export interface OutputMetadata {
   model_details?: {
     architecture?: string
@@ -1147,11 +1305,22 @@ export interface OutputMetadata {
   tool_source?: string
   upload_filenames?: Record<string, string | string[]>
   job_id?: string
-  /** Director revision that produced this artifact. Gallery "Load settings"
-   *  uses it to reopen the complete Director project instead of flattening
-   *  the clip into an unrelated Studio job. */
+  /** Director revision that produced this artifact. Joined outputs reopen the
+   *  complete Director project; individual clips restore their scoped Studio
+   *  recipe using director_clip_index. */
   director_pipeline_id?: string
+  /** Distinguishes a single rendered clip from the joined Director artifact. */
+  director_artifact_kind?: 'clip' | 'joined'
+  /** Zero-based index of an individual Director clip; index 0 is valid. */
   director_clip_index?: number
+  /** Version of the scope-normalized settings recipe for a Director clip. */
+  director_clip_settings_version?: number
+  /** Unsafe or unavailable individual clip recipe; displayed to the user. */
+  director_clip_settings_error?: string
+  /** Read-time source used to identify a clip in its saved Director pipeline. */
+  director_clip_settings_provenance?: string
+  /** Workspace-qualified file URLs for archived assets in a clip recipe. */
+  director_clip_asset_urls?: Record<string, string | string[]>
   generation_time?: number
   generation_time_basis?: 'active' | 'elapsed'
   /** Exact native-window render timings captured after each successfully
@@ -1159,6 +1328,9 @@ export interface OutputMetadata {
   multi_window_timing?: MultiWindowTiming
   job_elapsed_time?: number
   created_at?: number
+  media_info?: OutputMediaInfo
+  timestamp?: OutputTimestamp
+  processing?: OutputProcessingInfo
 }
 
 export interface WebPushStatus {
@@ -1204,11 +1376,14 @@ export interface ServicesConfig {
   llm_model_id: string
   llm_device: string
   llm_provider: string
+  llm_mtp_acceleration?: boolean
   llm_remote_url: string
   llm_remote_api_key: string
   llm_remote_api_key_set: boolean
   enhance_llm_model_id: string
   enhance_llm_device: string
+  enhance_fidelity_retries?: number
+  enhance_fidelity_auto_continue?: boolean
   google_api_key: string
   google_api_key_set: boolean
   openai_api_key: string
@@ -1280,6 +1455,11 @@ export interface HardwareInfo {
   supports_sage2: boolean
   supports_flash: boolean
   supports_triton: boolean
+  ram_available_gb?: number
+  driver_version?: string
+  torch_version?: string
+  runtime_version?: string
+  supports_mmgp_allocator?: boolean
 }
 
 /** Recommended settings the auto-tune engine produced for the detected
@@ -1298,6 +1478,32 @@ export interface RecommendedSettings {
   _recommendation_label: string
   /** Verbose reason string for tooltips and debug logs */
   _recommendation_reason: string
+  _recommendation_details?: string[]
+  int8_kernels?: SystemConfig['int8_kernels']
+  vram_allocator?: SystemConfig['vram_allocator']
+  read_ahead?: boolean
+  smart_memory_pinning?: boolean
+}
+
+export interface PerformancePlan {
+  attention_head_split?: number
+  override_attention_head_split?: boolean
+  applied: boolean
+  profile: number
+  transformer_budget_mb: number
+  source: 'hardware' | 'manual' | 'local_history'
+  matching_renders: number
+  reasons: string[]
+  warnings: string[]
+}
+
+export interface PerformanceLearning {
+  completed_renders: number
+  workloads: number
+  minimum_samples?: number
+  scope?: string
+  unavailable?: boolean
+  last_plan?: PerformancePlan | null
 }
 
 /** Response shape from GET /api/v1/system-detect. */
@@ -1305,6 +1511,7 @@ export interface SystemDetectResponse {
   hardware: HardwareInfo
   recommended: RecommendedSettings
   auto_enabled: boolean
+  learning?: PerformanceLearning
 }
 
 /** Response shape from POST /api/v1/system-detect/apply. */
@@ -1317,6 +1524,8 @@ export interface SystemDetectApplyResponse {
   /** True when one of the *_profile keys changed — UI should show
    *  "changes take effect on next model load" toast. */
   profile_changed: boolean
+  settings_reload?: boolean
+  vram_allocator_restart_required?: boolean
 }
 
 // CivitAI Browser types
@@ -1372,7 +1581,11 @@ export interface CivitAISearchResult {
 export interface CivitAIDownload {
   id: string
   filename: string
-  status: 'downloading' | 'completed' | 'failed'
+  status: 'downloading' | 'cancelling' | 'cancelled' | 'completed' | 'failed'
+  /** Opaque backend cancellation token. Absent on older backends. */
+  cancel_id?: string | null
+  /** Only true while this transfer can be interrupted safely. */
+  cancellable?: boolean
   progress: number
   bytes_downloaded: number
   bytes_total: number
@@ -1382,6 +1595,9 @@ export interface CivitAIDownload {
   completed_at: number | null
   /** Present after a downloaded checkpoint is registered as a model. */
   model_type?: string | null
+  model_types?: string[]
+  source_filename?: string | null
+  message?: string
   // Non-fatal warnings raised after the download finished — most
   // commonly the architecture-mismatch warning when a Klein-4B-trained
   // LoRA lands in flux2_klein_9b/ or vice versa. UI shows these inline
@@ -1407,6 +1623,14 @@ export interface LoraRecommendedWeights {
 
 export interface LoraInfo {
   filename: string
+  /** Resolved user-facing name: explicit override, site/guide metadata, or file stem. */
+  display_name?: string
+  /** Explicit user alias, or null when the automatic name is in use. */
+  display_name_override?: string | null
+  /** Best available automatic name before applying a user alias. */
+  suggested_name?: string
+  /** Release or variant label separate from the editable display name. */
+  version_label?: string | null
   trained_words: string[]
   preview_url: string | null
   civitai_model_id: number | null
@@ -1460,6 +1684,7 @@ export interface LlmStatus {
   model_id: string | null
   device: string | null
   provider: string
+  mtp_acceleration?: boolean
 }
 
 /** Live hardware telemetry for the sidebar status indicators.
@@ -1487,6 +1712,7 @@ export interface LlmModelOption {
   id: string
   label: string
   size_hint: string
+  supports_mtp?: boolean
 }
 
 export interface AudioBeat {
@@ -1630,6 +1856,7 @@ export interface DialogueBeat {
   delivery?: string
   physical_cue?: string
   priority?: 'low' | 'medium' | 'high'
+  language?: string
 }
 
 export interface CameraPlan {
@@ -1778,6 +2005,7 @@ export interface SavedPipelineState {
   completed_at: number | null
   status: string
   pipeline_type: string
+  use_lyrics_context?: boolean
   workspace?: string
   scene_description: string
   reference_image_path: string | null

@@ -77,20 +77,40 @@ class MusicMouthCueTests(unittest.TestCase):
         requested = "Cal the drummer shouts triumphantly."
         self.assertEqual(constrain_music_performance(requested, [DRUMMER], "active", project_context=requested), requested)
         direction = music_performance_direction([DRUMMER], "active", project_context=requested)
-        self.assertIn("may perform the user's explicitly requested expression", direction)
-        self.assertNotIn("Cal the drummer in blue keeps their mouth closed", direction)
+        self.assertIn("keeps relaxed closed lips except during the explicitly requested non-song expression", direction)
+        self.assertNotIn("Cal the drummer in blue plays with relaxed closed lips", direction)
+        singer_expression = music_performance_direction(
+            [SINGER], "silent", project_context="Mara cheers in celebration.",
+        )
+        self.assertIn("keeps relaxed closed lips except during the explicitly requested non-song expression", singer_expression)
+        self.assertNotIn("no singing or lyric mouthing", singer_expression)
         negative = "Cal does not sing or lip-sync. His mouth stays closed."
         self.assertEqual(constrain_music_performance(negative, [DRUMMER], "active"), negative)
 
-    def test_new_plan_carries_analysis_through_images_windows_endings_and_serialization(self):
+    def test_new_plan_carries_analysis_through_images_native_clip_endings_and_serialization(self):
         def generate(**kwargs):
-            self.assertIn("relaxed closed lips by default", kwargs["prompt"])
+            self.assertIn("do not add anyone to represent the soundtrack", kwargs["prompt"])
             return json.dumps([{
-                "subjects_on_screen": [SINGER],
+                "scene_goal": "Mara prepares for the instrumental opening without singing.",
+                "scene_type": "performance",
+                "continuity_strategy": "continuous",
+                "physical_state": {
+                    "opening": [],
+                    "transitions": [],
+                    "continuity": "continuous",
+                },
+                "environment": "A concert stage with a microphone stand",
+                "visual_style": "Cinematic concert photography",
+                "lighting": "Warm stage lights",
+                "mood": "Anticipation",
+                "camera_plan": {"framing": "Medium shot pushing toward Mara"},
+                "image_source": "original",
+                "visual_changes": ["Camera moves closer to Mara's hands"],
+                "subjects_on_screen": [{**SINGER, "character_id": "lead"}],
                 "audio_plan": {"vocal_activity": "active"},  # The LLM cannot override analysis.
                 "video_prompt": "Mara bellows into the microphone. Camera pushes in.",
                 "image_prompt": "Mara opens her mouth wide mid-vocalization.",
-                "window_prompts": ["Mara sings the riff. Camera pans to her hands."],
+                "window_prompts": [],
                 "ending_beat": "Mara opens her mouth wide mid-vocalization.",
                 "action_beats": ["Mara shouts loudly."],
             }])
@@ -103,13 +123,13 @@ class MusicMouthCueTests(unittest.TestCase):
             )
         shot = ProductionPlan.from_dict(json.loads(json.dumps(plan.to_dict()))).shots[0]
         self.assertEqual(shot.audio_plan.vocal_activity, "unknown")
-        for text in (shot.video_prompt, shot.image_prompt, shot.ending_beat, *shot.window_prompts, *shot.action_beats):
+        for text in (shot.video_prompt, shot.image_prompt, shot.ending_beat, *(shot.window_prompts or []), *shot.action_beats):
             self.assertNotIn("bellows", text)
             self.assertNotIn("mid-vocalization", text)
             self.assertNotIn("sings the riff", text)
             self.assertNotIn("shouts loudly", text)
         self.assertIn("Camera pushes in", shot.video_prompt)
-        self.assertIn("Guitar riffs and drum hits never drive the mouth", shot.video_prompt)
+        self.assertIn("Mara keeps relaxed closed lips through this interval", shot.video_prompt)
 
     def test_h3_final_compile_catches_conflicts_in_source_and_ending(self):
         for mode in ("ref2va", "i2va", "fl2va"):
@@ -127,7 +147,7 @@ class MusicMouthCueTests(unittest.TestCase):
                 self.assertNotIn("bellows", first)
                 self.assertNotIn("mid-vocalization", first)
                 self.assertIn("Camera pushes in", first)
-                self.assertIn("Vocal activity in this interval is unconfirmed", first)
+                self.assertIn("Mara keeps relaxed closed lips through this interval", first)
                 self.assertEqual(validate_h3_prompt_contract(first, mode=mode), [])
                 compile_h3_clip_plans([plan])
                 self.assertEqual(plan["video_prompt"], first)
@@ -137,9 +157,9 @@ class MusicMouthCueTests(unittest.TestCase):
         prompt, _ = compile_h3_official_prompt("Cal the drummer shouts. His arm strikes the cymbal.", [DRUMMER], [], **kwargs)
         again, _ = compile_h3_official_prompt(prompt, [DRUMMER], [], **kwargs)
         self.assertIn("His arm strikes the cymbal", again)
-        self.assertEqual(again.count("Vocal ownership stays"), 1)
+        self.assertEqual(again.count("Cal plays with relaxed closed lips"), 1)
         self.assertNotIn("drummer shouts", again)
-        self.assertIn("singer continues off screen", again)
+        self.assertNotIn("singer", again.casefold())
 
     def test_story_speech_bypasses_music_cleanup(self):
         result, _ = compile_h3_official_prompt(

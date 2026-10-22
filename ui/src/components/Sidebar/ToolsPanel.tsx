@@ -4,8 +4,9 @@ import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { MediaFlowPanel } from './MediaFlowPanel'
 import { MediaFinishingControls } from './MediaFinishingControls'
-import { dlssSpatialOptions } from '../../lib/mediaFlow'
+import { dlssSpatialOptions, useDlssAvailability } from '../../lib/mediaFlow'
 import { FaceRefinerButton } from '../Characters/FaceRefiner'
+import { GalleryInput } from '../shared/GalleryInput'
 
 // Upscale methods — same set as Post Processing's Spatial Upsampling, minus the
 // VAE options (those are tied to the generation pipeline, not a standalone clip).
@@ -40,6 +41,7 @@ export function ToolsPanel({
   embedded?: boolean
 }) {
   const storedTool = useStore(s => s.toolsTool)
+  const dlss = useDlssAvailability()
   const setTool = useStore(s => s.setToolsTool)
   const storedUpscaleMedia = useStore(s => s.toolsUpscaleMedia)
   const setUpscaleMedia = useStore(s => s.setToolsUpscaleMedia)
@@ -103,6 +105,7 @@ export function ToolsPanel({
       setSource({ path: r.path, name: file.name, url: r.url })
     } catch (e) {
       console.error('Source upload failed:', e)
+      return false
     } finally {
       setUploading(false)
     }
@@ -141,6 +144,9 @@ export function ToolsPanel({
 
   return (
     <div className="flex flex-col gap-4">
+      <GalleryInput kind={mediaKind} label={`${tool === 'upscale' ? 'Upscale' : tool === 'film_grain' ? 'Film Grain' : 'Revoice'} source`}
+        getImages={() => mediaKind === 'image' && sourceUrl ? [{url: sourceUrl, name: sourceName || 'Source image'}] : []}
+        onFile={handleSourceUpload} disabledReason={uploading ? 'Uploading source media…' : undefined} />
       {mediaKind === 'video' && <FaceRefinerButton source={sourcePath ? { path: sourcePath, name: sourceName || 'Video', url: sourceUrl } : undefined} />}
       {!embedded && (
       <div>
@@ -205,15 +211,15 @@ export function ToolsPanel({
                 onChange={e => { const f = e.target.files?.[0]; if (f) handleSourceUpload(f) }}
               />
             </div>
-            <button
+            {mediaKind === 'video' && <button
               onClick={useCurrentClip}
               disabled={!currentMatchesMedia}
               className="w-full text-[11px] py-1.5 rounded-md border border-border bg-bg-tertiary text-text-secondary hover:text-text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               {currentMatchesMedia
-                ? `Use selected gallery ${mediaKind}`
-                : `Select ${mediaKind === 'image' ? 'an image' : 'a video'} in the gallery first`}
-            </button>
+                ? 'Use selected gallery video'
+                : 'Select a video in the gallery first'}
+            </button>}
           </div>
         )}
       </div>
@@ -228,7 +234,7 @@ export function ToolsPanel({
             className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
           >
             {(mediaKind === 'image' ? imageUpscaleMethods : upscaleMethods).map(o => (
-              <option key={o.value} value={o.value}>{o.label}</option>
+              <option key={o.value} value={o.value} disabled={dlss.disabled(o.value)}>{dlss.label(o.value, o.label)}</option>
             ))}
           </select>
           {!method.startsWith('flashvsr') && <MediaFinishingControls spatial={method} temporal={temporal}
@@ -306,6 +312,9 @@ export function ToolsPanel({
             const label = revoiceMode === 'two' ? (idx === 0 ? 'Voice A' : 'Voice B') : 'Reference Voice'
             return (
               <div key={idx}>
+                {(!ref || !ref.path) && <GalleryInput kind="audio"
+                  label={`Revoice ${label.toLowerCase()}`} onFile={file => handleVcUpload(idx, file)}
+                  disabledReason={vcUploading === idx ? `Uploading ${label.toLowerCase()}…` : undefined} />}
                 <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">{label}</label>
                 {!ref || !ref.path ? (
                   <div

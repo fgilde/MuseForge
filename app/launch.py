@@ -36,6 +36,10 @@ from urllib.parse import quote
 # --- Bootstrap: CWD must be app/ and sys.argv must be patched before importing wgp ---
 _app_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(_app_dir)
+from shared.cuda_memory import apply_startup_settings
+# The allocator must precede hardware detection, model imports and profiling.
+# wgp also calls this for the classic entry point; the helper is idempotent.
+apply_startup_settings(sys.argv, os.path.join(_app_dir, "wgp_config.json"))
 
 # Preserve original argv, patch for wgp's argparse
 _original_argv = sys.argv[:]
@@ -48,11 +52,14 @@ if "--compile" in _launch_args:
 # Forward the config/settings folder flags so deployments (e.g. Docker)
 # can point wgp_config.json, queue.zip and per-model settings at a
 # persistent volume outside the app directory.
-for _flag in ("--config", "--settings"):
-    if _flag in _launch_args:
-        _i = _launch_args.index(_flag)
-        if _i + 1 < len(_launch_args):
-            _wgp_argv += [_flag, _launch_args[_i + 1]]
+for _option in ("--vram-allocator", "--vram-debug", "--config", "--settings", "--gpu", "--preload", "--perc-reserved-mem-max"):
+    for _index, _argument in enumerate(_launch_args):
+        if _argument == _option and _index + 1 < len(_launch_args):
+            _wgp_argv.extend((_option, _launch_args[_index + 1]))
+        elif _argument.startswith(_option + "="):
+            _wgp_argv.append(_argument)
+if "--no-prevent-power-throttling" in _launch_args:
+    _wgp_argv.append("--no-prevent-power-throttling")
 sys.argv = _wgp_argv
 
 # Install download stall-detection BEFORE wgp imports anything that
@@ -63,6 +70,13 @@ sys.argv = _wgp_argv
 # download progress for the UI's downloads-in-progress banner.
 print("[MuseForge] Installing download stall protection...")
 from services import safe_download  # noqa: F401 (side-effect import)
+from services.download_control import (
+    check_download_cancelled,
+    create_download_control,
+    download_scope,
+    find_download_control,
+    seal_download,
+)
 from services.checkpoint_compatibility import (
     CheckpointCompatibilityError,
     checkpoint_targets_for_base,
@@ -349,10 +363,33 @@ from services.studio_enhancement import (
     captured_settings, enhancement_context, enhancement_warnings, record_review_warning,
     new_enhancement, prepare_enhanced_job, public_enhancement,
 )
+from services.generation_preview import (
+    GenerationPreviewCache, PREVIEW_MODES, configured_preview_mode, preview_response,
+)
+
+_generation_previews = GenerationPreviewCache()
+
+
+def _consume_generation_preview(job_id: str, payload: dict, model_type: str) -> None:
+    """Preview errors are presentation failures, never generation failures."""
+    try:
+        if not isinstance(payload, dict) or not isinstance(payload.get("context"), dict):
+            return
+        media = payload.get("media")
+        if "latents" in payload:
+            media = wgp.generate_preview(model_type, payload["latents"])
+        if media is not None:
+            _generation_previews.publish(job_id, media, payload["context"])
+    except Exception as error:
+        print(f"[Preview] Could not publish preview: {error}")
+        _generation_previews.set_notice(
+            job_id, "Live previews are unavailable for this render. Generation will continue.",
+        )
 
 _studio_job_archive = StudioJobArchive(Path(_app_dir) / "settings" / "studio_queue")
 _jobs: dict = _studio_job_archive.recover()
 register_terminal_listener(_studio_job_archive.save)
+register_terminal_listener(lambda job, status: _generation_previews.clear(str(job.get("id") or "")))
 _studio_submission_lock = threading.RLock()
 _gen_lock = threading.Lock()
 
@@ -687,6 +724,9 @@ def _check_model_downloaded(model_type: str) -> bool:
         for relative_path in model_def.get("required_model_assets", []):
             if wgp.fl.locate_file(relative_path, error_if_none=False) is None:
                 return False
+        for alternatives in model_def.get("required_model_asset_groups", []):
+            if not any(wgp.fl.locate_file(path, error_if_none=False) is not None for path in alternatives):
+                return False
         return True
     except Exception:
         return False
@@ -696,6 +736,7 @@ def _check_model_downloaded(model_type: str) -> bool:
 def list_models():
     """List available model families and model types."""
     from services.director_model_compat import assess_director_model
+    from shared.preview_runtime import model_preview_support
 
     # Families
     families = []
@@ -727,6 +768,9 @@ def list_models():
             "lora_compatibility_note": md.get("lora_compatibility_note", ""),
             "family": family,
             "architecture": architecture,
+            "preview_support": model_preview_support(
+                architecture, md, wgp.model_types_handlers.get(architecture),
+            ),
             "is_i2v": wgp.test_class_i2v(mt),
             "is_t2v": wgp.test_class_t2v(mt),
             "guidance_max_phases": md.get("guidance_max_phases", 1),
@@ -740,6 +784,7 @@ def list_models():
             "generates_audio": bool(md.get("returns_audio", False)),
             "supports_ref_images": bool(md.get("image_ref_choices") or md.get("omni_reference")),
             "omni_reference": bool(md.get("omni_reference", False)),
+            "h3_companion_models": md.get("h3_companion_models"),
             # Studio's Image workflow selector uses the model definition's
             # native capabilities instead of name/architecture heuristics.
             "supports_image_edit": bool(md.get("image_ref_choices")),
@@ -794,7 +839,8 @@ def _normalize_studio_preferences(values, current=None):
 
     Prompt text, seeds, LoRAs, uploaded paths, and other job inputs are
     intentionally excluded. This record only remembers navigation/model
-    choices, per-model inference steps, enhancement default and the opt-in H3 accelerations.
+    choices, per-model inference steps and Krea identity controls, enhancement
+    default and the opt-in H3 accelerations.
     """
     if values is None:
         values = {}
@@ -834,7 +880,7 @@ def _normalize_studio_preferences(values, current=None):
         "studio_video_workflow": {
             "frames", "references", "extend", "blend", "retake",
             "prompt_edit", "outpaint", "repaint", "recast", "upscale",
-            "film_grain", "animate",
+            "film_grain", "animate", "avatar",
         },
         "studio_image_workflow": {
             "generate", "inpaint", "outpaint", "upscale",
@@ -886,13 +932,26 @@ def _normalize_studio_preferences(values, current=None):
             steps[model.strip()] = int(count)
         normalized["inference_steps_per_model"] = steps
 
+    if "krea_identity_settings_per_model" in values:
+        from models.krea2.identity_controls import normalize_identity_settings
+
+        raw_identity = values["krea_identity_settings_per_model"]
+        if not isinstance(raw_identity, dict) or len(raw_identity) > 2:
+            raise ValueError("Krea identity preferences must be an edit-model-to-settings object.")
+        identity = {}
+        for model, settings in raw_identity.items():
+            if model not in ("krea2_raw_edit", "krea2_turbo_edit") or not isinstance(settings, dict):
+                raise ValueError("Krea identity preferences require a Krea Identity Edit model and settings object.")
+            identity[model] = normalize_identity_settings(settings)
+        normalized["krea_identity_settings_per_model"] = identity
+
     if "h3_optimizations" in values:
         raw_h3 = values.get("h3_optimizations")
         if not isinstance(raw_h3, dict):
             raise ValueError("h3_optimizations must be an object.")
         override_attention = raw_h3.get("override_attention", "")
         cache_type = raw_h3.get("skip_steps_cache_type", "")
-        if override_attention not in ("", "sol", "sla", "sdpa"):
+        if override_attention not in ("", "sol", "sla", "veda", "sdpa"):
             raise ValueError("override_attention is invalid.")
         if cache_type not in ("", "first_block"):
             raise ValueError("skip_steps_cache_type is invalid.")
@@ -991,6 +1050,46 @@ def _normalize_model_visibility_ids(values):
     return normalized
 
 
+
+def _normalize_model_visibility_overrides(values):
+    """Validate per-workflow choices while retaining the legacy global baseline."""
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise ValueError("Mode visibility overrides must be an object.")
+    scopes = {
+        "video:frames", "video:references", "video:avatar", "video:extend",
+        "video:blend", "video:animate", "video:retake", "video:prompt_edit",
+        "video:outpaint", "video:repaint", "video:recast", "video:inpaint",
+        "image:generate", "image:inpaint", "image:outpaint",
+        "audio:speech", "audio:music", "audio:sfx",
+    }
+    normalized = {}
+    total = 0
+    for scope, choices in values.items():
+        if scope not in scopes or not isinstance(choices, dict):
+            raise ValueError("An unknown mode or invalid model visibility group was supplied.")
+        ids = _normalize_model_visibility_ids(list(choices))
+        group = {}
+        trimmed_choices = {}
+        for key, value in choices.items():
+            trimmed_choices.setdefault(key.strip(), value)
+        for model_type in ids:
+            if model_type in {"__proto__", "constructor", "prototype"}:
+                raise ValueError("An invalid model identifier was supplied.")
+            # Match the trimmed identifier back to its supplied choice.
+            raw_choice = trimmed_choices[model_type]
+            if not isinstance(raw_choice, bool):
+                raise ValueError("Mode visibility choices must be true or false.")
+            group[model_type] = raw_choice
+        total += len(group)
+        if total > 5000:
+            raise ValueError("Too many mode visibility entries.")
+        if group:
+            normalized[scope] = group
+    return normalized
+
+
 def _model_visibility_response():
     raw = wgp.server_config.get(_MODEL_VISIBILITY_CONFIG_KEY)
     configured = isinstance(raw, dict) and isinstance(
@@ -1000,6 +1099,7 @@ def _model_visibility_response():
         return {
             "configured": False,
             "enabled_models": [],
+            "mode_overrides": {},
             "initialized_mature_models": [],
             "defaults_version": 0,
         }
@@ -1014,6 +1114,7 @@ def _model_visibility_response():
         return {
             "configured": False,
             "enabled_models": [],
+            "mode_overrides": {},
             "initialized_mature_models": [],
             "defaults_version": 0,
         }
@@ -1021,9 +1122,14 @@ def _model_visibility_response():
         defaults_version = max(0, int(raw.get("defaults_version", 0)))
     except (TypeError, ValueError):
         defaults_version = 0
+    try:
+        mode_overrides = _normalize_model_visibility_overrides(raw.get("mode_overrides"))
+    except ValueError:
+        mode_overrides = {}
     return {
         "configured": True,
         "enabled_models": enabled_models,
+        "mode_overrides": mode_overrides,
         "initialized_mature_models": initialized_mature_models,
         "defaults_version": defaults_version,
     }
@@ -1067,6 +1173,11 @@ async def update_model_visibility(request: Request):
         enabled_models = _normalize_model_visibility_ids(
             body.get("enabled_models"),
         )
+        previous = wgp.server_config.get(_MODEL_VISIBILITY_CONFIG_KEY)
+        previous = previous if isinstance(previous, dict) else {}
+        mode_overrides = _normalize_model_visibility_overrides(
+            body.get("mode_overrides", previous.get("mode_overrides")),
+        )
         initialized_mature_models = _normalize_model_visibility_ids(
             body.get("initialized_mature_models", []),
         )
@@ -1083,6 +1194,7 @@ async def update_model_visibility(request: Request):
     with _MODEL_VISIBILITY_WRITE_LOCK:
         wgp.server_config[_MODEL_VISIBILITY_CONFIG_KEY] = {
             "enabled_models": enabled_models,
+            "mode_overrides": mode_overrides,
             "initialized_mature_models": initialized_mature_models,
             "defaults_version": defaults_version,
         }
@@ -1298,7 +1410,15 @@ def _download_model_files(model_type: str):
     # and size estimate include it — it's often the single biggest file.
     text_encoder_filename = None
     text_encoder_folder = None
-    text_encoder_URLs = wgp.get_model_recursive_prop(model_type, "text_encoder_URLs", return_list=True)
+    # Match Studio and generation's hardware-aware H3 encoder default.
+    # The static definition names NVFP4; low-memory hosts use Q2_K instead.
+    encoder_variants = model_def.get("minimax_h3_text_encoder_variants") or {}
+    if encoder_variants:
+        encoder = _recommended_minimax_h3_encoder(model_type, model_def)
+        text_encoder_URLs = encoder_variants[encoder].get("URLs", [])
+    else:
+        text_encoder_URLs = wgp.get_model_recursive_prop(model_type, "text_encoder_URLs", return_list=True)
+    check_download_cancelled()
     if text_encoder_URLs is not None:
         te_quant = (model_def.get("text_encoder_quantization", None) if model_def else None) or wgp.text_encoder_quantization
         te_name = wgp.get_model_filename(model_type=model_type, quantization=te_quant, dtype_policy=dtype_policy, URLs=text_encoder_URLs)
@@ -1321,6 +1441,7 @@ def _download_model_files(model_type: str):
     safe_download.set_download_context(model_type)
     try:
         for filename, source_type, submodel_no in zip(model_file_list, source_type_list, submodel_no_list):
+            check_download_cancelled()
             if len(filename) == 0:
                 continue
             _update_model_download(model_type, current_file=os.path.basename(filename))
@@ -1345,6 +1466,7 @@ def _download_model_files(model_type: str):
     finally:
         safe_download.set_download_context(None)
 
+    check_download_cancelled()
     if not _check_model_downloaded(model_type):
         raise Exception("Download finished but the checkpoint could not be located — check disk space and earlier terminal output.")
 
@@ -1357,12 +1479,16 @@ def download_model(model_type: str):
         return JSONResponse({"error": "Model not found"}, status_code=404)
     with _model_downloads_lock:
         entry = _model_downloads.get(model_type)
-        if entry and entry["status"] == "downloading":
-            return {"status": "downloading", "model_type": model_type}
-        _model_downloads[model_type] = {
+        if entry and entry["status"] in {"downloading", "cancelling"}:
+            active_control = entry.get("_download_control")
+            status = active_control.snapshot()["status"] if active_control is not None else entry["status"]
+            return {"status": status, "model_type": model_type}
+        control = create_download_control()
+        entry = {
             "status": "downloading",
             "error": None,
             "started": time.time(),
+            "_download_control": control,
             "model_name": md.get("name") or model_type,
             # Filled in by _download_model_files once the file list is
             # resolved; null until then so the UI shows a plain spinner.
@@ -1371,16 +1497,27 @@ def download_model(model_type: str):
             "current_file": None,
             "bytes_total": None,
         }
+        _model_downloads[model_type] = entry
 
     def _worker():
+        status, error = "completed", None
         try:
-            _download_model_files(model_type)
-            _update_model_download(model_type, status="completed", error=None, current_file=None)
-            print(f"[Models] Pre-download complete: {model_type}")
+            with download_scope(control):
+                _download_model_files(model_type)
+                control.check()
         except Exception as e:
-            traceback.print_exc()
-            _update_model_download(model_type, status="failed", error=str(e))
-            print(f"[Models] Pre-download FAILED for {model_type}: {e}")
+            status, error = "failed", str(e)
+            if not control.cancel_requested:
+                traceback.print_exc()
+        finally:
+            with _model_downloads_lock:
+                snapshot = control.finish(status)
+                entry.update(
+                    status=snapshot["status"],
+                    error=None if snapshot["status"] == "cancelled" else error,
+                    current_file=None,
+                )
+            print(f"[Models] Pre-download {snapshot['status']}: {model_type}")
 
     threading.Thread(target=_worker, daemon=True, name=f"model-dl-{model_type}").start()
     return {"status": "downloading", "model_type": model_type}
@@ -1391,12 +1528,37 @@ def model_downloads_status():
     """Status of model pre-downloads started via POST .../download.
 
     Returns the whole record: status, error, started, model_name,
-    files_total, files_done, current_file, bytes_total. Byte-level
-    progress for the file in flight comes from /api/v1/downloads/active
-    (matched by its `model_type` field).
+    files_total, files_done, current_file, bytes_total, plus cancel_id /
+    cancellable for POST .../download/cancel. Byte-level progress for the
+    file in flight comes from /api/v1/downloads/active (matched by its
+    `model_type` field).
     """
     with _model_downloads_lock:
-        return {"downloads": {mt: dict(e) for mt, e in _model_downloads.items()}}
+        downloads = {}
+        for model_type, entry in _model_downloads.items():
+            control = entry.get("_download_control")
+            snapshot = control.snapshot() if control is not None else {}
+            downloads[model_type] = {
+                **{k: v for k, v in entry.items() if not k.startswith("_")},
+                "status": snapshot.get("status", entry["status"]),
+                "cancel_id": snapshot.get("download_id"),
+                "cancellable": bool(snapshot.get("cancellable")),
+            }
+    return {"downloads": downloads}
+
+
+@api.post("/api/v1/models/{model_type}/download/cancel")
+def cancel_model_download(model_type: str):
+    with _model_downloads_lock:
+        entry = _model_downloads.get(model_type)
+        control = entry.get("_download_control") if entry else None
+    if control is None:
+        raise HTTPException(status_code=404, detail="No model download was found.")
+    try:
+        snapshot = control.request_cancel()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return {"status": snapshot["status"], "model_type": model_type}
 
 
 @api.get("/api/v1/resolutions")
@@ -2053,6 +2215,8 @@ def list_all_installed_loras():
     (where the scan writes them, since linked installs stay read-only),
     then from beside the file itself.
     """
+    from services.lora_metadata import load_lora_display_names, lora_name_fields, lora_date_fields
+    display_names = load_lora_display_names()
     lora_root = wgp.server_config.get("loras_root", "loras") if hasattr(wgp, 'server_config') else "loras"
     candidates = [lora_root]
     if not os.path.isabs(lora_root):
@@ -2136,12 +2300,6 @@ def list_all_installed_loras():
                     info["hf_repo_id"] = meta.get("repoId")
                     info["name"] = meta.get("name")
                     info["base_model"] = meta.get("baseModel")
-                    # CivitAI sidecars have carried downloadedAt since the
-                    # download path first shipped; publishedAt (the version
-                    # release date) is newer — captured at download time and
-                    # backfilled for existing files by check-updates.
-                    info["downloaded_at"] = meta.get("downloadedAt")
-                    info["released_at"] = meta.get("publishedAt")
                     # Manual override (set via /api/v1/loras/nsfw-override)
                     # takes precedence over CivitAI's `nsfw` boolean, which
                     # is sometimes overly conservative (it's "worst content
@@ -2166,13 +2324,7 @@ def list_all_installed_loras():
                             info["preview_url"] = example_media[0]
                 except Exception:
                     pass
-            # Downloaded-date fallback for HF/hand-installed files without a
-            # CivitAI sidecar: the weight file's mtime.
-            if not info.get("downloaded_at"):
-                try:
-                    info["downloaded_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(full_path)))
-                except OSError:
-                    info["downloaded_at"] = None
+            info.update(lora_date_fields(full_path, meta))
             # Check for local preview files (downloaded from HF)
             if not info.get("preview_url"):
                 for _b in _bases:
@@ -2191,16 +2343,16 @@ def list_all_installed_loras():
             # sidecars at all.
             has_override = isinstance(meta, dict) and isinstance(meta.get("nsfw_override"), bool)
             sidecar_has_nsfw_field = isinstance(meta, dict) and "nsfw" in meta
+            guide_text = ""
+            guide_path = next((b + ".guide.md" for b in _bases if os.path.isfile(b + ".guide.md")), None)
+            if guide_path:
+                try:
+                    with open(guide_path, "r", encoding="utf-8") as gf:
+                        guide_text = gf.read(6000)
+                except OSError:
+                    pass
             if not info["nsfw"] and not has_override and not sidecar_has_nsfw_field:
                 _meta = meta if os.path.isfile(sidecar) else None
-                guide_path = next((b + ".guide.md" for b in _bases if os.path.isfile(b + ".guide.md")), None)
-                guide_text = None
-                if guide_path:
-                    try:
-                        with open(guide_path, "r", encoding="utf-8") as gf:
-                            guide_text = gf.read()
-                    except Exception:
-                        guide_text = None
                 if _classify_lora_nsfw(filename=f, display_name=info.get("name"),
                                        sidecar_meta=_meta, guide_text=guide_text):
                     info["nsfw"] = True
@@ -2208,6 +2360,7 @@ def list_all_installed_loras():
             # Survives version updates so persisted state (weights, activations,
             # NSFW stash) carries forward automatically.
             info["lora_id"] = _compute_lora_id(f, meta)
+            info.update(lora_name_fields(f, meta, rel_dir, guide_text, names=display_names))
             # Per-file update status — uses the cached manifest entry plus
             # this file's own sidecar versionId, so superseded files (older
             # version sitting next to a newer one) don't get falsely flagged
@@ -2332,14 +2485,15 @@ def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
             from models.minimax_h3.fused_turbo import fused_h3_lora_incompatibility
 
             return fused_h3_lora_incompatibility(path) is None
-        from models.minimax_h3.turbo import minimax_h3_turbo_preset_for_path
+        from models.minimax_h3.turbo import (
+            minimax_h3_adapter_workflow,
+            minimax_h3_turbo_preset_for_path,
+        )
 
         preset = minimax_h3_turbo_preset_for_path(path)
         if preset is not None:
             adapter_workflow = str(preset.get("workflow") or "all").lower()
-            model_workflow = (
-                "ref2va" if (model_def or {}).get("omni_reference") else "fl2va"
-            )
+            model_workflow = minimax_h3_adapter_workflow(model_def)
             if adapter_workflow not in {"all", model_workflow}:
                 return False
             if (
@@ -2358,6 +2512,7 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
     if (
         not architecture.startswith("minimax_h3")
         or (model_def or {}).get("minimax_h3_fused_turbo", False)
+        or (model_def or {}).get("minimax_h3_baked_turbo", False)
         or (model_def or {}).get("audio_only", False)
         or (model_def or {}).get("vdn", False)
     ):
@@ -2365,11 +2520,12 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
 
     from models.minimax_h3.turbo import (
         MINIMAX_H3_TURBO_MANIFEST,
+        minimax_h3_adapter_workflow,
         minimax_h3_turbo_preset,
         minimax_h3_turbo_presets_for_workflow,
     )
 
-    workflow = "ref2va" if (model_def or {}).get("omni_reference") else "fl2va"
+    workflow = minimax_h3_adapter_workflow(model_def)
     full_checkpoint = bool(
         (model_def or {}).get("minimax_h3_full_checkpoint", False)
     )
@@ -2378,6 +2534,7 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         full_checkpoint=full_checkpoint,
     )
     default_preset = minimax_h3_turbo_preset(
+        (model_def or {}).get("minimax_h3_default_turbo_preset"),
         workflow=workflow,
         full_checkpoint=full_checkpoint,
     )
@@ -2406,6 +2563,12 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         "label": "Turbo mode",
         "experimental": True,
         "preset_id": str(default_preset["id"]),
+        "default_enabled": bool(
+            (model_def or {}).get("minimax_h3_default_turbo_preset")
+        ),
+        "unaccelerated_steps": (model_def or {}).get(
+            "minimax_h3_unaccelerated_default_steps"
+        ),
         "version_label": str(default_preset["label"]),
         "steps": int(default_preset["steps"]),
         "weight": float(default_preset["weight"]),
@@ -2473,6 +2636,8 @@ def list_loras(model_type: str):
 @api.get("/api/v1/loras/{model_type}/details")
 def list_loras_details(model_type: str):
     """List LoRAs with metadata from .civitai.json sidecars."""
+    from services.lora_metadata import load_lora_display_names, lora_name_fields, lora_date_fields
+    display_names = load_lora_display_names()
     md = wgp.get_model_def(model_type)
     if md is None:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_type}")
@@ -2563,11 +2728,6 @@ def list_loras_details(model_type: str):
                 info["trained_words"] = meta.get("trainedWords", [])
                 info["civitai_model_id"] = meta.get("modelId")
                 info["recommended_weights"] = meta.get("recommendedWeights")
-                # Same date semantics as /api/v1/loras/installed: downloadedAt
-                # is stamped by the download path, publishedAt (version release
-                # date) is captured at download and backfilled by check-updates.
-                info["downloaded_at"] = meta.get("downloadedAt")
-                info["released_at"] = meta.get("publishedAt")
                 # Manual override > CivitAI flag > keyword fallback. See
                 # /api/v1/loras/installed for full rationale.
                 if isinstance(meta.get("nsfw_override"), bool):
@@ -2581,13 +2741,7 @@ def list_loras_details(model_type: str):
                     info["preview_url"] = images[0]["url"]
             except Exception:
                 meta = None
-        # Downloaded-date fallback for HF/hand-installed files without a
-        # CivitAI sidecar: the weight file's mtime.
-        if not info.get("downloaded_at"):
-            try:
-                info["downloaded_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(f)))
-            except OSError:
-                info["downloaded_at"] = None
+        info.update(lora_date_fields(f, meta))
         # Fallback: infer NSFW from filename + tags + description + guide
         # only when no authoritative signal exists.
         has_override = isinstance(meta, dict) and isinstance(meta.get("nsfw_override"), bool)
@@ -2602,6 +2756,9 @@ def list_loras_details(model_type: str):
                 info["nsfw"] = True
         # Stable identifier: civitai:{modelId} when available, else local:{filename}.
         info["lora_id"] = _compute_lora_id(basename, meta)
+        info["name"] = meta.get("name") if isinstance(meta, dict) else None
+        name_directory = os.path.relpath(os.path.abspath(lora_dir), os.path.abspath(_resolve_lora_root() or lora_dir))
+        info.update(lora_name_fields(basename, meta, name_directory, info.get("guide") or "", display_names))
         # Per-file update status (see /api/v1/loras/installed for the
         # equivalent logic). Computes against this file's own sidecar
         # versionId rather than blindly inheriting the manifest's
@@ -2656,6 +2813,8 @@ def list_loras_details(model_type: str):
                 "guide": preset["description"],
                 "update_status": "current",
             })
+            if not info.get("display_name"):
+                info.update(lora_name_fields(filename, {"name": preset.get("label") or preset.get("name")}, "", names=display_names))
         loras.sort(key=lambda item: item["filename"])
     return {
         "loras": loras,
@@ -2750,6 +2909,66 @@ async def relocate_lora(request: Request):
     print(f"[LoRA] Moved {filename}: {entry['directory']} -> {target}")
     return {"moved": True, "directory": target, "models": models,
             "detail": f"Moved to loras/{target}. {len(models)} model(s) load from there."}
+@api.put("/api/v1/loras/display-name")
+async def update_lora_display_name(request: Request):
+    """Rename the visible label, never the weights, sidecar or update identity."""
+    from services.lora_metadata import lora_name_fields, set_lora_display_name
+    body = await request.json()
+    if not isinstance(body, dict) or "display_name" not in body:
+        raise HTTPException(400, "display_name is required (use null to reset it).")
+    if body.get("model_type") and "directory" in body:
+        raise HTTPException(400, "Specify a model type or a directory, not both.")
+    filename = body.get("filename")
+    if not isinstance(filename, str) or not _is_safe_path_component(filename) or not filename.lower().endswith((".safetensors", ".sft")):
+        raise HTTPException(400, "A LoRA filename without a directory is required.")
+    root = _resolve_lora_root()
+    if not root:
+        raise HTTPException(404, "LoRA folder not found.")
+    model_type = body.get("model_type")
+    if model_type:
+        if not isinstance(model_type, str) or wgp.get_model_def(model_type) is None:
+            raise HTTPException(404, "Unknown model type.")
+        primary_dir = wgp.get_lora_dir(model_type)
+        if not primary_dir:
+            raise HTTPException(404, "This model has no LoRA folder.")
+        resolved_path = wgp.resolve_lora_path(model_type, filename)
+        directory = os.path.relpath(os.path.abspath(primary_dir), os.path.abspath(root))
+    else:
+        directory = body.get("directory", ".")
+        if not isinstance(directory, str):
+            raise HTTPException(400, "Invalid LoRA directory.")
+        primary_dir = _safe_join(root, directory)
+        if primary_dir is None:
+            raise HTTPException(400, "Invalid LoRA directory.")
+        candidates = [_safe_join(base, directory, filename) for base in [root, *_linked_lora_roots()]]
+        resolved_path = next((candidate for candidate in candidates if candidate and os.path.isfile(candidate)), None)
+        directory = os.path.relpath(os.path.abspath(primary_dir), os.path.abspath(root))
+    if not resolved_path or not os.path.isfile(resolved_path):
+        raise HTTPException(404, "LoRA file not found.")
+    bases = [os.path.join(primary_dir, os.path.splitext(filename)[0]), os.path.splitext(resolved_path)[0]]
+    meta = None
+    guide = ""
+    for base in dict.fromkeys(bases):
+        if meta is None:
+            try:
+                with open(base + ".civitai.json", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    meta = loaded
+            except (OSError, ValueError):
+                pass
+        if not guide:
+            try:
+                with open(base + ".guide.md", encoding="utf-8") as handle:
+                    guide = handle.read(6000)
+            except OSError:
+                pass
+    try:
+        set_lora_display_name(filename, meta, directory, body.get("display_name"))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    return {"filename": filename, "lora_id": _compute_lora_id(filename, meta),
+            **lora_name_fields(filename, meta, directory, guide)}
 
 
 @api.post("/api/v1/loras/nsfw-override")
@@ -2920,28 +3139,31 @@ def check_lora_updates(force: bool = False):
     new_entries: dict[str, dict] = dict(manifest.get("entries", {}))
 
     def _backfill_published_at(sidecar_paths: list[str], model_data: dict):
-        """Write each version's publishedAt into local sidecars that predate
-        publishedAt capture, matched by the sidecar's versionId."""
+        """Fill missing release dates/titles, matched to the installed version."""
         versions = {}
         for v in model_data.get("modelVersions", []) or []:
             if isinstance(v, dict) and v.get("id") is not None:
                 try:
-                    versions[int(v["id"])] = v.get("publishedAt")
+                    versions[int(v["id"])] = v
                 except (TypeError, ValueError):
                     continue
         for path in sidecar_paths:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
-                if meta.get("publishedAt"):
-                    continue
                 vid = meta.get("versionId")
-                published = versions.get(int(vid)) if vid is not None else None
-                if not published:
+                version = versions.get(int(vid)) if vid is not None else None
+                if not version:
                     continue
-                meta["publishedAt"] = published
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(meta, f, indent=2)
+                changed = False
+                for key, value in (("publishedAt", version.get("publishedAt")),
+                                   ("versionName", version.get("name"))):
+                    if value and not meta.get(key):
+                        meta[key] = value
+                        changed = True
+                if changed:
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f, indent=2)
             except Exception:
                 continue
 
@@ -3080,6 +3302,25 @@ def _is_minimax_h3_identity(*values) -> bool:
     return "minimaxh3" in compact
 
 
+def _validate_h3_source_quote_boundaries(prompt: str) -> None:
+    """Reject incomplete authored speech before planning or generation."""
+    from services.h3_dialogue_source import unclosed_h3_spoken_quote_error
+
+    error = unclosed_h3_spoken_quote_error(prompt)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+
+
+def _is_qwen21_identity(*values) -> bool:
+    """Recognize the 7B image architecture without matching older Qwen models."""
+    import re
+
+    return any(re.search(
+        r"(?<![a-z0-9])qwen[\s._-]*(?:image[\s._-]*)?2[._-]1(?![a-z0-9])",
+        str(value), re.IGNORECASE,
+    ) for value in values if value)
+
+
 CIVIT_TO_LOCAL_ARCH = {
     # Wan Video
     "Wan Video 14B t2v": "t2v",
@@ -3109,6 +3350,13 @@ CIVIT_TO_LOCAL_ARCH = {
     "Flux.2 Klein 9B-base": "flux2_klein_9b",
     "Flux.2 Klein 4B": "flux2_klein_4b",
     "Flux.2 Klein 4B-base": "flux2_klein_4b",
+    # CivitAI's exact LoRA-capable Flux 3 labels. Plain "Flux.3" is
+    # checkpoint-only on CivitAI; both Klein variants share the native handler.
+    "Flux.3 Klein": "flux3_klein",
+    "Flux.3 Klein-base": "flux3_klein",
+    # MOSS Base and SFT share the native image-transformer LoRA layout.
+    "MOSS Image": "moss_image",
+    "MOSS Image Base": "moss_image",
     # LTX — CivitAI splits LTX 1 (LTXV), LTX-2 (LTXV2), and LTX-2.3
     # (LTXV 2.3) into distinct baseModel values. LTX-2 and LTX-2.3
     # share the ltx2 architecture on disk; LTX 1 has its own ltxv dir.
@@ -3119,8 +3367,11 @@ CIVIT_TO_LOCAL_ARCH = {
     "MiniMax H3": "minimax_h3",
     # Qwen Image
     "Qwen": "qwen_image_20B",
+    # CivitAI calls the new 7B Qwen Image 2.1 architecture "Qwen 2".
+    "Qwen 2": "qwen_image_21_7B",
     # Krea 2
     "Krea 2": "krea2",
+    "Krea 2 Turbo": "krea2",
     # Other
     "ZImageTurbo": "z_image",
     "Mochi": "mocha",
@@ -3205,11 +3456,16 @@ HF_BASE_TO_LOCAL_DIR = {
     "black-forest-labs/FLUX.1-dev": "flux",
     "black-forest-labs/FLUX.1-schnell": "flux",
     "black-forest-labs/FLUX.2-dev": "flux2_dev",
+    "black-forest-labs/flux-3-image-klein": "flux3_klein",
+    "black-forest-labs/flux-3-image-klein-base": "flux3_klein",
+    "OpenMOSS-Team/MOSS-Image-Base": "moss_image",
+    "OpenMOSS-Team/MOSS-Image-SFT": "moss_image",
     "Freepik/flux.2-klein-guidance-9b": "flux2_klein_9b",
     "Freepik/flux.2-klein-guidance-4b": "flux2_klein_4b",
     "tencent/HunyuanVideo": "hunyuan",
     "Qwen/Qwen-Image-Edit-2511": "qwen",
     "Alibaba/Qwen-Image-20B": "qwen",
+    "Qwen/Qwen-Image-2.1": "qwen21",
     "krea/Krea-2-Raw": "krea2",
     "krea/Krea-2-Turbo": "krea2",
     "DeepBeepMeep/krea-2": "krea2",
@@ -3255,8 +3511,14 @@ CIVITAI_MODEL_FILTERS = [
     {"label": "Flux.2 Dev", "civitai_base": "Flux.2 D", "default_dir": "flux2"},
     {"label": "Flux.2 Klein 9B", "civitai_base": "Flux.2 Klein 9B,Flux.2 Klein 9B-base", "default_dir": "flux2_klein_9b"},
     {"label": "Flux.2 Klein 4B", "civitai_base": "Flux.2 Klein 4B,Flux.2 Klein 4B-base", "default_dir": "flux2_klein_4b"},
+    # CivitAI lists Flux.3 Klein and Flux.3 Klein-base separately; combine
+    # both LoRA-capable variants. Plain Flux.3 is checkpoint-only there.
+    {"label": "Flux.3 Klein", "civitai_base": "Flux.3 Klein,Flux.3 Klein-base", "default_dir": "flux3_klein"},
+    {"label": "MOSS Image", "civitai_base": "MOSS Image,MOSS Image Base", "default_dir": "moss_image"},
     {"label": "Qwen", "civitai_base": "Qwen", "default_dir": "qwen"},
-    {"label": "Krea 2", "civitai_base": "Krea 2", "default_dir": "krea2"},
+    {"label": "Qwen Image 2.1", "civitai_base": "Qwen 2", "default_dir": "qwen21"},
+    {"label": "Krea 2", "civitai_base": "Krea 2,Krea 2 Turbo", "default_dir": "krea2"},
+    {"label": "Krea 2 Turbo", "civitai_base": "Krea 2 Turbo", "default_dir": "krea2"},
     {"label": "ZImageTurbo", "civitai_base": "ZImageTurbo", "default_dir": "z_image"},
 ]
 
@@ -3353,6 +3615,9 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
     ckpts/ and never tries to download it — the Civitai updater owns the file."""
     base_model = str(sidecar_data.get("baseModel") or "")
     filename = os.path.basename(save_path)
+    from services.civitai_checkpoints import is_h3_base
+    if is_h3_base(base_model):
+        return _register_h3_checkpoint_finetunes(save_path, sidecar_data, target_architecture, auto_quantize)
     compatibility = validate_checkpoint_file(
         save_path,
         base_model,
@@ -3438,6 +3703,38 @@ def _register_checkpoint_finetune(save_path: str, sidecar_data: dict,
     print(f"[CivitAI] Registered checkpoint finetune '{slug}' "
           f"(arch={target_architecture}) -> {out_path}")
     return slug, out_path
+
+
+def _register_h3_checkpoint_finetunes(save_path, sidecar_data, target_architecture, auto_quantize=False):
+    from services.civitai_checkpoints import build_h3_definitions
+    profile = (sidecar_data.get("compatibility") or {}).get("h3_profile") or {}
+    receipt = validate_checkpoint_file(save_path, "MiniMax H3", target_architecture,
+                                      source=sidecar_data,
+                                      sampling_profile=profile.get("sampling_profile", "auto"),
+                                      native_workflow=profile.get("native_workflow", "auto"),
+                                      qkv_layout=profile.get("qkv_layout_selection", "auto"))
+    entries = build_h3_definitions(sidecar_data, receipt["h3_profile"], os.path.basename(save_path),
+                                   _DEFAULTS_DIR, auto_quantize=auto_quantize)
+    os.makedirs(_FINETUNES_DIR, exist_ok=True)
+    # Prepare every companion before publishing any entry. IDs include the
+    # version and file so standard/Turbo or different quants never collide.
+    staged = []
+    try:
+        for slug, definition in entries.items():
+            out_path = os.path.join(_FINETUNES_DIR, slug + ".json")
+            temporary = out_path + "." + uuid.uuid4().hex + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(definition, handle, indent=4)
+            staged.append((temporary, out_path))
+        for temporary, out_path in staged:
+            os.replace(temporary, out_path)
+    finally:
+        for temporary, _ in staged:
+            if os.path.isfile(temporary):
+                os.remove(temporary)
+    selected = next(slug for slug, definition in entries.items()
+                    if definition["model"]["architecture"] == target_architecture)
+    return selected, os.path.join(_FINETUNES_DIR, selected + ".json")
 
 
 # ── Checkpoint update tracking ────────────────────────────────────────
@@ -3629,6 +3926,11 @@ def _serialize_download_record(record, fallback_id: str = "") -> dict:
     """Return the stable, JSON-safe public shape for any registry entry."""
     if not isinstance(record, dict):
         record = {}
+    control = record.get("_download_control")
+    snapshot = control.snapshot() if callable(getattr(control, "snapshot", None)) else {}
+    status = str(record.get("status") or "downloading")
+    if snapshot.get("status") in {"cancelling", "cancelled"}:
+        status = snapshot["status"]
     progress = _safe_download_number(record.get("progress"), integer=True)
     error = record.get("error")
     model_type = record.get("model_type")
@@ -3638,7 +3940,9 @@ def _serialize_download_record(record, fallback_id: str = "") -> dict:
     return {
         "id": str(record.get("id") or fallback_id),
         "filename": str(record.get("filename") or ""),
-        "status": str(record.get("status") or "downloading"),
+        "status": status,
+        "cancel_id": snapshot.get("download_id"),
+        "cancellable": bool(snapshot.get("cancellable")) and status == "downloading",
         "progress": min(100, progress),
         "bytes_downloaded": _safe_download_number(
             record.get("bytes_downloaded"), integer=True,
@@ -3652,6 +3956,9 @@ def _serialize_download_record(record, fallback_id: str = "") -> dict:
         # Present after a checkpoint has been registered successfully. The UI
         # uses this as a filename-independent signal to refresh model lists.
         "model_type": None if not model_type else str(model_type),
+        "model_types": record.get("model_types") or ([str(model_type)] if model_type else []),
+        "source_filename": record.get("source_filename"),
+        "message": str(record.get("message") or ""),
         "warnings": [str(warning) for warning in warnings],
     }
 
@@ -3682,6 +3989,32 @@ def _fail_download_record(download_id: str, error):
         error=str(error),
         completed_at=time.time(),
     )
+
+
+def _start_import_download_worker(download_id: str, worker):
+    """Give an import its own cancellation scope before starting its thread."""
+    control = create_download_control()
+    _update_download_record(download_id, _download_control=control)
+
+    def run():
+        try:
+            with download_scope(control):
+                worker(download_id)
+        except Exception as exc:
+            if not control.cancel_requested:
+                _fail_download_record(download_id, exc)
+        finally:
+            with _civitai_download_lock:
+                record = _civitai_downloads.get(download_id, {})
+                status = record.get("status", "failed")
+                snapshot = control.finish(status)
+                if snapshot["status"] == "cancelled":
+                    record.update(status="cancelled", error=None,
+                                  message="Download cancelled.", completed_at=time.time())
+
+    thread = threading.Thread(target=run, daemon=True, name=f"import-dl-{download_id}")
+    thread.start()
+    return thread
 
 
 def _normalize_download_target(target_path: str) -> str:
@@ -4111,6 +4444,30 @@ def civitai_checkpoint_architectures(base_model: str = ""):
     }
 
 
+@api.post("/api/v1/civitai/checkpoint-inspect")
+async def civitai_checkpoint_inspect(request: Request):
+    """Inspect the selected H3 file before downloading multi-GB weights."""
+    from starlette.concurrency import run_in_threadpool
+    from services.civitai_checkpoints import inspect_remote_h3
+    body = await request.json()
+    try:
+        source, profile = await run_in_threadpool(
+            inspect_remote_h3, body,
+            api_key=wgp.server_config.get("services", {}).get("civitai_api_key", ""),
+        )
+    except ValueError as exc:
+        return {"supported": False, "status": "blocked", "reason": str(exc), "architectures": []}
+    architectures = [entry for entry in _list_checkpoint_architectures("MiniMax H3")
+                     if entry["architecture"] in profile.get("architectures", [])]
+    return {"supported": profile.get("status") == "verified" and bool(architectures),
+            "status": profile.get("status"), "profile": profile,
+            "architectures": architectures,
+            "suggested_architecture": architectures[0]["architecture"] if architectures else None,
+            "filename": source["filename"], "size_bytes": source["size_bytes"],
+            "reason": None if profile.get("status") == "verified" else
+                      "Select the requested native workflow, sampling recipe or QKV row order specified by the creator to finish verification."}
+
+
 @api.post("/api/v1/models/reload")
 def reload_model_definitions():
     """Re-scan defaults/ + finetunes/ so a newly-imported checkpoint (or any
@@ -4388,6 +4745,26 @@ async def civitai_download(request: Request):
     kind = (body.get("kind") or "lora").lower()  # "lora" (default) | "checkpoint"
     target_architecture = body.get("target_architecture", "")  # required for checkpoint imports
     auto_quantize = bool(body.get("auto_quantize", False))  # checkpoint: load-time int8
+    h3_import = None
+    from services.civitai_checkpoints import is_h3_base
+    if kind == "checkpoint" and is_h3_base(base_model):
+        from services.civitai_checkpoints import inspect_remote_h3
+        from starlette.concurrency import run_in_threadpool
+        try:
+            source, profile = await run_in_threadpool(
+                inspect_remote_h3, body,
+                api_key=wgp.server_config.get("services", {}).get("civitai_api_key", ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if profile.get("status") != "verified":
+            raise HTTPException(status_code=400, detail="Select the requested H3 workflow, recipe or creator's QKV row order before importing.")
+        target_architecture = target_architecture or profile["architectures"][0]
+        if target_architecture not in profile["architectures"]:
+            raise HTTPException(status_code=400, detail="The selected workflow does not match this H3 checkpoint's verified layout.")
+        h3_import = {"source": source, "profile": profile}
+        filename, url = source["filename"], source["url"]
+        model_name, model_nsfw = source["name"], source["nsfw"]
 
     # Trust the version's base-model identity over a stale browser mapping.
     # An explicit directory choice remains authoritative.
@@ -4472,6 +4849,7 @@ async def civitai_download(request: Request):
         "_url": url,
         "_model_id": model_id,
         "_version_id": version_id,
+        "_version_name": body.get("version_name", ""),
         "_trained_words": trained_words,
         "_model_name": model_name,
         "_images": images,
@@ -4488,19 +4866,102 @@ async def civitai_download(request: Request):
         "_kind": kind,
         "_target_architecture": target_architecture,
         "_auto_quantize": auto_quantize,
+        "_h3_import": h3_import,
     })
     with _civitai_download_lock:
         _civitai_downloads[download_id] = dl
 
-    thread = threading.Thread(target=_run_civitai_download, args=(download_id,), daemon=True)
-    thread.start()
+    _start_import_download_worker(download_id, _run_civitai_download)
 
     return {"download_id": download_id, "status": "downloading"}
+
+
+def _run_h3_civitai_import(download_id: str):
+    """Download/reuse verified H3 weights and register their native workflows."""
+    from services.civitai_checkpoints import verify_h3_digest
+    from shared.checkpoint_downloads import download_named_checkpoint
+    import shared.utils.files_locator as fl
+    dl = _civitai_downloads[download_id]
+    source, profile = dl["_h3_import"]["source"], dl["_h3_import"]["profile"]
+    save_path = os.path.join(dl["target_dir"], source["filename"])
+    reserved = _reserve_download_target(download_id, save_path)
+    if reserved is None:
+        _fail_download_record(download_id, "Another import is already writing this H3 checkpoint.")
+        return
+    try:
+        def progress(count, total):
+            check_download_cancelled()
+            _update_download_record(download_id, bytes_downloaded=count, bytes_total=total,
+                                    progress=_download_progress_percent(count, total))
+        candidates = [fl.locate_file(source["filename"], error_if_none=False)]
+        # Curated presets may own identical content under a clean ID-based name.
+        # Published digest matches are followed by verification of local bytes.
+        for definition in wgp.models_def.values():
+            for filename, named in (definition.get("download_sources") or {}).items():
+                if named.get("sha256", "").lower() == source["sha256"]:
+                    candidates.append(fl.locate_file(filename, error_if_none=False))
+        reused = False
+        for candidate in dict.fromkeys(path for path in candidates if path):
+            dl["message"] = "Verifying existing H3 checkpoint..."
+            if verify_h3_digest(candidate, source, progress=progress):
+                save_path, reused = candidate, True
+                break
+        def validate(path):
+            dl["message"] = "Verifying H3 architecture and sampling recipe..."
+            return validate_checkpoint_file(path, "MiniMax H3", dl["_target_architecture"],
+                                            filename=source["filename"], source=source,
+                                            sampling_profile=profile["sampling_profile"],
+                                            native_workflow=profile["native_workflow"],
+                                            qkv_layout=profile.get("qkv_layout_selection", "auto"))
+        if not reused:
+            dl["message"] = "Downloading and checking H3 checksum..."
+            download_named_checkpoint(source, save_path,
+                civitai_api_key=wgp.server_config.get("services", {}).get("civitai_api_key", ""),
+                progress_hook=lambda _block, count, total: progress(count, total),
+                validate_checkpoint=validate, file_format=profile.get("file_format", "safetensors"),
+                before_publish=seal_download)
+        receipt = validate(save_path)
+        seal_download()
+        sidecar = {**source, "baseModel": "MiniMax H3", "modelType": "Checkpoint",
+                   "filename": os.path.basename(save_path), "compatibility": receipt,
+                   "images": dl.get("_images", [])[:4], "examplePrompts": dl.get("_example_prompts", []),
+                   "downloadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                   "downloadedAtSource": "reused" if reused else "download"}
+        sidecar.pop("url", None)
+        sidecar_path = os.path.splitext(save_path)[0] + ".civitai.json"
+        temporary = sidecar_path + "." + uuid.uuid4().hex + ".tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(sidecar, handle, indent=2)
+            os.replace(temporary, sidecar_path)
+        finally:
+            if os.path.isfile(temporary):
+                os.remove(temporary)
+        dl["message"] = "Registering H3 workflows..."
+        model_type, _ = _register_checkpoint_finetune(save_path, sidecar, dl["_target_architecture"],
+                                                      auto_quantize=dl.get("_auto_quantize", False))
+        identity = f"civitai_h3_{source['modelId']}_{source['versionId']}_{source['fileId']}"
+        model_types = [identity + ("_references" if "ref2va" in architecture else "_frames")
+                       for architecture in receipt["h3_profile"]["architectures"]]
+        _update_download_record(download_id, model_type=model_type, model_types=model_types,
+                                source_filename=source["filename"], filename=os.path.basename(save_path),
+                                message=("Reused verified weights" if reused else "Imported verified weights")
+                                        + f"; added {len(model_types)} H3 workflow(s).")
+        _complete_download_record(download_id)
+        print(f"[CivitAI] H3 import verified: {os.path.basename(save_path)} ({len(model_types)} workflows, reused={reused})")
+    except Exception as exc:
+        _fail_download_record(download_id, exc)
+        print(f"[CivitAI] H3 import failed: {exc}")
+    finally:
+        _release_download_target(download_id, reserved)
 
 
 def _run_civitai_download(download_id: str):
     """Background thread: download file from CivitAI with progress tracking."""
     dl = _civitai_downloads[download_id]
+    if dl.get("_h3_import"):
+        _run_h3_civitai_import(download_id)
+        return
     url = dl["_url"]
     target_dir = dl["target_dir"]
     filename = dl["filename"]
@@ -4508,6 +4969,7 @@ def _run_civitai_download(download_id: str):
     reserved_targets = set()
 
     try:
+        check_download_cancelled()
         # CivitAI's download endpoint sits behind Cloudflare with bot
         # protection that's stricter than the API endpoints — a custom
         # User-Agent is enough to trigger 500 responses while the same URL
@@ -4593,6 +5055,7 @@ def _run_civitai_download(download_id: str):
 
         with open(partial_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+                check_download_cancelled()
                 if not chunk:
                     continue
                 f.write(chunk)
@@ -4636,6 +5099,7 @@ def _run_civitai_download(download_id: str):
 
         from services.refmod import is_refmod_file
         if is_refmod_file(partial_path):
+            seal_download()
             _import_downloaded_character(partial_path, download_id)
             _complete_download_record(download_id)
             return
@@ -4653,6 +5117,7 @@ def _run_civitai_download(download_id: str):
 
         # Publish only a fully-received (and, for safetensors, validated)
         # payload. A failed stream leaves no truncated model at save_path.
+        seal_download()
         os.replace(partial_path, save_path)
         partial_paths.discard(partial_path)
 
@@ -4684,6 +5149,7 @@ def _run_civitai_download(download_id: str):
         sidecar_data = {
             "modelId": dl["_model_id"],
             "versionId": dl["_version_id"],
+            "versionName": dl.get("_version_name", ""),
             "name": dl["_model_name"],
             "baseModel": dl.get("_base_model", ""),
             "trainedWords": dl["_trained_words"],
@@ -4694,6 +5160,7 @@ def _run_civitai_download(download_id: str):
             "nsfw": dl.get("_nsfw", False),
             "images": dl["_images"][:4] if dl["_images"] else [],
             "downloadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "downloadedAtSource": "download",
         }
         if dl.get("_published_at"):
             sidecar_data["publishedAt"] = dl["_published_at"]
@@ -4754,9 +5221,8 @@ def _run_civitai_download(download_id: str):
                     continue
                 fname = os.path.basename(file_path)
                 try:
-                    dl["message"] = f"Generating guide for {fname}..."
-                    _ensure_llm_loaded()
-                    _generate_and_save_lora_guide(file_path, sidecar_data, fname)
+                    dl["message"] = f"Saving creator guide for {fname}..."
+                    _generate_and_save_lora_guide(file_path, sidecar_data, fname, source_only=True)
                 except Exception as e:
                     print(f"[CivitAI] Guide auto-generation failed for {fname} (non-fatal): {e}")
 
@@ -4937,6 +5403,7 @@ def _import_civitai_lora_by_url(url: str, target_dir_override: str = "") -> JSON
             "_url": download_url,
             "_model_id": model_id,
             "_version_id": version_id,
+            "_version_name": chosen.get("name", ""),
             "_trained_words": chosen.get("trainedWords", []) or [],
             "_model_name": model_data.get("name", ""),
             "_images": chosen.get("images", []) or [],
@@ -4950,8 +5417,7 @@ def _import_civitai_lora_by_url(url: str, target_dir_override: str = "") -> JSON
         with _civitai_download_lock:
             _civitai_downloads[download_id] = dl
 
-        thread = threading.Thread(target=_run_civitai_download, args=(download_id,), daemon=True)
-        thread.start()
+        _start_import_download_worker(download_id, _run_civitai_download)
 
         return JSONResponse({
             "download_id": download_id,
@@ -5083,6 +5549,9 @@ async def hf_import_lora(request: Request):
             if _is_minimax_h3_identity(_identity_blob):
                 target_dir = "minimax_h3"
                 hf_base_label = "MiniMax H3 (detected from repo name/tags)"
+            elif _is_qwen21_identity(repo_id.split("/")[-1], *base_models, *(repo.get("tags") or [])):
+                target_dir = "qwen21"
+                hf_base_label = "Qwen Image 2.1"
             elif "ltx-2.3" in _identity_blob or "ltx2.3" in _identity_blob or "ltx_2_3" in _identity_blob:
                 target_dir = "ltx2"
                 hf_base_label = "LTX-2.3 (detected from repo name/tags)"
@@ -5245,6 +5714,7 @@ async def hf_import_lora(request: Request):
                 downloaded = 0
                 with open(partial_path, "wb") as out:
                     for chunk in dl_resp.iter_content(chunk_size=1024 * 1024):
+                        check_download_cancelled()
                         if not chunk:
                             continue
                         out.write(chunk)
@@ -5258,14 +5728,18 @@ async def hf_import_lora(request: Request):
                 _require_complete_download(downloaded, total)
                 from services.refmod import is_refmod_file
                 if is_refmod_file(partial_path):
+                    seal_download()
                     _import_downloaded_character(partial_path, dl_id)
                     os.remove(partial_path)
                     _complete_download_record(dl_id)
                     return
+                seal_download()
                 os.replace(partial_path, save_path)
 
                 print(f"[HF Import] Downloaded {lora_filename} to {save_path}")
 
+                sidecar["downloadedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                sidecar["downloadedAtSource"] = "download"
                 with open(sidecar_path, "w", encoding="utf-8") as f:
                     f.write(json.dumps(sidecar, indent=2, ensure_ascii=False))
 
@@ -5287,8 +5761,9 @@ async def hf_import_lora(request: Request):
                 # 12. Generate guide — pass disk_filename so the guide
                 # references the file the user will actually see/use.
                 try:
-                    _generate_and_save_lora_guide(save_path, sidecar, disk_filename)
-                    print(f"[HF Import] Generated guide for {disk_filename}")
+                    guide_result = _generate_and_save_lora_guide(save_path, sidecar, disk_filename, source_only=True)
+                    if not guide_result["guide"]:
+                        print(f"[HF Import] No creator guidance supplied for {disk_filename}")
                 except Exception as e:
                     print(f"[HF Import] Guide generation failed: {e}")
 
@@ -5307,7 +5782,7 @@ async def hf_import_lora(request: Request):
                     _release_download_target(dl_id, reserved_target)
 
         import threading
-        threading.Thread(target=_do_download, daemon=True).start()
+        _start_import_download_worker(dl_id, lambda _download_id: _do_download())
 
         return {
             "status": "downloading",
@@ -5403,78 +5878,76 @@ def _build_lora_context(meta: dict, filename: str = "") -> str:
     return "\n".join(parts)
 
 
-def _generate_and_save_lora_guide(lora_path: str, meta: dict, filename: str = "") -> dict:
-    """Generate a LoRA guide and weight recommendations from CivitAI metadata.
+def _generate_and_save_lora_guide(lora_path: str, meta: dict, filename: str = "", *, source_only: bool = False) -> dict:
+    """Save creator guidance immediately, with optional explicit AI refinement.
 
-    Saves .guide.md and updates .civitai.json with recommended_weights.
-    Returns {"guide": str, "recommended_weights": dict}.
+    Background imports use source_only so a download never loads or competes
+    for the generation GPU. The manual Generate Guide action can refine it.
     """
-    from services import llm_service
-    from services.llm_service import _clean_enhance_output
+    from services.lora_metadata import source_lora_guide
 
-    context = _build_lora_context(meta, filename or os.path.basename(lora_path))
+    guide_path = os.path.splitext(lora_path)[0] + ".guide.md"
+    # Re-downloading an existing file must not replace a user's refined guide.
+    if source_only and os.path.isfile(guide_path):
+        with open(guide_path, "r", encoding="utf-8") as existing:
+            existing_guide = existing.read().strip()
+        if existing_guide:
+            return {"guide": existing_guide, "recommended_weights": meta.get("recommendedWeights")}
 
-    if len(context) < 80:
-        return {"guide": "", "recommended_weights": None}
-
-    # Check if LLM is loaded — skip gracefully if not
-    if not llm_service.is_loaded():
-        print(f"[LoRA Guide] LLM not loaded, skipping guide generation for {filename or os.path.basename(lora_path)}. Use 'Generate Guides' button later.")
-        return {"guide": "", "recommended_weights": None}
-
-    raw = llm_service.generate(
-        prompt=context,
-        system_prompt=_LORA_GUIDE_SYSTEM_PROMPT,
-        max_new_tokens=800,
-        temperature=0.3,
-        enable_thinking=False,
-    )
-
-    if not raw or not raw.strip():
-        return {"guide": "", "recommended_weights": None}
-
-    # Try to parse as JSON
-    guide_text = ""
+    guide_text = source_lora_guide(meta, filename or os.path.basename(lora_path))
+    guide_source = "creator"
     weights = None
-    raw = raw.strip()
+    if not source_only:
+        from services import llm_service
+        from services.llm_service import _clean_enhance_output
 
-    # Strip markdown fences if present
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3].strip()
-
-    try:
-        parsed = json.loads(raw)
-        guide_text = parsed.get("guide", "")
-        weights = parsed.get("recommended_weights")
-    except json.JSONDecodeError:
-        # LLM didn't output valid JSON — treat the whole output as guide text
-        guide_text = _clean_enhance_output(raw)
-
-    if guide_text:
-        guide_text = _clean_enhance_output(guide_text)
+        context = _build_lora_context(meta, filename or os.path.basename(lora_path))
+        if len(context) >= 80 and llm_service.is_loaded():
+            raw = llm_service.generate(
+                prompt=context,
+                system_prompt=_LORA_GUIDE_SYSTEM_PROMPT,
+                max_new_tokens=800,
+                temperature=0.3,
+                enable_thinking=False,
+            )
+            if raw and raw.strip():
+                raw = raw.strip()
+                if raw.startswith("```"):
+                    raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+                    if raw.endswith("```"):
+                        raw = raw[:-3].strip()
+                try:
+                    parsed = json.loads(raw)
+                    ai_guide = parsed.get("guide", "") if isinstance(parsed, dict) else ""
+                    weights = parsed.get("recommended_weights") if isinstance(parsed, dict) else None
+                except json.JSONDecodeError:
+                    ai_guide = raw
+                if isinstance(ai_guide, str) and ai_guide.strip():
+                    cleaned_guide = _clean_enhance_output(ai_guide)
+                    if cleaned_guide:
+                        guide_text = cleaned_guide
+                        guide_source = "ai"
 
     # Save guide
     if guide_text:
-        guide_path = os.path.splitext(lora_path)[0] + ".guide.md"
         with open(guide_path, "w", encoding="utf-8") as f:
             f.write(guide_text)
-        print(f"[LoRA Guide] Saved guide for {os.path.basename(lora_path)} ({len(guide_text)} chars)")
+        print(f"[LoRA Guide] Saved {guide_source} guide for {os.path.basename(lora_path)} ({len(guide_text)} chars)")
 
-    # Save weight recommendations to sidecar
-    if weights:
+    # Keep identity/update fields untouched, including user display-name data.
+    if guide_text:
         sidecar_path = os.path.splitext(lora_path)[0] + ".civitai.json"
         if os.path.isfile(sidecar_path):
             try:
                 with open(sidecar_path, "r", encoding="utf-8") as f:
                     sidecar = json.load(f)
-                sidecar["recommendedWeights"] = weights
+                sidecar["guideSource"] = guide_source
+                if isinstance(weights, dict) and weights:
+                    sidecar["recommendedWeights"] = weights
                 with open(sidecar_path, "w", encoding="utf-8") as f:
                     json.dump(sidecar, f, indent=2)
-                print(f"[LoRA Guide] Saved weight recommendations: {weights}")
             except Exception as e:
-                print(f"[LoRA Guide] Failed to update sidecar weights: {e}")
+                print(f"[LoRA Guide] Failed to update sidecar guidance metadata: {e}")
 
     return {"guide": guide_text, "recommended_weights": weights}
 
@@ -6120,9 +6593,12 @@ async def scan_and_generate_guides(request: Request):
                             if meta.get("prompt"):
                                 example_prompts.append(meta["prompt"])
 
+                        from services.lora_metadata import lora_date_fields
+                        scan_dates = lora_date_fields(full_path, version_data)
                         sidecar = {
                             "modelId": model_id,
                             "versionId": version_data.get("id"),
+                            "versionName": version_data.get("name", ""),
                             "name": version_data.get("model", {}).get("name", fname),
                             "baseModel": version_data.get("baseModel", ""),
                             "trainedWords": version_data.get("trainedWords", []),
@@ -6130,7 +6606,10 @@ async def scan_and_generate_guides(request: Request):
                             "examplePrompts": example_prompts,
                             "tags": tags,
                             "images": [{"url": img.get("url", "")} for img in version_data.get("images", [])[:4]],
-                            "downloadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "downloadedAt": scan_dates["downloaded_at"],
+                            "downloadedAtSource": "weight_file",
+                            "publishedAt": scan_dates["released_at"],
+                            "metadataScannedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         }
                         with open(base + ".civitai.json", "w", encoding="utf-8") as f:
                             json.dump(sidecar, f, indent=2)
@@ -6327,6 +6806,19 @@ def get_model_options(model_type: str):
                 "safe_dense_fallback": True,
             }
 
+    _veda_attention_status = None
+    if md.get("veda_attention", False):
+        try:
+            from shared.attention import get_veda_attention_status
+
+            _veda_attention_status = get_veda_attention_status()
+        except Exception as error:
+            _veda_attention_status = {
+                "installed": False,
+                "supported": False,
+                "reason": f"H3 Veda runtime detection failed: {error}",
+            }
+
     return {
         "model_type": model_type,
         "architecture": md.get("architecture", model_type),
@@ -6344,8 +6836,14 @@ def get_model_options(model_type: str):
         "sol_attention_status": _sol_attention_status,
         "sla_attention": md.get("sla_attention", False),
         "sla_attention_default": md.get("sla_attention_default", False),
+        "sla_attention_experimental": md.get(
+            "sla_attention_experimental", False
+        ),
         "sla_attention_status": _sla_attention_status,
         "sla_attention_config": md.get("sla_attention_config"),
+        "veda_attention": md.get("veda_attention", False),
+        "veda_attention_experimental": md.get("veda_attention_experimental", False),
+        "veda_attention_status": _veda_attention_status,
         "skip_steps_multiplier_choices": [
             [str(choice[0]), float(choice[1])]
             for choice in md.get("skip_steps_multiplier_choices", [])
@@ -6412,6 +6910,10 @@ def get_model_options(model_type: str):
             for key, value in _h3_encoder_variants.items()
         ] or None,
         "minimax_h3_text_encoder_default": _h3_encoder_default,
+        "minimax_h3_video_vae_choices": md.get("minimax_h3_video_vae_choices"),
+        "minimax_h3_video_vae_default": "auto",
+        "flux3_prompt_helper": md.get("flux3_prompt_helper", False),
+        "moss_image_prompt_helper": md.get("moss_image_prompt_helper", False),
         "ltx25_video_vae_choices": md.get("ltx25_video_vae_choices"),
         "ltx25_video_vae_default": md.get(
             "ltx25_video_vae_default",
@@ -6421,6 +6923,8 @@ def get_model_options(model_type: str):
         "minimax_h3_fused_turbo": md.get(
             "minimax_h3_fused_turbo", False
         ),
+        "minimax_h3_baked_turbo": md.get("minimax_h3_baked_turbo", False),
+        "minimax_h3_full_checkpoint": md.get("minimax_h3_full_checkpoint", False),
         "loras_disabled": md.get("loras_disabled", False),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
         "minimax_h3_media_sources": md.get(
@@ -6444,6 +6948,10 @@ def get_model_options(model_type: str):
         "background_removal_label": md.get("background_removal_label"),
         "max_image_refs": md.get("max_image_refs"),
         "sample_solvers": solvers,
+        "qwen21_acceleration_profiles": md.get("qwen21_acceleration_profiles"),
+        "qwen21_turbo_checkpoint": bool(md.get("qwen21_turbo_checkpoint")),
+        "image_ref_inpaint": md.get("image_ref_inpaint", False),
+        "model_modes": md.get("model_modes"),
 
         # Self refiner
         "self_refiner": md.get("self_refiner", False),
@@ -6495,6 +7003,7 @@ def get_model_options(model_type: str):
 
         # Post-processing capabilities
         "vae_upsampler_modes": md.get("vae_upsampler", []),
+        "vae_upsamplers": md.get("vae_upsamplers", {}),
 
         # TTS-specific
         "audio_only": md.get("audio_only", False),
@@ -6624,7 +7133,11 @@ _APP_VERSION = _read_app_version()
 def get_system_config():
     """Return system-level settings for the UI System tab."""
     cfg = wgp.server_config
+    from services.memory_settings import memory_settings_snapshot
+    from shared.cuda_memory import allocator_status
     return {
+        **memory_settings_snapshot(cfg),
+        **allocator_status(cfg),
         "app_version": _APP_VERSION,
         "attention_mode": cfg.get("attention_mode", "auto"),
         "transformer_quantization": cfg.get("transformer_quantization", "int8"),
@@ -6633,6 +7146,7 @@ def get_system_config():
         "video_profile": cfg.get("video_profile", 2),
         "image_profile": cfg.get("image_profile", 2),
         "audio_profile": cfg.get("audio_profile", 3.5),
+        "generation_preview": configured_preview_mode(cfg.get("generation_preview")),
         "video_output_codec": cfg.get("video_output_codec", "libx264_8"),
         "image_output_codec": cfg.get("image_output_codec", "jpeg_95"),
         "enhancer_enabled": cfg.get("enhancer_enabled", 0),
@@ -6709,14 +7223,26 @@ def _apply_linked_model_folders(folders):
 async def update_system_config(request: Request):
     """Update system-level settings. Accepts partial JSON body."""
     body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Settings must be a JSON object")
+    from services.memory_settings import MEMORY_KEYS, MODEL_LOAD_KEYS, validate_memory_updates
+    try:
+        memory_updates = validate_memory_updates(body)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    if "generation_preview" in body and (
+        not isinstance(body["generation_preview"], str)
+        or body["generation_preview"] not in PREVIEW_MODES
+    ):
+        raise HTTPException(status_code=400, detail="Invalid generation preview mode")
 
     ALLOWED_KEYS = {
         "attention_mode", "transformer_quantization", "vae_config",
         "compile", "video_profile", "image_profile", "audio_profile",
         "video_output_codec", "image_output_codec",
         "enhancer_enabled", "prompt_enhancer_quantization",
-        "vram_safety_coefficient",
-    }
+        "vram_safety_coefficient", "generation_preview",
+    } | MEMORY_KEYS
 
     updated = {}
     # Linked model folders map onto checkpoints_paths (validated + applied
@@ -6779,8 +7305,11 @@ async def update_system_config(request: Request):
         wgp.compile = updated["compile"]
     if "vram_safety_coefficient" in updated:
         wgp.args.vram_safety_coefficient = float(updated["vram_safety_coefficient"])
+    if MODEL_LOAD_KEYS & memory_updates.keys():
+        wgp.reload_needed = True
 
-    return {"status": "ok", "updated": updated}
+    from shared.cuda_memory import allocator_status
+    return {"status": "ok", "updated": updated, **allocator_status(wgp.server_config)}
 
 
 @api.post("/api/v1/notification-sound/test")
@@ -6970,49 +7499,47 @@ def scan_model_folders():
 # imports). Both are lazy-imported so they don't slow startup or
 # break on AMD/CPU systems where torch.cuda probes might warn.
 
-@api.get("/api/v1/downloads/active")
-def get_active_downloads():
-    """Return a snapshot of in-progress model file downloads.
-
-    UI polls this during long generation prep phases to surface
-    download progress and stall warnings. Each entry includes
-    `seconds_since_progress` so the UI can render "stalled — waiting
-    for retry" badges without doing time math itself.
-
-    Empty list when nothing is downloading. Best-effort tracking —
-    if a download path bypasses `huggingface_hub`'s tqdm progress
-    bar (some upstream Wan2GP code does this for misc files), it
-    won't appear here even though the safe_download timeout
-    protections still apply.
-    """
-    from services.safe_download import get_active_downloads as _get
-    return {"downloads": _get()}
+from services.active_downloads_api import create_router as _active_downloads_router
+api.include_router(_active_downloads_router())
 
 
 @api.post("/api/v1/downloads/cancel")
-async def cancel_downloads(request: Request, file_id: str = None):
-    """Stop a model file download. `file_id` as a query param or in the body;
-    without one, every active transfer stops.
+async def cancel_download(request: Request, file_id: str = None):
+    """Stop a download.
 
-    A transfer is a blocking call inside huggingface_hub, so the only place it
-    can be interrupted is its own progress callback; the request is recorded
-    and the next chunk raises. The partial file stays for a later resume.
-
-    Returns the file_ids that were asked to stop — an empty list means nothing
-    matching was running, not that the call failed.
+    Body `{download_id}` cancels an explicitly started download as a whole
+    (retries and publication included). Otherwise `file_id`, as a query param
+    or in the body, stops one model file transfer (`{"all": true}` stops every
+    one): a transfer is a blocking
+    call inside huggingface_hub, so the request is recorded and its next
+    progress callback raises. The partial file stays for a later resume.
     """
     from services import safe_download
 
     # Query param OR body: the Activity panel POSTs the cancel path it was
     # given with no body at all, while API callers send JSON.
-    body = {}
     try:
-        if await request.body():
-            body = await request.json()
+        body = await request.json()
     except ValueError:
         body = {}
-    asked = safe_download.request_cancel(body.get("file_id") or file_id or None)
-    return {"cancelled": asked, "count": len(asked)}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="A download ID is required.")
+    target_file = body.get("file_id") or file_id
+    # {"all": true} stops every active file transfer (the MCP tool's default).
+    if "download_id" not in body and (body.get("all") is True or (isinstance(target_file, str) and target_file)):
+        asked = safe_download.request_cancel(None if body.get("all") is True else target_file)
+        return {"cancelled": asked, "count": len(asked)}
+    download_id = body.get("download_id")
+    if not isinstance(download_id, str) or not re.fullmatch(r"[0-9a-f]{32}", download_id):
+        raise HTTPException(status_code=400, detail="A valid download ID is required.")
+    control = find_download_control(download_id)
+    if control is None:
+        raise HTTPException(status_code=404, detail="This download is no longer active.")
+    try:
+        snapshot = control.request_cancel()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return {"status": snapshot["status"], "download_id": download_id}
 
 
 @api.get("/api/v1/system-detect")
@@ -7033,6 +7560,7 @@ def get_system_detect():
         "hardware": hw,
         "recommended": rec,
         "auto_enabled": services.get("auto_performance", True),
+        "learning": _performance_learning_summary(),
     }
 
 
@@ -7057,37 +7585,61 @@ async def apply_system_detect():
     """
     from services.hardware_detect import detect_hardware
     from services.perf_recommend import apply_auto_performance, applied_keys
+    from services.memory_settings import MODEL_LOAD_KEYS
+    from shared.cuda_memory import allocator_status
 
-    hw = detect_hardware()
-    result = apply_auto_performance(wgp.server_config, hw, force=True)
-    rec = result["recommended"]
-    profile_changed = any(key.endswith("_profile") for key in result["updated"])
+    if any(job.get("status") == "running" for job in _jobs.values()):
+        raise HTTPException(status_code=409, detail="Apply Auto-tune after the current generation finishes.")
 
-    # Persist to disk
-    with open(wgp.server_config_filename, "w", encoding="utf-8") as f:
-        f.write(json.dumps(wgp.server_config, indent=4))
+    if not _gen_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Apply Auto-tune after the current generation finishes.")
+    try:
+        hw = detect_hardware()
+        result = apply_auto_performance(wgp.server_config, hw, force=True)
+        rec = result["recommended"]
+        profile_changed = any(key.endswith("_profile") for key in result["updated"])
+        settings_reload = profile_changed or bool(MODEL_LOAD_KEYS.intersection(result["updated"]))
+        if settings_reload:
+            wgp.reload_needed = True
+        global _cached_hardware
+        _cached_hardware = hw
 
-    # Apply runtime side effects where possible (matches update_system_config)
-    if "attention_mode" in rec:
-        wgp.attention_mode = rec["attention_mode"]
-    if "vae_config" in rec:
-        wgp.vae_config = rec["vae_config"]
-    if "compile" in rec:
-        wgp.compile = rec["compile"]
-    if "transformer_quantization" in rec:
-        wgp.transformer_quantization = rec["transformer_quantization"]
-    if "vram_safety_coefficient" in rec:
-        wgp.args.vram_safety_coefficient = float(rec["vram_safety_coefficient"])
+        # Persist to disk
+        with open(wgp.server_config_filename, "w", encoding="utf-8") as f:
+            f.write(json.dumps(wgp.server_config, indent=4))
 
-    return {
-        "status": "ok",
-        "hardware": hw,
-        "applied": {k: rec[k] for k in applied_keys() if k in rec},
-        "label": rec.get("_recommendation_label", ""),
-        "reason": rec.get("_recommendation_reason", ""),
-        # Tells UI to show "changes take effect on next model load" toast
-        "profile_changed": profile_changed,
-    }
+        # Apply runtime side effects where possible (matches update_system_config)
+        if "attention_mode" in rec:
+            wgp.attention_mode = rec["attention_mode"]
+        if "vae_config" in rec:
+            wgp.vae_config = rec["vae_config"]
+        if "compile" in rec:
+            wgp.compile = rec["compile"]
+        if "transformer_quantization" in rec:
+            wgp.transformer_quantization = rec["transformer_quantization"]
+        if "vram_safety_coefficient" in rec:
+            wgp.args.vram_safety_coefficient = float(rec["vram_safety_coefficient"])
+
+        return {
+            "status": "ok",
+            "hardware": hw,
+            "applied": {k: rec[k] for k in applied_keys() if k in rec},
+            "label": rec.get("_recommendation_label", ""),
+            "reason": rec.get("_recommendation_reason", ""),
+            # Tells UI to show "changes take effect on next model load" toast
+            "profile_changed": profile_changed,
+            "settings_reload": settings_reload,
+            **allocator_status(wgp.server_config),
+        }
+    finally:
+        _gen_lock.release()
+
+
+@api.post("/api/v1/system-detect/reset-learning")
+def reset_performance_learning():
+    from services.performance_tuning import hardware_key
+    _get_performance_history().reset(hardware_key(_performance_hardware()))
+    return {"status": "ok", "learning": _performance_learning_summary()}
 
 
 @api.get("/api/v1/system-stats")
@@ -7466,11 +8018,14 @@ def get_services_config():
         "llm_model_id": services.get("llm_model_id", _DEFAULT_LLM_REPO),
         "llm_device": services.get("llm_device", _llm_default_device()),
         "llm_provider": provider,
+        "llm_mtp_acceleration": services.get("llm_mtp_acceleration", False) is True,
         "llm_remote_url": services.get("llm_remote_url", ""),
         "llm_remote_api_key": _mask_key(services.get("llm_remote_api_key", "")),
         "llm_remote_api_key_set": bool(services.get("llm_remote_api_key", "")),
         "enhance_llm_model_id": services.get("enhance_llm_model_id", ""),
         "enhance_llm_device": services.get("enhance_llm_device", "cuda"),
+        "enhance_fidelity_retries": services.get("enhance_fidelity_retries", 1),
+        "enhance_fidelity_auto_continue": services.get("enhance_fidelity_auto_continue", False),
         "google_api_key": _mask_key(services.get("google_api_key", "")),
         "google_api_key_set": bool(services.get("google_api_key", "")),
         "openai_api_key": _mask_key(services.get("openai_api_key", "")),
@@ -7551,10 +8106,14 @@ def get_services_config():
 async def update_services_config(request: Request):
     """Update services configuration. API keys are stored in full, returned masked."""
     body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Settings must be an object.")
 
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
+        "llm_mtp_acceleration",
         "enhance_llm_model_id", "enhance_llm_device",
+        "enhance_fidelity_retries", "enhance_fidelity_auto_continue",
         "google_api_key", "llm_remote_api_key", "openai_api_key", "anthropic_api_key",
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
         "civitai_api_key", "voice_reference_enabled", "ltx_progressive_pipeline",
@@ -7563,15 +8122,29 @@ async def update_services_config(request: Request):
         "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend",
     }
 
-    services = wgp.server_config.setdefault("services", {})
+    previous_services = wgp.server_config.get("services", {})
+    services = dict(previous_services)
     updated = {}
+    ignored_mask = False
 
     for key, value in body.items():
         if key not in ALLOWED_KEYS:
             continue
-        # Don't overwrite a real key with its masked version
-        if key.endswith("_api_key") and value and "..." in value:
-            continue
+        if key == "enhance_fidelity_retries" and (type(value) is not int or not 0 <= value <= 5):
+            raise HTTPException(status_code=400, detail="Fidelity retries must be a whole number from 0 to 5.")
+        if key == "enhance_fidelity_auto_continue" and type(value) is not bool:
+            raise HTTPException(status_code=400, detail="Continue after fidelity warnings must be true or false.")
+        if key == "llm_mtp_acceleration" and type(value) is not bool:
+            raise HTTPException(status_code=400, detail="MTP acceleration must be true or false.")
+        if key.endswith("_api_key"):
+            if not isinstance(value, str):
+                raise HTTPException(status_code=400, detail="API keys must be text.")
+            # Only the current display placeholder is a mask. Real keys can
+            # contain ellipses; short existing keys are displayed as ***.
+            existing_key = services.get(key, "")
+            if existing_key and value == _mask_key(existing_key):
+                ignored_mask = True
+                continue
         services[key] = value
         updated[key] = _mask_key(value) if key.endswith("_api_key") else value
 
@@ -7588,12 +8161,19 @@ async def update_services_config(request: Request):
             updated["nsfw_mode"] = False
 
     if not updated:
+        if ignored_mask:
+            return {"status": "ok", "updated": {}}
         raise HTTPException(status_code=400, detail="No valid fields to update")
 
     wgp.server_config["services"] = services
-
-    with open(wgp.server_config_filename, "w", encoding="utf-8") as f:
-        f.write(json.dumps(wgp.server_config, indent=4))
+    try:
+        _persist_server_config()
+    except OSError as error:
+        wgp.server_config["services"] = previous_services
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save settings. Check config file permissions and try again.",
+        ) from error
 
     return {"status": "ok", "updated": updated}
 
@@ -8155,7 +8735,8 @@ async def llm_load(request: Request):
         if not _gen_lock.acquire(blocking=False):
             raise HTTPException(409, "Generation resources are busy. The writer was not changed.")
         try:
-            llm_service.load_model(model_id=model_id, device=device, provider=provider, remote_url=remote_url, api_key=api_key)
+            llm_service.load_model(model_id=model_id, device=device, provider=provider, remote_url=remote_url,
+                                   api_key=api_key, mtp_acceleration=services.get("llm_mtp_acceleration") is True)
             return {"status": "ok", **llm_service.get_status()}
         finally:
             _gen_lock.release()
@@ -10683,24 +11264,81 @@ async def chat_send_message(tid: str, request: Request):
     return {"message": msg, "thread_id": tid, "stream_id": stream_id}
 
 
-def _ensure_llm_loaded(model_id: str = None):
+@api.get("/api/v1/llm/remote/loaded-models")
+def llm_remote_loaded_models():
+    from services import llm_service, lmstudio_management
+    services = dict(wgp.server_config.get("services", {}))
+    if services.get("llm_provider") != "remote":
+        raise HTTPException(400, "Select the Remote OpenAI-Compatible provider for LM Studio management.")
+    try:
+        return lmstudio_management.loaded_models(
+            services.get("llm_remote_url", ""), llm_service.provider_api_key("remote", services),
+        )
+    except lmstudio_management.ModelSelectionError as error:
+        raise HTTPException(400, str(error)) from None
+    except lmstudio_management.ModelManagementError as error:
+        raise HTTPException(502, str(error)) from None
+
+
+@api.post("/api/v1/llm/remote/unload")
+async def llm_remote_unload(request: Request):
+    """Unload only the chosen instance on the configured LM Studio server."""
+    from services import llm_service, lmstudio_management
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "Expected a model-unload request object.") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected a model-unload request object.")
+
+    def _unload():
+        if not _gen_lock.acquire(blocking=False):
+            raise HTTPException(409, "Generation resources are busy. The remote model was not unloaded.")
+        try:
+            services = dict(wgp.server_config.get("services", {}))
+            if services.get("llm_provider") != "remote":
+                raise HTTPException(400, "Select the Remote OpenAI-Compatible provider for LM Studio management.")
+            remote_url = services.get("llm_remote_url", "")
+            expected_url = body.get("server_url")
+            if expected_url is not None and lmstudio_management.server_url(expected_url) != lmstudio_management.server_url(remote_url):
+                raise HTTPException(409, "The remote server changed. Refresh loaded models before unloading.")
+            return llm_service.unload_remote_instance(
+                remote_url, llm_service.provider_api_key("remote", services),
+                instance_id=body.get("instance_id"), model_id=services.get("llm_model_id", ""),
+            )
+        except lmstudio_management.ModelSelectionError as error:
+            raise HTTPException(400, str(error)) from None
+        except lmstudio_management.ModelBusyError as error:
+            raise HTTPException(409, str(error)) from None
+        except lmstudio_management.ModelManagementError as error:
+            raise HTTPException(502, str(error)) from None
+        finally:
+            _gen_lock.release()
+
+    return await asyncio.to_thread(_unload)
+
+
+def _ensure_llm_loaded(model_id: str = None, device: str = None):
     """Auto-load LLM if not already loaded. Reloads if the model changed.
 
     model_id overrides the configured model for this call, which is what
     lets a chat thread or a Storywriter pass pick its own model (the
     outline pass wants a strong instruction-follower, the prose pass wants
-    a writer). Only meaningful for the local provider — remote providers
-    take their model from the service config.
+    a writer). Such picks are checked against the local registry. The
+    prompt enhancer passes its configured model together with a device;
+    that override is trusted as-is, for any provider.
     """
     from services import llm_service
     services = enhancement_settings(wgp.server_config.get("services", {}))
     desired = services.get("llm_model_id", _DEFAULT_LLM_REPO)
-    if model_id and services.get("llm_provider", "local") == "local":
+    if model_id and device is not None:
+        desired = model_id
+    elif model_id and services.get("llm_provider", "local") == "local":
         if model_id in llm_service.MODEL_REGISTRY:
             desired = model_id
         else:
             print(f"[LLM] Ignoring unknown model override {model_id!r}")
-    desired_device = services.get("llm_device", _llm_default_device())
+    desired_device = device or services.get("llm_device", _llm_default_device())
     desired_provider = services.get("llm_provider", "local")
     desired_remote_url = services.get("llm_remote_url", "")
     desired_api_key = llm_service.provider_api_key(
@@ -10712,7 +11350,8 @@ def _ensure_llm_loaded(model_id: str = None):
     # endpoint and current credentials. Checking only model/provider here let
     # a queued snapshot accidentally use another device or remote endpoint.
     llm_service.load_model(model_id=desired, device=desired_device, provider=desired_provider,
-                           remote_url=desired_remote_url, api_key=desired_api_key)
+                           remote_url=desired_remote_url, api_key=desired_api_key,
+                           mtp_acceleration=services.get("llm_mtp_acceleration") is True)
 
 
 def _guard_interactive_llm_against_generation() -> None:
@@ -11147,6 +11786,7 @@ async def llm_plan_h3_windows(request: Request):
     model_type = str(body.get("model_type") or "")
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
+    _validate_h3_source_quote_boundaries(prompt)
     model_def = wgp.get_model_def(model_type) or {}
     from models.minimax_h3.duration import apply_h3_duration_override
     model_def = apply_h3_duration_override(body, model_def)
@@ -11164,6 +11804,9 @@ async def llm_plan_h3_windows(request: Request):
     sliding_defaults = model_def.get("sliding_window_defaults") or {}
     planning_inputs = {
         "minimax_h3_extended_duration": body.get("minimax_h3_extended_duration") is True,
+        "minimax_h3_multi_window": True,
+        "custom_settings": body.get("custom_settings"),
+        "video_guide_outpainting": body.get("video_guide_outpainting"),
         "model_type": model_type,
         "resolution": body.get("resolution") or "864x480",
         "video_length": body.get("total_frames") or body.get("video_length") or 124,
@@ -11180,7 +11823,7 @@ async def llm_plan_h3_windows(request: Request):
     }
     from models.minimax_h3.minimax_h3_handler import (
         apply_h3_window_memory_policy,
-        normalize_h3_overlap_frames,
+        normalize_h3_window_geometry,
     )
 
     adjustment = apply_h3_window_memory_policy(
@@ -11190,10 +11833,7 @@ async def llm_plan_h3_windows(request: Request):
     )
     if adjustment and adjustment.get("unsupported"):
         raise HTTPException(status_code=400, detail=adjustment["message"])
-    planning_inputs["sliding_window_overlap"] = normalize_h3_overlap_frames(
-        planning_inputs.get("sliding_window_overlap"),
-        window_frames=planning_inputs.get("sliding_window_size"),
-    )
+    normalize_h3_window_geometry(planning_inputs, model_def)
 
     from services import llm_service
     from services.h3_window_planner import plan_h3_sliding_windows
@@ -11239,6 +11879,7 @@ async def llm_plan_h3_windows(request: Request):
             nsfw=bool(nsfw),
             camera_coverage=str(body.get("camera_coverage") or "auto"),
             planning_style=str(body.get("planning_style") or "faithful"),
+            lora_system_hint=_active_lora_hint(str(body.get("model_type") or ""), body.get("activated_loras")),
             retry_plan=body.get("retry_plan"),
         )
         result["effective_window_frames"] = window_frames
@@ -11262,6 +11903,7 @@ async def llm_plan_h3_sequence(request: Request):
     model_type = str(body.get("model_type") or "")
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
+    _validate_h3_source_quote_boundaries(prompt)
     model_def = wgp.get_model_def(model_type) or {}
     from models.minimax_h3.duration import apply_h3_duration_override
     model_def = apply_h3_duration_override(body, model_def)
@@ -11370,6 +12012,7 @@ async def llm_plan_h3_sequence(request: Request):
             overlap_frames=overlap_frames,
             native_continuation=native_continuation,
             planning_style=str(body.get("planning_style") or "faithful"),
+            lora_system_hint=_active_lora_hint(str(body.get("model_type") or ""), body.get("activated_loras")),
             retry_plan=body.get("retry_plan"),
         )
         result["effective_window_frames"] = effective_clip_frames
@@ -11381,6 +12024,18 @@ async def llm_plan_h3_sequence(request: Request):
     except Exception as error:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+def _active_lora_hint(model_type: str, activated_loras) -> str:
+    """Read guidance for this request's enabled files, including linked libraries."""
+    if not model_type or not activated_loras:
+        return ""
+    from services.lora_guidance import build_active_lora_hint
+    try:
+        return build_active_lora_hint(activated_loras, wgp.get_lora_search_dirs(model_type))
+    except Exception as error:
+        print(f"[Enhance] Could not read active LoRA guidance: {error}")
+        return ""
 
 
 async def _llm_enhance_prompt_payload(body: dict):
@@ -11402,6 +12057,12 @@ async def _llm_enhance_prompt_payload(body: dict):
         model_type.lower().startswith("minimax_h3")
         and generation_mode in ("video", "avatar")
     )
+    needs_flux3_image_guide = (
+        model_type.lower().startswith("flux3") and generation_mode == "image"
+    )
+    needs_moss_image_guide = (
+        model_type.lower().startswith("moss_image") and generation_mode == "image"
+    )
     try:
         requested_window_count = max(1, int(body.get("window_count") or 1))
     except (TypeError, ValueError):
@@ -11412,22 +12073,26 @@ async def _llm_enhance_prompt_payload(body: dict):
         and requested_window_count > 1
     )
     enhancer_enabled = int(wgp.server_config.get("enhancer_enabled", 0) or 0)
+    lora_hint_text = _active_lora_hint(model_type, body.get("activated_loras"))
 
     # The generic Wan2GP cinematic enhancer cannot produce MiniMax H3's
     # required Context-IR fields, speaker IDs, or <d> dialogue tags. Route H3
     # through Maestro's model-specific guide even when the legacy enhancer is
-    # enabled; all other model families retain the configured behavior.
+    # enabled. FLUX 3 also needs its own caption/edit dialect and ordered
+    # reference bindings rather than the generic cinematic enhancer.
     if (
         enhancer_enabled > 0
         and not needs_h3_context_ir
         and not needs_ltx_window_plan
+        and not needs_flux3_image_guide
+        and not needs_moss_image_guide
     ):
         try:
             # Support both single image_path and array image_paths
             image_paths = body.get("image_paths") or []
             if not image_paths and body.get("image_path"):
                 image_paths = [body["image_path"]]
-            return await _enhance_with_wangp(prompt, generation_mode, enhancer_enabled, image_paths=image_paths)
+            return await _enhance_with_wangp(prompt, generation_mode, enhancer_enabled, image_paths=image_paths, lora_system_hint=lora_hint_text)
         except Exception as e:
             print(f"[Enhance] Wan2GP enhancer failed, falling back to LLM: {e}")
             # Fall through to LLM
@@ -11439,12 +12104,21 @@ async def _llm_enhance_prompt_payload(body: dict):
                 "[Enhance] LTX multi-window planning requires standalone "
                 "window prompts; using Maestro's model-specific LLM guide"
             )
+        elif needs_flux3_image_guide:
+            print("[Enhance] FLUX 3 uses native image captions and reference bindings; using Maestro's model-specific LLM guide")
+        elif needs_moss_image_guide:
+            print("[Enhance] MOSS Image uses native captions and centered-pixel layouts; using Maestro's model-specific LLM guide")
 
     # Use our local LLM service
     from services import llm_service
     from services.h3_prompt_budget import H3PromptBudgetError
 
-    if needs_h3_context_ir:
+    from services.h3_performance_audio import has_h3_performance_audio
+    performance_audio = (
+        model_type.lower().startswith("minimax_h3_ref2va")
+        and has_h3_performance_audio(body.get("reference_context"))
+    )
+    if needs_h3_context_ir and not performance_audio:
         try:
             llm_service.validate_h3_source_dialogue_duration(prompt, body.get("duration_seconds"))
         except H3PromptBudgetError as error:
@@ -11468,7 +12142,7 @@ async def _llm_enhance_prompt_payload(body: dict):
     # gated to Mature Mode, so no extra gate is needed here.
     raw_enhancer_mode = False
     _enh_mt = body.get("model_type", "")
-    if _enh_mt:
+    if _enh_mt and provider == "local":
         try:
             _md = wgp.get_model_def(_enh_mt)
             _pe = (_md or {}).get("prompt_enhancer_model")
@@ -11480,14 +12154,9 @@ async def _llm_enhance_prompt_payload(body: dict):
             print(f"[Enhance] Per-model enhancer lookup failed: {e}")
 
     if enhance_model:
-        # Load the enhance-specific LLM (may differ from Director LLM)
-        if llm_service.is_loaded():
-            status = llm_service.get_status()
-            if status.get("model_id") != enhance_model:
-                llm_service.unload_model()
-                llm_service.load_model(model_id=enhance_model, device=enhance_device)
-        else:
-            llm_service.load_model(model_id=enhance_model, device=enhance_device)
+        # An override changes the model, not its configured provider. Let the
+        # loader compare the full endpoint/credential identity before reuse.
+        _ensure_llm_loaded(model_id=enhance_model, device=enhance_device)
     else:
         # Use the Director LLM (default)
         _ensure_llm_loaded()
@@ -11497,74 +12166,8 @@ async def _llm_enhance_prompt_payload(body: dict):
     if not llm_image_paths and body.get("image_path"):
         llm_image_paths = [body["image_path"]]
 
-    # Load LoRA info for activated LoRAs — extract ONLY trigger words and key tips
-    lora_hint_text = ""
-    activated_loras = body.get("activated_loras") or []
-    print(f"[Enhance] LoRA check: activated_loras={activated_loras}, model_type={model_type}")
-    if activated_loras and model_type:
-        try:
-            lora_dir = wgp.get_lora_dir(model_type)
-            print(f"[Enhance] LoRA dir: {lora_dir}")
-            # Only inject trigger words from the CivitAI sidecar's
-            # trainedWords field. Do NOT extract triggers from guide prose —
-            # guide descriptions like "include the trigger phrase 'Unchained'"
-            # are instructions for the user, not actual trained tokens, and
-            # injecting them causes the LLM to insert them as broken tags.
-            trigger_lines = []
-            for lora_name in activated_loras:
-                sidecar_path = os.path.join(lora_dir, os.path.splitext(lora_name)[0] + ".civitai.json")
-                trigger_words = []
-                if os.path.isfile(sidecar_path):
-                    try:
-                        with open(sidecar_path, "r", encoding="utf-8") as sf:
-                            sidecar = json.loads(sf.read())
-                        trigger_words = sidecar.get("trainedWords", []) or []
-                    except Exception:
-                        pass
-
-                if trigger_words:
-                    trigger_lines.append(f"- {', '.join(trigger_words[:5])}")
-                print(f"[Enhance] LoRA '{lora_name}': triggers={trigger_words[:3]}, sidecar={os.path.isfile(sidecar_path)}")
-
-            if trigger_lines:
-                any_leet = any(any(c.isdigit() for c in ln) for ln in trigger_lines)
-                leet_block = (
-                    " Some trigger words are coded tokens with letters replaced by "
-                    "numbers (e.g. 'o'→'0', 'i'→'1', 's'→'5', 'e'→'3', 'a'→'4'). "
-                    "If you see one with digits, copy it EXACTLY as written — do "
-                    "not decode it into plain English."
-                ) if any_leet else ""
-                lora_hint_text = (
-                    "\n\n[LORA TRIGGER WORDS — these are exact tokens the model was "
-                    "trained on. Pick the ONE most relevant trigger and include it "
-                    "somewhere in the prompt IF AND ONLY IF it forms a natural, "
-                    "grammatical part of a sentence. If you cannot weave it in "
-                    "naturally, OMIT IT ENTIRELY.\n\n"
-                    "FORBIDDEN INSERTION PATTERNS (any of these ruins the prompt):\n"
-                    "- At the start as a standalone tag:  'Unchained, the doctor...'\n"
-                    "- As a comma-offset appositive:      'the doctor, Unchained, in white...'\n"
-                    "- As a parenthetical:                'the doctor (Unchained) in white...'\n"
-                    "- As a standalone label anywhere:    '...in the exam room. Unchained. She...'\n"
-                    "- Attached to an unrelated character: 'the doctor, Mystic XXX, leans...'\n\n"
-                    "ACCEPTABLE INSERTIONS only if grammatically natural:\n"
-                    "- Body/appearance descriptor trigger ('detailed muscle definition'): "
-                    "scoped to the right character inside a sentence — "
-                    "'the man with detailed muscle definition lifts the crate...'\n"
-                    "- Style tag trigger ('Mystic XXX', 'Unchained'): use only when the "
-                    "trigger names a genre or action the scene actually depicts. If it "
-                    "does not fit grammatically, OMIT IT. Do not force it in.\n\n"
-                    "Do NOT invent variants. Do NOT include a trigger that does not "
-                    "match the scene." + leet_block + "]\n"
-                ) + "\n".join(trigger_lines)
-                print(f"[Enhance] Loaded {len(trigger_lines)} trigger block(s): {lora_hint_text[:200]}")
-            else:
-                print(f"[Enhance] No LoRA triggers extractable from {len(activated_loras)} LoRA(s)")
-        except Exception as e:
-            print(f"[Enhance] LoRA hint loading failed: {e}")
-
     try:
-        # Pass LoRA hints as system-level context so the LLM treats them as instructions,
-        # not content to parrot. The hints go via lora_system_hint into the system prompt.
+        # Keep bounded LoRA guidance separate from the user source/events.
         result = llm_service.enhance_prompt(
             prompt=prompt,
             lora_system_hint=lora_hint_text,
@@ -11582,6 +12185,7 @@ async def _llm_enhance_prompt_payload(body: dict):
             raw_enhancer_mode=raw_enhancer_mode,
             reference_context=body.get("reference_context"),
             planning_style=str(body.get("planning_style") or "faithful"),
+            resolution=body.get("resolution"),
         )
         if needs_ltx_window_plan:
             from services.ltx_window_planner import (
@@ -11624,11 +12228,14 @@ async def llm_enhance_prompt(request: Request):
     return await _llm_enhance_prompt_payload(await request.json())
 
 
-async def _enhance_with_wangp(prompt: str, mode: str, enhancer_enabled: int, image_paths: list = None):
+async def _enhance_with_wangp(prompt: str, mode: str, enhancer_enabled: int, image_paths: list = None, lora_system_hint: str = ""):
     """Run the Wan2GP prompt enhancer using wgp's built-in offload system."""
     import secrets
     from PIL import Image
-    from shared.prompt_enhancer.prompt_enhance_utils import generate_cinematic_prompt
+    from shared.prompt_enhancer.prompt_enhance_utils import (
+        generate_cinematic_prompt, T2V_CINEMATIC_PROMPT, T2I_VISUAL_PROMPT,
+        IT2V_CINEMATIC_PROMPT, IT2I_VISUAL_PROMPT,
+    )
     from mmgp import offload
 
     # Setup enhancer with proper GPU offload (same as Wan2GP does internally)
@@ -11669,6 +12276,14 @@ async def _enhance_with_wangp(prompt: str, mode: str, enhancer_enabled: int, ima
         if hasattr(wgp.prompt_enhancer_image_caption_model, "vision_tower_model") and hasattr(wgp.prompt_enhancer_llm_model, "generate_messages"):
             post_image_caption_hook = wgp.enhancer_offloadobj.unload_all
 
+    instructions = None
+    if lora_system_hint:
+        base_instructions = (
+            (IT2V_CINEMATIC_PROMPT if is_video else IT2I_VISUAL_PROMPT)
+            if prompt_images else (T2V_CINEMATIC_PROMPT if is_video else T2I_VISUAL_PROMPT)
+        )
+        instructions = base_instructions + "\n\n" + lora_system_hint
+
     def _run():
         return generate_cinematic_prompt(
             wgp.prompt_enhancer_image_caption_model,
@@ -11679,6 +12294,7 @@ async def _enhance_with_wangp(prompt: str, mode: str, enhancer_enabled: int, ima
             prompt_images,
             video_prompt=is_video,
             text_prompt=False,
+            prompt_enhancer_instructions=instructions,
             max_new_tokens=512,
             do_sample=True,
             temperature=temperature,
@@ -11853,6 +12469,8 @@ async def upload_audio(request: Request, file: UploadFile = File(...)):
                         except OSError:
                             pass
 
+    from services.media_info import record_upload
+    record_upload(filepath, file.filename)
     return {
         "filename": unique_name,
         "path": filepath,
@@ -12241,6 +12859,7 @@ async def director_plan_prompts(request: Request):
             style_prompt=style_prompt,
             lyrics=body.get("lyrics"),
             bpm=body.get("bpm", 120.0),
+            use_lyrics_context=body.get("use_lyrics_context") is True,
         )
         return {"prompts": prompts}
     except Exception as e:
@@ -12302,6 +12921,7 @@ async def plan_audio_structure(request: Request):
     frames_steps = body.get("frames_steps", 4)
     frames_minimum = body.get("frames_minimum", 5)
     video_model = body.get("video_model")
+    md = {}
     if video_model:
         try:
             md = wgp.get_model_def(video_model) or {}
@@ -12315,9 +12935,11 @@ async def plan_audio_structure(request: Request):
     try:
         from services.director_pipeline import director_music_clip_limits
         limits = director_music_clip_limits(body) if "director_music_clip_seconds" in body else None
+        from services.director_music_timing import resolve_music_pacing_bias
+        pacing_bias = resolve_music_pacing_bias(body.get("energy_bias", 0), md)
         clips = audio_analysis.plan_clip_structure(
             analysis=analysis,
-            energy_bias=body.get("energy_bias", 0),
+            energy_bias=pacing_bias,
             fps=fps,
             frames_steps=frames_steps,
             frames_minimum=frames_minimum,
@@ -12415,6 +13037,7 @@ async def director_plan_prompts_and_images(request: Request):
             speaker_mappings=body.get("speaker_mappings"),
             prompt_type=body.get("prompt_type", "both"),
             existing_image_prompts=body.get("existing_image_prompts"),
+            use_lyrics_context=body.get("use_lyrics_context") is True,
         )
         return {"clip_plans": clip_plans, "planned_clips": clips}
     except Exception as e:
@@ -12976,7 +13599,7 @@ async def director_v2_plan(request: Request):
 
         # Build planner kwargs from request body
         planner_kwargs = {}
-        for key in ["clips", "scene_description", "story_description", "lyrics", "bpm",
+        for key in ["clips", "scene_description", "story_description", "lyrics", "bpm", "use_lyrics_context",
                      "reference_image_path", "speaker_mappings", "characters",
                      "audio_path", "target_duration", "target_scenes", "narrative_mode",
                      "fps", "frames_steps", "frames_minimum",
@@ -13253,12 +13876,118 @@ def _reviewed_h3_runtime_geometry_error(
     )
 
 
-def _generation_sidecar_params(params: dict) -> dict:
-    """Copy restorable settings without private queue-validation metadata."""
+def _generation_sidecar_params(
+    params: dict,
+    *,
+    path_params: dict | None = None,
+    attachment_keys=(),
+) -> dict:
+    """Copy JSON-safe settings without WGP runtime state or PIL objects."""
 
-    sidecar_params = params.copy()
-    sidecar_params.pop("_reviewed_h3_runtime_geometry", None)
-    return sidecar_params
+    from services.director_clip_settings import json_safe_generation_params
+
+    return json_safe_generation_params(
+        params,
+        path_params=path_params,
+        attachment_keys=attachment_keys,
+        omit_keys={"_reviewed_h3_runtime_geometry"},
+    )
+
+
+def _director_clip_sidecar_timing(
+    task_params: dict,
+    request_params: dict,
+    clip_index: int,
+    wgp_module,
+) -> dict:
+    """Persist the immutable timing needed by a future single-clip recipe."""
+
+    task_params = task_params if isinstance(task_params, dict) else {}
+    request_params = request_params if isinstance(request_params, dict) else {}
+    try:
+        native_frames = max(1, int(task_params.get("video_length") or 1))
+    except (TypeError, ValueError, OverflowError):
+        native_frames = None
+    try:
+        trim = max(0, int(task_params.get("trim_tail_frames") or 0))
+    except (TypeError, ValueError, OverflowError):
+        trim = 0
+    output_frames = (
+        max(1, native_frames - trim) if native_frames is not None else None
+    )
+    profile = (
+        request_params.get("_director_video_execution_profile")
+        or task_params.get("_director_video_execution_profile")
+        or {}
+    )
+    fps = task_params.get("fps") or request_params.get("fps")
+    if not fps:
+        model_type = task_params.get("model_type") or request_params.get(
+            "model_type"
+        )
+        try:
+            model_def = wgp_module.get_model_def(model_type) or {}
+            fps = model_def.get("fps")
+        except Exception:
+            fps = None
+    try:
+        fps = float(fps or profile.get("fps") or 0)
+        if fps <= 0 or not math.isfinite(fps):
+            fps = None
+    except (TypeError, ValueError, OverflowError):
+        fps = None
+
+    clip_info = task_params.get("multi_clip_info")
+    if not isinstance(clip_info, dict):
+        clip_info = {}
+    direct_start = (
+        task_params.get("_director_clip_audio_start_sec")
+        if task_params.get("_director_clip_audio_start_sec") is not None
+        else request_params.get("_director_clip_audio_start_sec")
+    )
+    audio_start = None
+    try:
+        if direct_start is not None:
+            audio_start = max(0.0, float(direct_start))
+        elif fps:
+            base = float(
+                clip_info.get("audio_start_sec")
+                or task_params.get("multi_clip_audio_start_sec")
+                or request_params.get("multi_clip_audio_start_sec")
+                or 0
+            )
+            offset = max(0.0, float(task_params.get("audio_frame_offset") or 0))
+            audio_start = max(0.0, base + offset / fps)
+    except (TypeError, ValueError, OverflowError):
+        audio_start = None
+
+    source_path = (
+        task_params.get("_director_clip_audio_source_path")
+        or request_params.get("_director_clip_audio_source_path")
+        or task_params.get("audio_guide")
+        or request_params.get("audio_guide")
+    )
+    return {
+        "native_frames": native_frames,
+        "output_frames": output_frames,
+        "fps": fps,
+        "audio_start_sec": audio_start,
+        "audio_base_start_sec": (
+            clip_info.get("audio_start_sec")
+            or task_params.get("multi_clip_audio_start_sec")
+            or request_params.get("multi_clip_audio_start_sec")
+        ),
+        "audio_source_path": source_path,
+        "video_strategy": (
+            task_params.get("_director_video_strategy")
+            or request_params.get("_director_video_strategy")
+        ),
+        "shot_image_policy": (
+            task_params.get("_director_shot_image_policy")
+            or request_params.get("_director_shot_image_policy")
+        ),
+        "clip_index": int(clip_index),
+    }
 
 
 async def _prepare_generation_submission(
@@ -13419,6 +14148,35 @@ async def _prepare_generation_submission(
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    # Apply atomic checkpoint recipes before preparation captures the request
+    # for enhancement, queue retries and restorable output metadata.
+    if not is_sfx:
+        try:
+            body.update(wgp.apply_model_acceleration_profile(body["model_type"], body))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+    from services.native_vae import native_vae_selection
+    try:
+        native_vae_selection(_generation_model_def, body.get("spatial_upsampling", ""),
+                             1 if body.get("generation_mode") == "image" else -1 if body.get("generation_mode") == "audio" else int(body.get("image_mode", 0)))
+    except (ValueError, TypeError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if (
+        body.get("generation_mode", "video") in {"video", "avatar"}
+        and _is_minimax_h3_identity(
+            _base_model_type, body["model_type"], _generation_model_def.get("architecture")
+        )
+    ):
+        _validate_h3_source_quote_boundaries(str(body.get("prompt") or ""))
+    if _base_model_type in {"longcat_video", "longcat_avatar", "longcat_avatar_multi"}:
+        from models.longcat.longcat_handler import normalize_longcat_window_params
+        try:
+            previous_window = body.get("sliding_window_size")
+            if normalize_longcat_window_params(body, _generation_model_def):
+                print(f"[LongCat] Window {previous_window} -> {body['sliding_window_size']} frames; "
+                      f"requested timeline remains {body.get('video_length', 'default')} frames.")
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     from models.minimax_h3.duration import apply_h3_duration_override
     _generation_model_def = apply_h3_duration_override(body, _generation_model_def)
     if (
@@ -13498,21 +14256,19 @@ async def _prepare_generation_submission(
                     resolve_lora=lambda name: wgp.resolve_lora_path(body["model_type"], name),
                 )
             from models.minimax_h3.turbo import (
+                minimax_h3_adapter_workflow,
                 normalize_minimax_h3_turbo_request,
             )
 
             turbo_applied = normalize_minimax_h3_turbo_request(
                 body,
+                model_def=_generation_model_def,
                 full_checkpoint=bool(
                     _generation_model_def.get(
                         "minimax_h3_full_checkpoint", False
                     )
                 ),
-                workflow=(
-                    "ref2va"
-                    if _generation_model_def.get("omni_reference")
-                    else "fl2va"
-                ),
+                workflow=minimax_h3_adapter_workflow(_generation_model_def),
             )
             if _generation_model_def.get("omni_reference"):
                 from models.minimax_h3.turbo import find_minimax_h3_pdd_loras
@@ -13544,6 +14300,7 @@ async def _prepare_generation_submission(
             apply_h3_window_memory_policy,
             h3_runtime_preflight,
             normalize_h3_clip_frame_schedule,
+            normalize_h3_window_geometry,
             resolve_h3_long_sequence_discard_frames,
         )
 
@@ -13605,6 +14362,12 @@ async def _prepare_generation_submission(
                 f"{h3_window_adjustment['effective_window_frames']} frames. "
                 "Requested output duration is unchanged."
             )
+
+        if (
+            not _generation_model_def.get("omni_reference")
+            and int(body.get("multi_prompts_gen_type") or 0) != 3
+        ):
+            normalize_h3_window_geometry(body, _generation_model_def)
 
         try:
             h3_long_sequence_active = (
@@ -13796,6 +14559,7 @@ async def _prepare_generation_submission(
                     "[MiniMax H3 Omni] Restored the original story prompt "
                     "from the saved sequence plan."
                 )
+            h3_lora_hint = _active_lora_hint(str(body.get("model_type") or ""), body.get("activated_loras"))
             h3_sequence_signature = h3_sequence_plan_signature(
                 h3_sequence_source_prompt,
                 model_type=str(body.get("model_type") or ""),
@@ -13812,6 +14576,7 @@ async def _prepare_generation_submission(
                 overlap_frames=h3_sequence_overlap,
                 native_continuation=h3_native_sequence,
                 planning_style=h3_sequence_planning_style,
+                lora_system_hint=h3_lora_hint,
             )
             if h3_native_sequence:
                 h3_sequence_geometry = compute_h3_native_sequence_windows(
@@ -13866,6 +14631,7 @@ async def _prepare_generation_submission(
                     overlap_frames=h3_sequence_overlap,
                     native_continuation=h3_native_sequence,
                     planning_style=h3_sequence_planning_style,
+                    lora_system_hint=h3_lora_hint,
                 )
             )
             if (
@@ -13979,6 +14745,7 @@ async def _prepare_generation_submission(
                     overlap_frames=h3_sequence_overlap,
                     native_continuation=h3_native_sequence,
                     planning_style=h3_sequence_planning_style,
+                    lora_system_hint=h3_lora_hint,
                     retry_plan=h3_retry_plan,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
@@ -14179,7 +14946,7 @@ async def _prepare_generation_submission(
                 compute_h3_window_boundaries,
                 h3_window_plan_signature,
                 plan_h3_sliding_windows,
-                reviewed_h3_window_plan_matches,
+                reviewed_h3_window_plan_mismatch,
             )
 
             h3_fps = float(_generation_model_def.get("fps", 24) or 24)
@@ -14188,6 +14955,7 @@ async def _prepare_generation_submission(
             h3_has_start = bool(h3_start_value)
             h3_has_end = bool(h3_end_value)
             h3_injected_keyframes = _h3_injected_keyframes_from_body(body)
+            h3_lora_hint = _active_lora_hint(str(body.get("model_type") or ""), body.get("activated_loras"))
             h3_expected_signature = h3_window_plan_signature(
                 h3_first_last_source_prompt,
                 model_type=str(body.get("model_type") or ""),
@@ -14203,6 +14971,7 @@ async def _prepare_generation_submission(
                     body.get("minimax_h3_camera_coverage") or "auto"
                 ),
                 planning_style=h3_first_last_planning_style,
+                lora_system_hint=h3_lora_hint,
                 injected_keyframes=h3_injected_keyframes or None,
             )
             h3_expected_boundaries = compute_h3_window_boundaries(
@@ -14221,9 +14990,8 @@ async def _prepare_generation_submission(
                 and all(isinstance(item, str) and item.strip() for item in cached_prompts)
                 and body.get("h3_window_plan_signature") == h3_expected_signature
             )
-            reviewed_cache_is_valid = (
-                preserve_reviewed_h3_plan
-                and reviewed_h3_window_plan_matches(
+            reviewed_mismatch = (
+                reviewed_h3_window_plan_mismatch(
                     cached_plan,
                     cached_prompts,
                     source_prompt=h3_first_last_source_prompt,
@@ -14235,15 +15003,18 @@ async def _prepare_generation_submission(
                         body.get("minimax_h3_camera_coverage") or "auto"
                     ),
                     planning_style=h3_first_last_planning_style,
+                    lora_system_hint=h3_lora_hint,
                 )
+                if preserve_reviewed_h3_plan else None
             )
+            reviewed_cache_is_valid = preserve_reviewed_h3_plan and reviewed_mismatch is None
             if preserve_reviewed_h3_plan and not reviewed_cache_is_valid:
+                print(f"[MiniMax H3] Reviewed window plan mismatch: {reviewed_mismatch}.")
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "The reviewed MiniMax H3 window prompts no longer match "
-                        "the current Duration, Window Length, model, resolution, "
-                        "or source prompt. Press Prompt Enhance to refresh the "
+                        "The reviewed MiniMax H3 window prompts no longer match: "
+                        f"{reviewed_mismatch}. Press Prompt Enhance to refresh the "
                         "plan before generating or adding it to the queue."
                     ),
                 )
@@ -14315,6 +15086,7 @@ async def _prepare_generation_submission(
                         body.get("minimax_h3_camera_coverage") or "auto"
                     ),
                     planning_style=h3_first_last_planning_style,
+                    lora_system_hint=h3_lora_hint,
                     retry_plan=h3_retry_plan,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
@@ -17134,43 +17906,62 @@ def _compose_recast_character_masks(
     mapping_masks, colors, overlap_limit=0.35,
     background_color=(255, 255, 255),
 ):
-    """Merge separately tracked people into deterministic SCAIL color slots."""
+    """Merge SCAIL color slots with scratch memory bounded to one frame."""
     import numpy as np
 
     if not mapping_masks or len(mapping_masks) != len(colors):
         raise ValueError("Recast needs one tracked mask per character color.")
-    shape = np.asarray(mapping_masks[0]).shape
+    masks = [np.asarray(mask) for mask in mapping_masks]
+    shape = masks[0].shape
     if len(shape) not in (3, 4):
         raise ValueError(f"Unsupported Recast character-mask shape: {shape}.")
+    if any(mask.shape != shape for mask in masks):
+        raise ValueError("Every Recast character mask must have matching dimensions.")
     region_shape = shape[:-1] if shape[-1] == 3 else shape
+    if len(region_shape) not in (2, 3):
+        raise ValueError(f"Unsupported Recast character-mask shape: {shape}.")
     background = np.asarray(background_color, dtype=np.uint8)
     if background.shape != (3,):
         raise ValueError("Character-mask background must be one RGB color.")
+    palette = [np.asarray(color, dtype=np.uint8) for color in colors]
+    if any(color.shape != (3,) for color in palette):
+        raise ValueError("Each character-mask color must be one RGB color.")
     output = np.empty((*region_shape, 3), dtype=np.uint8)
-    output[...] = background
-    occupied = np.zeros(region_shape, dtype=bool)
+    # Keep output shape/API unchanged, but avoid allocating full-video region,
+    # overlap, occupancy, and integer index arrays. Boolean advanced indexing
+    # across a long RGB video can request tens of GB in int64 indices alone.
+    single_frame = len(region_shape) == 2
+    frame_count = 1 if single_frame else region_shape[0]
+    frame_shape = region_shape if single_frame else region_shape[1:]
+    occupied = np.empty(frame_shape, dtype=bool)
+    areas = [0] * len(masks)
+    overlap_areas = [0] * len(masks)
+    for frame_index in range(frame_count):
+        output_frame = output if single_frame else output[frame_index]
+        output_frame[...] = background
+        occupied.fill(False)
+        for index, (mask, color) in enumerate(zip(masks, palette)):
+            frame = mask if single_frame else mask[frame_index]
+            region = np.any(frame > 30, axis=-1) if shape[-1] == 3 else frame.astype(bool)
+            areas[index] += int(np.count_nonzero(region))
+            overlap_areas[index] += int(np.count_nonzero(region & occupied))
+            # Earlier cards keep priority at an occlusion. copyto broadcasts
+            # the color without building boolean-index coordinate arrays.
+            writable = region & ~occupied
+            np.copyto(output_frame, color, where=writable[..., None])
+            occupied |= region
+
     overlaps = []
-    for index, (raw_mask, color) in enumerate(zip(mapping_masks, colors)):
-        mask = np.asarray(raw_mask)
-        if mask.shape != shape:
-            raise ValueError("Every Recast character mask must have matching dimensions.")
-        region = np.any(mask > 30, axis=-1) if mask.shape[-1] == 3 else mask.astype(bool)
-        area = int(region.sum())
+    for index, (area, overlap_area) in enumerate(zip(areas, overlap_areas)):
         if area <= 0:
             raise ValueError(f"Character mapping {index + 1} matched no pixels.")
-        overlap = np.logical_and(region, occupied)
-        overlap_fraction = float(overlap.sum()) / float(max(1, area))
+        overlap_fraction = float(overlap_area) / float(area)
         overlaps.append(overlap_fraction)
         if overlap_fraction > float(overlap_limit):
             raise ValueError(
                 f"Character mapping {index + 1} overlaps an earlier mapping by "
                 f"{overlap_fraction:.0%}. Use more specific source descriptions."
             )
-        # Earlier cards win the occasional occlusion pixel, making color
-        # assignment stable regardless of SAM's internal object ordering.
-        writable = region & ~occupied
-        output[writable] = np.asarray(color, dtype=np.uint8)
-        occupied |= region
     return output, overlaps
 
 
@@ -22822,6 +23613,28 @@ async def recast_endpoint(request: Request):
                         f"{shot_manifest['frame_count']} exact output frames "
                         f"at {shot_manifest['fps']:.6g}fps."
                     )
+                if mapped_tracking is not None:
+                    from services.recast_tracking_memory import (
+                        release_recast_tracking_arrays,
+                    )
+
+                    released_arrays = release_recast_tracking_arrays(
+                        mapped_tracking,
+                        mapping_anchors,
+                    )
+                    # These locals are NumPy views into the arrays released
+                    # above. _ensure_source_scene_reference is already done
+                    # for this job; clear its closure cells before generation.
+                    mapping_anchors = None
+                    probe_frame = None
+                    probe_mask = None
+                    scene_anchor_frame = None
+                    scene_anchor_mask = None
+                    if released_arrays:
+                        print(
+                            "[Recast] Released host timeline arrays after "
+                            "reference/shot preparation and before generation."
+                        )
         except Exception as e:
             traceback.print_exc()
             if shot_temp_dir and os.path.isdir(shot_temp_dir):
@@ -25493,6 +26306,176 @@ def _apply_film_grain_to_file_impl(video_path: str, intensity: float, saturation
 # which we'd rather not call per-job.
 _cached_hardware: dict | None = None
 _generation_eta_history: GenerationEtaHistory | None = None
+_performance_history = None
+_last_performance_plan = None
+
+
+def _performance_hardware() -> dict:
+    """Scope evidence to hardware, active allocator and installed runtime files."""
+    import hashlib
+    from shared.cuda_memory import allocator_status
+    hw = dict(_get_cached_hardware())
+    active_allocators = allocator_status(wgp.server_config)
+    hw["allocator_active"] = active_allocators.get("vram_allocator_active")
+    hw["ram_allocator_active"] = active_allocators.get("ram_allocator_active")
+    stamps = []
+    for relative in ("wgp.py", "services/performance_tuning.py", "services/perf_recommend.py",
+                     "services/h3_performance_policy.py", "shared/h3_performance_policy.json",
+                     "mmgp/offload.py", "shared/kernels/int8_backend.py",
+                     "shared/cuda_memory.py", "mmgp/allocator/__init__.py",
+                     "mmgp/allocator/ram.py"):
+        path = os.path.join(os.path.dirname(__file__), relative)
+        with open(path, "rb") as source:
+            stamps.append(hashlib.sha256(source.read()).hexdigest())
+    hw["runtime_signature"] = hashlib.sha256("".join(stamps).encode()).hexdigest()
+    return hw
+
+
+def _get_performance_history():
+    global _performance_history
+    if _performance_history is None:
+        from services.performance_tuning import PerformanceHistory
+        _performance_history = PerformanceHistory(os.path.join(os.path.dirname(__file__), "settings", "performance_tuning.sqlite3"))
+    return _performance_history
+
+
+def _performance_learning_summary():
+    try:
+        from services.performance_tuning import hardware_key
+        return {**_get_performance_history().summary(hardware_key(_performance_hardware())),
+                "last_plan": _last_performance_plan}
+    except Exception:
+        return {"completed_renders": 0, "workloads": 0, "unavailable": True}
+
+
+def _apply_per_job_performance(job, raw_params):
+    """Apply a temporary placement plan inside the generation slot only."""
+    global _BASE_TRANSFORMER_BUDGET_MB, _last_performance_plan
+    try:
+        from services.performance_tuning import build_performance_plan, GenerationPerformanceMonitor
+        from services.live_stats import get_live_stats
+        from services.memory_settings import preload_for_output
+        params = job.get("params") or {}
+        output = wgp.get_output_type_for_model(params.get("model_type"), params.get("image_mode", 0))
+        profile = wgp.compute_profile(params.get("override_profile", -1), output)
+        original_budget = (_BASE_TRANSFORMER_BUDGET_MB if _BASE_TRANSFORMER_BUDGET_MB is not None
+                           else int(getattr(wgp.args, "transformer_budget", 0) or 0))
+        cli = {key: getattr(wgp.args, key, 0) for key in ("preload", "perc_reserved_mem_max")}
+        cli.update(profile=getattr(wgp.args, "profile", -1), transformer_budget=original_budget)
+        if getattr(wgp, "force_profile_no", -1) >= 0:
+            cli["profile"] = wgp.force_profile_no
+        stats = get_live_stats()
+        pinned = getattr(wgp.offload, "total_pinned_bytes", 0) / (1024 ** 3)
+        definition = dict(wgp.get_model_def(params.get("model_type")) or {})
+        # Local weight identity/stat is hashed by the service; paths never enter history.
+        try:
+            selected_file = wgp.get_model_filename(params.get("model_type"), wgp.transformer_quantization)
+            definition["_checkpoint_files"] = wgp.get_local_model_filename(selected_file) or selected_file
+        except Exception:
+            pass
+        performance_hardware = _performance_hardware()
+        plan = build_performance_plan(performance_hardware, wgp.server_config, definition, params,
+                                     job.get("vram_adjustment"), output_type=output, profile=profile, cli=cli,
+                                     available_ram_gb=stats.get("ram", {}).get("available_gb"),
+                                     external_vram_gb=(stats.get("gpu", {}).get("vram_used_gb", 0)
+                                                       if getattr(wgp, "wan_model", None) is None else 0),
+                                     own_pinned_gb=pinned, history=_get_performance_history())
+        preload_mode, preload = preload_for_output(
+            wgp.server_config,
+            wgp.args,
+            output,
+        )
+        if plan["applied"]:
+            if _BASE_TRANSFORMER_BUDGET_MB is None:
+                _BASE_TRANSFORMER_BUDGET_MB = original_budget
+            # Other model-specific guards retain ownership of their transformer budget.
+            if "h3_weight_budget_gb" in (job.get("vram_adjustment") or {}):
+                wgp.args.transformer_budget = plan["transformer_budget_mb"]
+            else:
+                plan["transformer_budget_mb"] = int(getattr(wgp.args, "transformer_budget", 0) or 0)
+            raw_params["override_profile"] = plan["profile"]
+        else:
+            plan["transformer_budget_mb"] = preload or int(getattr(wgp.args, "transformer_budget", 0) or 0)
+        # Attention grouping is independent of model placement. An explicit
+        # profile may coexist with Auto-owned head splitting for this job.
+        wgp.args._maestro_per_job_memory_plan = (
+            plan if plan["applied"] or plan.get("override_attention_head_split") else None
+        )
+        signature = (plan["profile"], plan["transformer_budget_mb"],
+                     plan["read_ahead"], plan["reserved_ram_fraction"])
+        wgp.args._maestro_performance_placement = signature
+        if getattr(wgp, "wan_model", None) is not None:
+            if getattr(wgp.wan_model, "_maestro_performance_placement", None) != signature:
+                wgp.reload_needed = True
+        try:
+            from services.scail2_diagnostics import (
+                collect_scail2_performance_diagnostic,
+                format_scail2_performance_summary,
+            )
+            diagnostic = collect_scail2_performance_diagnostic(
+                wgp=wgp,
+                model_definition=definition,
+                params=params,
+                plan=plan,
+                hardware=performance_hardware,
+                live_stats=stats,
+                own_pinned_gb=pinned,
+                settings=wgp.server_config,
+                preload_mode=preload_mode,
+                manual_preload_mb=preload,
+            )
+            if diagnostic:
+                plan["scail2_diagnostic"] = diagnostic["summary"]
+                for warning in diagnostic["warnings"]:
+                    if warning not in plan["warnings"]:
+                        plan["warnings"].append(warning)
+                print(format_scail2_performance_summary(
+                    diagnostic["summary"],
+                ))
+        except Exception as diagnostic_error:
+            # Read-only diagnostics are best effort and never block a render.
+            print(
+                "[SCAIL-2 Performance] Diagnostic unavailable "
+                f"({type(diagnostic_error).__name__})."
+            )
+        job["performance_plan"] = plan
+        _last_performance_plan = plan
+        split_label = {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(plan.get("attention_head_split"), "unchanged")
+        split_source = "Auto" if plan.get("override_attention_head_split") else "saved"
+        print(f"[Auto-tune] Profile {plan['profile']:g}, transformer {plan['transformer_budget_mb']} MB ({plan['source']}), head splitting {split_label} ({split_source}). " + " ".join(plan["warnings"]))
+        _finalize_deferred_h3_residency_reload(job, plan["transformer_budget_mb"])
+        return GenerationPerformanceMonitor(get_live_stats, lambda: job.get("phase", "")).start()
+    except Exception as exc:
+        # Planning/telemetry must never become a generation dependency. If it
+        # fails, retain the VRAM guard's budget and still validate residency.
+        print(f"[Auto-tune] Per-generation learning unavailable: {exc}")
+        _finalize_deferred_h3_residency_reload(job)
+        return None
+
+
+def _finish_per_job_performance(job, monitor, completed):
+    try:
+        if monitor is not None:
+            measurement = monitor.finish()
+            job["performance_measurements"] = measurement
+            _get_performance_history().record(job.get("id"), job.get("performance_plan"), measurement,
+                                              completed=completed and not is_cancel_requested(job))
+            # Sidecars are written during output publication; add final measurements now.
+            for name in job.get("output_files", []):
+                output_dir = job.get("out_dir") or _workspace_dir(job.get("workspace"))
+                path = os.path.join(output_dir, os.path.splitext(name)[0] + ".meta.json")
+                if os.path.isfile(path):
+                    with open(path, "r", encoding="utf-8") as source:
+                        metadata = json.load(source)
+                    metadata["performance_plan"] = job.get("performance_plan")
+                    metadata["performance_measurements"] = measurement
+                    with open(path, "w", encoding="utf-8") as target:
+                        json.dump(metadata, target, indent=2)
+    except Exception as exc:
+        print(f"[Auto-tune] Could not save performance evidence: {exc}")
+    finally:
+        wgp.args._maestro_per_job_memory_plan = None
+        wgp.args._maestro_performance_placement = None
 
 
 def _get_cached_hardware() -> dict:
@@ -25556,11 +26539,11 @@ _BASE_TRANSFORMER_BUDGET_MB = None
 _H3_RESIDENCY_HEADROOM = 0.97
 
 
-def _apply_per_job_coefficient(job: dict) -> None:
+def _apply_per_job_coefficient(job: dict, *, defer_h3_residency_reload: bool = False) -> None:
     """Compute and apply a per-job VRAM safety coefficient.
 
-    Sets the VRAM ceiling and, for streaming H3 profiles, the transformer
-    residency budget for this job. Both are restored by
+    Sets the VRAM ceiling and any model-specific transformer residency
+    budget for this job. Both are restored by
     `_restore_base_coefficient()` in the job's finally block.
 
     Records the result on `job` so the API/UI can surface it:
@@ -25681,6 +26664,10 @@ def _apply_per_job_coefficient(job: dict) -> None:
             str(_job_model_def.get("architecture") or "") == "minimax_music3"
             or str(model_type or "") == "minimax_music3"
         )
+        _is_longcat_avatar = (
+            _base_mt == "longcat_avatar"
+            or str(_job_model_def.get("architecture") or "") == "longcat_avatar"
+        )
         _h3_omni_video = bool(
             (_job_model_def.get("omni_reference") or _is_viggle)
             and _h3_video_reference_count
@@ -25745,6 +26732,26 @@ def _apply_per_job_coefficient(job: dict) -> None:
         if h3_reference_activation_gb:
             adjustment["h3_reference_activation_estimate_gb"] = (
                 h3_reference_activation_gb
+            )
+        if _is_longcat_avatar:
+            from models.longcat.longcat_handler import longcat_avatar_weight_budget
+            longcat_budget = longcat_avatar_weight_budget(
+                total_vram_gb, resolution, effective_frames,
+                additional_reserve_gb=adjustment.get("lora_penalty", 0.0) * total_vram_gb,
+                continuation=bool(
+                    (video_length and effective_frames and video_length > effective_frames)
+                    or params.get("video_source")
+                ),
+            )
+            longcat_cap = longcat_budget["weight_budget_gb"] / total_vram_gb
+            if adjustment["effective_coef"] > longcat_cap:
+                adjustment["effective_coef"] = longcat_cap
+                adjustment["floored"] = False
+            adjustment["longcat_avatar_budget"] = longcat_budget
+            adjustment["reasons"].append(
+                f"- LongCat Avatar transformer residency capped at "
+                f"{longcat_budget['weight_budget_gb']:.1f} GB to preserve "
+                f"{longcat_budget['activation_reserve_gb']:.1f} GB of activation workspace"
             )
         # The dedicated upstream SCAIL-2 transformer uses the official
         # attention/token layout instead of WanGP's generalized fused path.
@@ -25906,19 +26913,33 @@ def _apply_per_job_coefficient(job: dict) -> None:
         job["vram_adjustment"] = adjustment
 
         effective = adjustment["effective_coef"]
-        if abs(effective - base_coef) > 1e-6 or _is_h3 or _is_music3:
+        if abs(effective - base_coef) > 1e-6 or _is_h3 or _is_music3 or _is_longcat_avatar:
             wgp.args.vram_safety_coefficient = effective
             h3_residency_mb = None
             h3_residency_override_mb = None
+            longcat_residency_override_mb = None
+            if _is_longcat_avatar:
+                if _BASE_TRANSFORMER_BUDGET_MB is None:
+                    _BASE_TRANSFORMER_BUDGET_MB = int(
+                        getattr(wgp.args, "transformer_budget", 0) or 0
+                    )
+                longcat_residency_override_mb = max(1, int(
+                    min(longcat_budget["weight_budget_gb"], effective * total_vram_gb)
+                    * 1024 * _H3_RESIDENCY_HEADROOM
+                ))
+                wgp.args.transformer_budget = longcat_residency_override_mb
+                adjustment["longcat_residency_mb"] = longcat_residency_override_mb
             if _is_h3:
+                from services.memory_settings import preload_for_output
+                h3_output_type = wgp.get_output_type_for_model(model_type, params.get("image_mode", 0))
                 profile = wgp.compute_profile(
                     params.get("override_profile", -1),
-                    wgp.get_output_type_for_model(model_type, params.get("image_mode", 0)),
+                    h3_output_type,
                 )
-                preload = int(getattr(wgp.args, "preload", 0) or 0)
-                if preload == 0:
-                    preload = int(wgp.server_config.get("preload_in_VRAM", 0) or 0)
-                if int(profile) in (2, 4, 5) and preload == 0:
+                _, preload = preload_for_output(wgp.server_config, wgp.args, h3_output_type)
+                explicit_budget = (_BASE_TRANSFORMER_BUDGET_MB if _BASE_TRANSFORMER_BUDGET_MB is not None
+                                   else int(getattr(wgp.args, "transformer_budget", 0) or 0))
+                if int(profile) in (2, 4, 5) and preload == 0 and not explicit_budget:
                     if _BASE_TRANSFORMER_BUDGET_MB is None:
                         _BASE_TRANSFORMER_BUDGET_MB = int(
                             getattr(wgp.args, "transformer_budget", 0) or 0
@@ -25949,12 +26970,18 @@ def _apply_per_job_coefficient(job: dict) -> None:
                         wgp.args.transformer_budget = h3_residency_mb
                         adjustment["h3_residency_mb"] = h3_residency_mb
                         adjustment["reasons"].append(
-                            f"- MMGP transformer residency requested: "
-                            f"{h3_residency_mb / 1024:.1f} GB; remaining weights stream "
-                            "within the existing workspace limits"
+                            f"- MMGP transformer residency candidate: "
+                            f"{h3_residency_mb / 1024:.1f} GB before finalized per-job placement; "
+                            "remaining weights stream within the existing workspace limits"
                         )
+            if h3_residency_override_mb is not None:
+                adjustment["h3_residency_candidate_mb"] = int(h3_residency_override_mb)
+                if defer_h3_residency_reload:
+                    job["_maestro_h3_residency_reload_pending"] = {
+                        "candidate_mb": int(h3_residency_override_mb),
+                    }
             if (
-                (_is_h3 or _is_music3)
+                (_is_h3 or _is_music3 or _is_longcat_avatar)
                 and getattr(wgp, "wan_model", None) is not None
             ):
                 loaded_coefficient = getattr(
@@ -25962,17 +26989,27 @@ def _apply_per_job_coefficient(job: dict) -> None:
                     "_maestro_profile_vram_coefficient",
                     None,
                 )
-                if (
+                loaded_transformer_budget = getattr(
+                    wgp.wan_model,
+                    "_maestro_profile_transformer_budget_override_mb",
+                    None,
+                )
+                coefficient_mismatch = (
                     loaded_coefficient is None
                     or float(loaded_coefficient) > effective + 1e-6
-                    or (
-                        h3_residency_override_mb is not None
-                        and getattr(
-                            wgp.wan_model,
-                            "_maestro_profile_transformer_budget_override_mb",
-                            None,
-                        ) != h3_residency_override_mb
-                    )
+                )
+                h3_budget_mismatch = (
+                    h3_residency_override_mb is not None
+                    and loaded_transformer_budget != h3_residency_override_mb
+                )
+                longcat_budget_mismatch = (
+                    longcat_residency_override_mb is not None
+                    and loaded_transformer_budget != longcat_residency_override_mb
+                )
+                if (
+                    coefficient_mismatch
+                    or (h3_budget_mismatch and not defer_h3_residency_reload)
+                    or longcat_budget_mismatch
                 ):
                     wgp.reload_needed = True
                     if _is_music3:
@@ -25980,10 +27017,20 @@ def _apply_per_job_coefficient(job: dict) -> None:
                             "- resident Music3 profile will reload with "
                             "duration-aware semantic-cache headroom"
                         )
+                    elif _is_longcat_avatar:
+                        adjustment["reasons"].append(
+                            "- resident LongCat Avatar will reload with the current "
+                            "activation workspace and streaming budget"
+                        )
+                    elif h3_budget_mismatch and not defer_h3_residency_reload:
+                        adjustment["reasons"].append(
+                            "- resident H3 profile will reload with the current "
+                            "transformer residency budget"
+                        )
                     else:
                         adjustment["reasons"].append(
-                            "- resident H3 profile will reload with packed-sequence headroom "
-                            "and the current transformer residency budget"
+                            "- resident H3 profile will reload with packed-sequence "
+                            "activation headroom"
                         )
             cap_gb = effective * total_vram_gb
             base_cap_gb = base_coef * total_vram_gb
@@ -26009,6 +27056,61 @@ def _apply_per_job_coefficient(job: dict) -> None:
     except Exception as e:
         # Never let a coefficient-adjustment bug fail the job.
         print(f"[VRAM] per-job adjustment failed: {e}")
+
+
+def _finalize_deferred_h3_residency_reload(job: dict, transformer_budget_mb=None) -> bool:
+    """Reconcile an H3 guard candidate with the budget that will reach MMGP."""
+    pending = job.pop("_maestro_h3_residency_reload_pending", None)
+    if not isinstance(pending, dict):
+        return False
+
+    adjustment = job.get("vram_adjustment")
+    candidate_mb = int(pending.get("candidate_mb", 0) or 0)
+    try:
+        requested = (
+            transformer_budget_mb
+            if transformer_budget_mb is not None
+            else getattr(wgp.args, "transformer_budget", 0)
+        )
+        final_budget_mb = int(requested or 0)
+    except (TypeError, ValueError, OverflowError):
+        final_budget_mb = candidate_mb
+
+    if isinstance(adjustment, dict):
+        adjustment["h3_residency_candidate_mb"] = candidate_mb
+        if final_budget_mb > 0:
+            adjustment["h3_residency_mb"] = final_budget_mb
+            adjustment.pop("h3_residency_policy", None)
+        else:
+            adjustment.pop("h3_residency_mb", None)
+            adjustment["h3_residency_policy"] = "profile_default"
+
+    model = getattr(wgp, "wan_model", None)
+    if model is None:
+        return False
+    loaded_budget_mb = getattr(
+        model, "_maestro_profile_transformer_budget_override_mb", None
+    )
+    if loaded_budget_mb == final_budget_mb:
+        return False
+
+    wgp.reload_needed = True
+    if final_budget_mb > 0:
+        reason = (
+            "- resident H3 profile will reload with the finalized "
+            f"{final_budget_mb} MB transformer residency budget"
+        )
+    else:
+        reason = (
+            "- resident H3 profile will reload using its profile-default "
+            "transformer residency"
+        )
+    if isinstance(adjustment, dict):
+        reasons = adjustment.setdefault("reasons", [])
+        if reason not in reasons:
+            reasons.append(reason)
+    print(f"[VRAM] {reason}")
+    return True
 
 
 def _restore_base_coefficient() -> None:
@@ -26506,7 +27608,7 @@ def _resolve_tool_clip_path(raw_path, workspace=None):
 
 def _write_tool_sidecar(
     out_dir, filename, *, source_name, tool, params, elapsed, job_id,
-    media_type="video",
+    media_type="video", source_path=None,
 ):
     """Write a .meta.json sidecar so a Tools output shows up in the gallery
     with the right mode + edit_sub_mode tag (mirrors _run_sfx_generation)."""
@@ -26520,6 +27622,14 @@ def _write_tool_sidecar(
         "generation_time": round(elapsed),
         "created_at": time.time(),
     }
+    if tool in {"upscale", "media_flow"}:
+        from services.media_info import probe_media, processing_record
+        sidecar["processing"] = processing_record(
+            spatial=params.get("spatial_upsampling") or params.get("method", ""),
+            temporal=params.get("temporal_upsampling", ""), source_name=source_name,
+            before=probe_media(source_path or params.get("media_path")),
+            after=probe_media(os.path.join(out_dir, filename)), elapsed=elapsed,
+            completed_at=sidecar["created_at"], options=params)
     meta_path = os.path.join(out_dir, os.path.splitext(filename)[0] + ".meta.json")
     try:
         with open(meta_path, "w", encoding="utf-8") as f:
@@ -26542,6 +27652,7 @@ def _run_tool_upscale(job_id: str):
                 job, message="Preparing upscale...", phase="Preparing",
             ):
                 return False
+            start_time = time.time()
             if not register_abort_state(
                 job, job_id, _active_gen_states, abort_state,
             ):
@@ -26662,6 +27773,7 @@ def _run_tool_upscale(job_id: str):
                         filename,
                         source_name=os.path.basename(media_source),
                         tool="upscale",
+                        source_path=media_source,
                         params={
                             "method": method,
                             "model_type": "post_processing",
@@ -26780,6 +27892,7 @@ def _run_tool_upscale(job_id: str):
                     out_dir, fname,
                     source_name=os.path.basename(video_source),
                     tool="upscale",
+                    source_path=video_source,
                     params={"method": method, "model_type": "post_processing"},
                     elapsed=time.time() - start_time,
                     job_id=job_id,
@@ -27633,6 +28746,7 @@ def _prepare_job_enhancement(job: dict) -> None:
             raise InterruptedError("Prompt enhancement cancelled.")
         plan = prepared.get("h3_window_plan") or prepared.get("ltx_window_plan")
         record.update(prepared=prepared, warnings=prepared.get("enhancement_warnings", []),
+                      continuity_reviews=prepared.get("enhancement_continuity_reviews", []),
                       enhanced_prompt="\n\n".join(plan.get("window_prompts") or []) if plan else prepared["params"]["prompt"])
         if prepared.get("enhancement_review_required"):
             record["state"] = "review"
@@ -27676,9 +28790,10 @@ def _apply_deferred_generation_preparation(job: dict) -> None:
         "started after the generation slot became available."
     )
     try:
-        prepared = asyncio.run(
-            _prepare_generation_submission(request_body, prepare_only=True)
-        )
+        with enhancement_context(_enhancement_settings_snapshot(), lambda: is_cancel_requested(job)):
+            prepared = asyncio.run(
+                _prepare_generation_submission(request_body, prepare_only=True)
+            )
         prepared_params = prepared.get("params")
         if not isinstance(prepared_params, dict):
             raise RuntimeError("Generation preparation returned invalid parameters.")
@@ -27768,6 +28883,37 @@ def _prepare_viggle_character_frame(job: dict) -> bool:
     return True
 
 
+def _split_multi_clip_prompt_text(
+    prompt_text: str,
+    per_clip_frames=None,
+    per_clip_output_frames=None,
+) -> list[str]:
+    """Parse clip prompts without treating an explicit one-clip prompt as lines.
+
+    Director uses per-clip frame metadata even for a single shot. In that case
+    the whole multiline Context-IR document is one prompt. The explicit clip
+    separator remains authoritative for multi-clip Director requests, while
+    metadata-free Studio callers retain the legacy line-by-line behavior.
+    """
+    prompt_text = str(prompt_text or "")
+    clip_separator = "\n---CLIP_BOUNDARY---\n"
+    if clip_separator in prompt_text:
+        return [part.strip() for part in prompt_text.split(clip_separator) if part.strip()]
+
+    clip_metadata = [
+        value for value in (per_clip_frames, per_clip_output_frames)
+        if value is not None
+    ]
+    explicit_single_clip = bool(clip_metadata) and all(
+        isinstance(value, list) and len(value) == 1
+        for value in clip_metadata
+    )
+    if explicit_single_clip:
+        prompt = prompt_text.strip()
+        return [prompt] if prompt else []
+
+    return [line.strip() for line in prompt_text.split("\n") if line.strip()]
+
 def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = False) -> bool:
     """Build and run a job, optionally deferring success finalization."""
     from shared.utils.thread_utils import AsyncStream, async_run
@@ -27783,6 +28929,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
     with ExitStack() as media_resources, (nullcontext(True) if _slot_owned else generation_slot(_gen_lock, job)) as acquired:
         if not acquired:
             return False
+        performance_monitor = None
+        performance_completed = False
         try:
             if _slot_owned:
                 if is_cancel_requested(job) or job.get("status") != "running":
@@ -27820,6 +28968,14 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 _runtime_model_def = wgp.get_model_def(
                     _runtime_params.get("model_type")
                 ) or {}
+                # Restored queues and Director child jobs can bypass request
+                # preparation. Bound their LongCat passes before VRAM budgeting.
+                if (_runtime_model_def.get("architecture") in {"longcat_video", "longcat_avatar"}
+                        or _runtime_params.get("model_type") in {
+                            "longcat_video", "longcat_avatar", "longcat_avatar_multi",
+                        }):
+                    from models.longcat.longcat_handler import normalize_longcat_window_params
+                    normalize_longcat_window_params(_runtime_params, _runtime_model_def)
                 if _runtime_model_def.get("omni_reference"):
                     from models.minimax_h3.reference_media import (
                         normalize_reference_manifest,
@@ -27890,7 +29046,15 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             # LoRAs and pipeline stage count beyond what the auto-tuned
             # base captures. Mutates wgp.args.vram_safety_coefficient
             # in place; restored in the finally block below.
-            _apply_per_job_coefficient(job)
+            _apply_per_job_coefficient(job, defer_h3_residency_reload=True)
+            # Internal Viggle/Klein preparation shares the parent's identity.
+            # Only the parent video teaches history, after all preparation succeeds.
+            if not _slot_owned:
+                performance_monitor = _apply_per_job_performance(job, raw_params)
+            else:
+                # Internal slot-owned preparation skips Auto planning; use the
+                # coefficient guard's budget as the final request.
+                _finalize_deferred_h3_residency_reload(job)
 
             # Build minimal state (same structure as CLI mode, line 11935 of wgp.py)
             state = {
@@ -27915,7 +29079,12 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     "process_status": "process:main",
                 },
                 "loras": [],
+                "_generation_preview_mode": configured_preview_mode(
+                    wgp.server_config.get("generation_preview")
+                ),
             }
+            if state["_generation_preview_mode"] != "off":
+                _generation_previews.begin(job_id)
 
             # Register the exact state before any model work. SFX uses the
             # same queue but does not own the Wan model interrupt.
@@ -27980,11 +29149,10 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     from services.managed_preprocessors import (
                         ensure_minimax_h3_lora_affine_maps,
                     )
+                    from models.minimax_h3.turbo import minimax_h3_adapter_workflow
 
                     ensure_minimax_h3_lora_affine_maps(
-                        "ref2va"
-                        if _h3_model_def.get("omni_reference")
-                        else "fl2va",
+                        minimax_h3_adapter_workflow(_h3_model_def),
                         progress=lambda msg: update_job(job, message=msg),
                     )
                     update_job(job, message="Preparing MiniMax H3 LoRAs…")
@@ -28157,13 +29325,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             # Multi-clip mode: split single request into per-clip tasks
             elif raw_params.get("multi_prompts_gen_type") == 3:
                 prompt_text = raw_params.get("prompt", "")
-                # Use clip boundary separator if present (Director v2 with sliding window support),
-                # otherwise fall back to newline split (Studio mode / legacy Director)
-                CLIP_SEPARATOR = "\n---CLIP_BOUNDARY---\n"
-                if CLIP_SEPARATOR in prompt_text:
-                    prompt_lines = [p.strip() for p in prompt_text.split(CLIP_SEPARATOR) if p.strip()]
-                else:
-                    prompt_lines = [l.strip() for l in prompt_text.split("\n") if l.strip()]
+                prompt_lines = _split_multi_clip_prompt_text(
+                    prompt_text,
+                    raw_params.get("per_clip_frames"),
+                    raw_params.get("per_clip_output_frames"),
+                )
                 image_starts = raw_params.get("image_start", [])
                 if not isinstance(image_starts, list):
                     image_starts = [image_starts] if image_starts else []
@@ -28278,6 +29444,10 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     cumulative_offset = 0
                     multi_clip_audio_start_sec = 0.0
                 total_trimmed_frames = 0
+                multi_clip_audio_origin_frame = cumulative_offset
+                multi_clip_video_origin_frame = max(
+                    0, int(raw_params.get("video_frame_offset", 0) or 0),
+                )
                 last_se_clip_end_image = None  # track last clip's end image for tail compensation
                 for i in range(clip_count):
                     wgp.task_id += 1
@@ -28357,6 +29527,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     clip_params["video_length"] = clip_frames
                     clip_params["trim_tail_frames"] = trim_tail
                     clip_params["audio_frame_offset"] = cumulative_offset
+                    if clip_params.get("video_guide"):
+                        clip_params["video_frame_offset"] = (
+                            multi_clip_video_origin_frame
+                            + cumulative_offset - multi_clip_audio_origin_frame
+                        )
                     cumulative_offset += clip_frames - trim_tail  # advance by post-trim frames for audio sync
                     total_trimmed_frames += trim_tail
                     clip_params["multi_clip_info"] = {
@@ -28438,6 +29613,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     tail_params["video_length"] = tail_frames
                     tail_params["trim_tail_frames"] = 0
                     tail_params["audio_frame_offset"] = cumulative_offset
+                    if tail_params.get("video_guide"):
+                        tail_params["video_frame_offset"] = (
+                            multi_clip_video_origin_frame
+                            + cumulative_offset - multi_clip_audio_origin_frame
+                        )
                     tail_params["multi_clip_info"] = {
                         "group_id": group_id,
                         "index": clip_count,
@@ -28486,6 +29666,23 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     "params": raw_params,
                     "plugin_data": {},
                 }]
+
+            # Keep each child's attachment paths before WGP replaces image
+            # filenames with PIL objects and adds its live state to params.
+            # This small sidecar-only snapshot is never a generation input.
+            preparse_params_by_task_id = {}
+            for manifest_item in manifest:
+                if not isinstance(manifest_item, dict):
+                    continue
+                manifest_params = manifest_item.get("params")
+                if not isinstance(manifest_params, dict):
+                    continue
+                manifest_task_id = manifest_item.get("id")
+                if manifest_task_id is None:
+                    continue
+                preparse_params_by_task_id[str(manifest_task_id)] = (
+                    _generation_sidecar_params(manifest_params)
+                )
 
             queue, error = wgp._parse_task_manifest(manifest, state, os.getcwd())
 
@@ -28540,9 +29737,13 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             join_output_file = None
             active_generation_seconds_by_output: dict[str, int] = {}
             model_metadata_by_output: dict[str, dict] = {}
+            processing_by_output: dict[str, dict] = {}
             active_generation_seconds_by_task: dict[int, int] = {}
             multi_window_timing_by_output: dict[str, dict] = {}
             multi_window_timing_by_task: dict[int, dict] = {}
+            effective_params_by_output: dict[str, dict] = {}
+            effective_params_by_clip: dict[int, dict] = {}
+            effective_clip_index_by_output: dict[str, int] = {}
 
             # Video renders can contain differently-sized tasks and internal
             # sliding windows. Learn their timing from the live sampler
@@ -28729,6 +29930,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     sidecar_params["temporal_upsampling"] = pp_media_temporal
                 sidecar = {
                     "params": sidecar_params,
+                    "performance_plan": job.get("performance_plan"),
                     "upload_filenames": upload_filenames,
                     "generation_mode": job["params"].get("generation_mode"),
                     "job_id": job_id,
@@ -28741,17 +29943,74 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 if dpid:
                     sidecar["director_pipeline_id"] = dpid
                 clip_index_by_filename = {
-                    filename: index
+                    os.path.basename(filename): index
                     for index, filename in clip_output_files.items()
+                    if isinstance(filename, str) and filename
                 }
                 for fname in file_names:
                     ext = os.path.splitext(fname)[1].lower()
                     if ext not in GENERATED_MEDIA_EXTENSIONS:
                         continue
                     file_sidecar = dict(sidecar)
-                    file_sidecar["params"] = sidecar_params.copy()
+                    basename = os.path.basename(fname)
+                    clip_index = clip_index_by_filename.get(basename)
+                    if clip_index is None:
+                        clip_index = effective_clip_index_by_output.get(
+                            basename,
+                        )
+                    explicit_director_clip_index = job["params"].get(
+                        "_director_clip_index"
+                    )
+                    if clip_index is None and isinstance(
+                        explicit_director_clip_index, int
+                    ) and not isinstance(explicit_director_clip_index, bool):
+                        if explicit_director_clip_index >= 0:
+                            clip_index = explicit_director_clip_index
+                    is_joined = bool(
+                        join_output_file
+                        and basename == os.path.basename(join_output_file)
+                    )
+                    child_params = (
+                        None if not dpid or is_joined else (
+                            effective_params_by_output.get(basename)
+                            or effective_params_by_clip.get(clip_index)
+                            or (
+                                job["params"]
+                                if isinstance(explicit_director_clip_index, int)
+                                and not isinstance(
+                                    explicit_director_clip_index, bool,
+                                )
+                                else None
+                            )
+                        )
+                    )
+                    output_params = (
+                        _generation_sidecar_params(child_params)
+                        if isinstance(child_params, dict)
+                        else sidecar_params.copy()
+                    )
+                    # These settings are stripped before generation and
+                    # applied afterward, so preserve them per output too.
+                    if pp_film_grain_intensity > 0:
+                        output_params["film_grain_intensity"] = (
+                            pp_film_grain_intensity
+                        )
+                        output_params["film_grain_saturation"] = (
+                            pp_film_grain_saturation
+                        )
+                    if pp_spatial_upsampling:
+                        output_params["spatial_upsampling"] = (
+                            pp_spatial_upsampling
+                        )
+                    if pp_media_spatial:
+                        output_params["spatial_upsampling"] = pp_media_spatial
+                    if pp_media_temporal:
+                        output_params["temporal_upsampling"] = pp_media_temporal
+                    file_sidecar["params"] = output_params
                     if fname in model_metadata_by_output:
                         file_sidecar["model_details"] = model_metadata_by_output[fname]
+                    if fname in processing_by_output:
+                        file_sidecar["processing"] = processing_by_output[fname]
                     resolved_seed = _extract_output_seed(fname)
                     if resolved_seed is not None:
                         # A request seed of -1 means "choose randomly".  The
@@ -28759,10 +30018,41 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         # store it so Load Settings reproduces a good result,
                         # including after ffmpeg post-processing.
                         file_sidecar["params"]["seed"] = resolved_seed
-                    if fname in clip_index_by_filename:
-                        file_sidecar["director_clip_index"] = (
-                            clip_index_by_filename[fname]
-                        )
+                    if dpid and ext in {".mp4", ".mkv", ".webm", ".mov"}:
+                        file_sidecar["director_clip_settings_version"] = 1
+                        if is_joined:
+                            file_sidecar["director_artifact_kind"] = "joined"
+                            file_sidecar.pop("director_clip_index", None)
+                            file_sidecar.pop(
+                                "director_clip_settings_provenance", None,
+                            )
+                        elif clip_index is not None:
+                            file_sidecar["director_artifact_kind"] = "clip"
+                            file_sidecar["director_clip_index"] = int(
+                                clip_index
+                            )
+                            file_sidecar[
+                                "director_clip_settings_provenance"
+                            ] = (
+                                "per_output_effective_params"
+                                if isinstance(child_params, dict)
+                                else "director_rerun_request_marker"
+                            )
+                            task_params = child_params or job["params"]
+                            file_sidecar["director_clip_timing"] = (
+                                _director_clip_sidecar_timing(
+                                    task_params,
+                                    job.get("params") or {},
+                                    clip_index,
+                                    wgp,
+                                )
+                            )
+                        else:
+                            file_sidecar["director_artifact_kind"] = "unknown"
+                            file_sidecar.pop("director_clip_index", None)
+                            file_sidecar.pop(
+                                "director_clip_settings_provenance", None,
+                            )
                     else:
                         file_sidecar.pop("director_clip_index", None)
                     file_sidecar["output_filename"] = fname
@@ -28956,7 +30246,24 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     print(f"  [SKIP] Task {task_no} failed validation: {reason}")
                     skip_reasons.append(reason)
                     skipped += 1
+                    validation_error = (
+                        f"Task {task_no} failed validation. Check the model's "
+                        "required inputs and settings in the terminal log."
+                    )
+                    update_job(job, error=validation_error, message=validation_error)
                     continue
+
+                preparse_params = preparse_params_by_task_id.get(
+                    str(task.get("id")),
+                )
+                attachment_keys = tuple(
+                    getattr(wgp, "ATTACHMENT_KEYS", ())
+                ) + ("minimax_h3_references", "voice_reference")
+                task_sidecar_params = _generation_sidecar_params(
+                    validated_params,
+                    path_params=preparse_params,
+                    attachment_keys=attachment_keys,
+                )
 
                 gen["prompt_no"] = task_no
                 gen["prompts_max"] = total_tasks
@@ -29124,11 +30431,23 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     elif cmd == "info":
                         print(f"\n  [INFO] {data}")
                         in_status_line = False
+                    elif cmd == "preview_context":
+                        if isinstance(data, dict):
+                            _generation_previews.set_context(job_id, data)
+                    elif cmd == "preview_notice":
+                        _generation_previews.set_notice(job_id, data)
+                    elif cmd == "preview":
+                        _consume_generation_preview(job_id, data, params.get("model_type"))
                     elif cmd == "artifact_metadata":
                         if isinstance(data, dict) and isinstance(data.get("metadata"), dict):
                             for output_path in data.get("outputs") or []:
                                 if isinstance(output_path, str):
                                     model_metadata_by_output[os.path.basename(output_path)] = data["metadata"]
+                    elif cmd == "processing_metadata":
+                        if isinstance(data, dict) and isinstance(data.get("metadata"), dict):
+                            for output_path in data.get("outputs") or []:
+                                if isinstance(output_path, str):
+                                    processing_by_output[os.path.basename(output_path)] = data["metadata"]
                     elif cmd == "generation_time":
                         try:
                             timing_window_seconds = None
@@ -29232,6 +30551,50 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 ):
                     if output_path not in task_files:
                         task_files.append(output_path)
+                task_params_for_sidecar = deepcopy(task_sidecar_params)
+                clip_info_for_sidecar = (
+                    (task.get("params") or {}).get("multi_clip_info")
+                )
+                task_clip_index = None
+                if isinstance(clip_info_for_sidecar, dict):
+                    try:
+                        candidate_index = int(
+                            clip_info_for_sidecar.get("index")
+                        )
+                        if candidate_index >= 0:
+                            task_clip_index = candidate_index
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                if task_clip_index is None:
+                    candidate_index = job["params"].get(
+                        "_director_clip_index"
+                    )
+                    if isinstance(candidate_index, int) and not isinstance(
+                        candidate_index, bool,
+                    ) and candidate_index >= 0:
+                        task_clip_index = candidate_index
+                for output_path in task_files:
+                    if not isinstance(output_path, str) or not output_path:
+                        continue
+                    output_basename = os.path.basename(output_path)
+                    output_ext = os.path.splitext(output_basename)[1].lower()
+                    if (
+                        output_ext not in {".mp4", ".mkv", ".webm", ".mov"}
+                        or "_multiclip" in os.path.splitext(
+                            output_basename
+                        )[0].lower()
+                    ):
+                        continue
+                    effective_params_by_output[output_basename] = (
+                        deepcopy(task_params_for_sidecar)
+                    )
+                    if task_clip_index is not None:
+                        effective_clip_index_by_output[output_basename] = (
+                            task_clip_index
+                        )
+                        effective_params_by_clip[task_clip_index] = (
+                            deepcopy(task_params_for_sidecar)
+                        )
                 if task_generation_time is not None:
                     active_generation_seconds_by_task[
                         task_idx
@@ -29512,16 +30875,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             if skipped > 0:
                 summary += f" ({skipped} skipped)"
             print(summary)
-            # A run where nothing was produced is not a success. The old test
-            # (completed == total_tasks - skipped) is TRUE when every task was
-            # skipped, so a job whose only task failed validation reported
-            # "Done" with no file and no error — the reported symptom was
-            # "generation just stops and nothing happens".
-            success = (
-                not cancelled
-                and completed == (total_tasks - skipped)
-                and (completed > 0 or total_tasks == 0)
-            )
+            # A skipped task is a failed part of the requested generation,
+            # including the all-skipped case (which previously compared 0 == 0).
+            success = not cancelled and total_tasks > 0 and completed == total_tasks
             # De-duplicated: a multi-clip job hits the same reason per clip.
             skip_reason = "; ".join(dict.fromkeys(skip_reasons))
 
@@ -29570,6 +30926,15 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
 
             if cancelled or is_cancel_requested(job):
                 return False
+
+            if not new_files:
+                success = False
+                if not job.get("error"):
+                    output_error = (
+                        "Generation produced no output. Check the model's required "
+                        "inputs and the terminal log before retrying."
+                    )
+                    update_job(job, error=output_error, message=output_error)
 
             if os.path.isdir(out_dir):
                 # Post-generation outpaint cleanup: combines two operations
@@ -30021,10 +31386,18 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             update_job(job, phase=phase, message=phase, step=int(step or 0),
                                        total_steps=int(total or 0))
                         try:
+                            from services.media_info import probe_media, processing_record
+                            before_processing = probe_media(video_path)
+                            finishing_started = time.monotonic()
                             process_video(video_path, temporary, spatial=pp_media_spatial,
                                 temporal=pp_media_temporal, options=pp_media_options,
                                 abort=lambda: is_cancel_requested(job), progress=media_progress)
                             os.replace(temporary, video_path)
+                            processing_by_output[fname] = processing_record(
+                                spatial=pp_media_spatial, temporal=pp_media_temporal,
+                                before=before_processing, after=probe_media(video_path),
+                                elapsed=time.monotonic() - finishing_started,
+                                completed_at=time.time(), options=pp_media_options)
                         finally:
                             if os.path.isfile(temporary):
                                 os.remove(temporary)
@@ -30050,7 +31423,14 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             ):
                                 return False
                             print(f"  [Upscale] Applying {pp_spatial_upsampling} to {fname}")
+                            from services.media_info import probe_media, processing_record
+                            before_processing = probe_media(video_path)
+                            finishing_started = time.monotonic()
                             _apply_spatial_upsampling_to_file(video_path, pp_spatial_upsampling, job=job)
+                            processing_by_output[fname] = processing_record(
+                                spatial=pp_spatial_upsampling, before=before_processing,
+                                after=probe_media(video_path), elapsed=time.monotonic() - finishing_started,
+                                completed_at=time.time())
                             print(f"  [Upscale] Done: {fname}")
                         except Exception as up_err:
                             print(f"  [Upscale] Warning: failed on {fname} (keeping original): {up_err}")
@@ -30153,6 +31533,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 if not defer_output_publication:
                     _write_output_sidecars(new_files)
 
+            performance_completed = bool(success)
             if success and not finalize:
                 deferred_updates = {}
                 if defer_output_publication:
@@ -30222,9 +31603,15 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
         finally:
             if abort_state is not None:
                 unregister_abort_state(job_id, _active_gen_states, abort_state)
+            _generation_previews.clear(job_id)
+            _finish_per_job_performance(job, performance_monitor, performance_completed)
             # Restore the base coefficient and transformer budget so the
             # next job starts with its own memory plan.
             _restore_base_coefficient()
+            # Return freed CPU blocks after this Studio job; live model tensors
+            # remain available for the next job. Never clear between its windows.
+            from shared.cuda_memory import release_ram_cache
+            release_ram_cache()
             # If no other jobs are running, sync save_path to the current active
             # workspace (which may have changed while this job was running).
             if not _active_gen_states:
@@ -31079,6 +32466,20 @@ def _job_eta_response_fields(job_snapshot: dict) -> dict:
     return result
 
 
+def _director_job_response_fields(job_snapshot: dict) -> dict:
+    """Expose child ownership without leaking private generation parameters."""
+    params = job_snapshot.get("params")
+    params = params if isinstance(params, dict) else {}
+    pipeline_id = params.get("_director_pipeline_id")
+    pipeline_id = pipeline_id.strip() if isinstance(pipeline_id, str) else ""
+    return {
+        "director_pipeline_id": pipeline_id or None,
+        "director_detached_operation": bool(
+            pipeline_id and params.get("_director_detached_operation") is True
+        ),
+    }
+
+
 @api.get("/api/v1/status/{job_id}")
 def get_status(job_id: str):
     """Get generation job status."""
@@ -31105,13 +32506,28 @@ def get_status(job_id: str):
         # Present only on failed jobs that look like CUDA OOMs. UI
         # renders the OOM recovery banner when this is non-null.
         "oom_info": j.get("oom_info"),
+        "performance_plan": j.get("performance_plan"),
+        "performance_measurements": j.get("performance_measurements"),
         # Automatic multi-window plans may be produced after submission, once
         # the queued job owns the generation slot. Publish them through normal
         # polling so the placeholder can show the exact prompts being used.
         "h3_window_plan": j.get("h3_window_plan") or params.get("h3_window_plan"),
         "ltx_window_plan": j.get("ltx_window_plan"),
+        **_director_job_response_fields(j),
+        **_generation_previews.fields(j),
         **_job_eta_response_fields(j),
     }
+
+
+@api.get("/api/v1/jobs/{job_id}/preview/{revision}")
+def get_generation_preview(job_id: str, revision: int, request: Request):
+    job = _jobs.get(job_id)
+    if not job or job.get("status") != "running" or is_cancel_requested(job):
+        raise HTTPException(status_code=404, detail="Preview is no longer available")
+    media = _generation_previews.get(job_id, revision)
+    if media is None:
+        raise HTTPException(status_code=404, detail="Preview is no longer available")
+    return preview_response(media, request.headers.get("range"), request.headers.get("if-none-match"))
 
 
 @api.get("/api/v1/jobs/{job_id}/enhancement")
@@ -31165,6 +32581,14 @@ async def retry_enhanced_job(job_id: str, request: Request):
             # multi-window prompts; no hidden AI pass or silent fallback.
             record.update(state="complete", prepared=manual_prepared, error=None,
                           enhanced_prompt=record["original_prompt"], warnings=["Generate as written was selected."])
+        if action in {"retry", "refresh"} and record.get("state") != "complete":
+            # Apply the current repair preferences to this explicitly requested
+            # attempt while retaining its original writer and source settings.
+            current_settings = _enhancement_settings_snapshot()
+            record.setdefault("settings", {}).update(
+                enhance_fidelity_retries=current_settings.get("enhance_fidelity_retries", 1),
+                enhance_fidelity_auto_continue=current_settings.get("enhance_fidelity_auto_continue", False),
+            )
         new_id = uuid.uuid4().hex[:8]
         job = {"id": new_id, "status": "queued", "show_in_gallery": True,
                "progress": 0, "step": 0, "total_steps": 0, "phase": "", "message": "Waiting",
@@ -31321,7 +32745,11 @@ def list_jobs():
                 "error": j["error"],
                 "enhancement": public_enhancement(j.get("enhancement"), summary=True),
                 "oom_info": j.get("oom_info"),
+                "performance_plan": j.get("performance_plan"),
+                "performance_measurements": j.get("performance_measurements"),
                 "created_at": j.get("created_at", 0),
+                **_director_job_response_fields(j),
+                **_generation_previews.fields(j),
                 **_job_eta_response_fields(j),
                 # Lets a refreshed browser restore the exact H3 prompts that
                 # are already driving an in-flight sliding-window job. This is
@@ -31418,7 +32846,8 @@ def _gallery_directory(workspace: str = "", *, writable: bool = False) -> str:
 @api.get("/api/v1/outputs")
 def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False,
                  multiclip_only: bool = False, search: str = "", workspace: str = "",
-                 media_filter: str = "all", cursor: str = ""):
+                 media_filter: str = "all", cursor: str = "",
+                 group_director_clips: bool = False, director_pipeline_id: str = ""):
     """Browse generated media without changing the generation destination.
 
     __all__ includes the default output folder and every named workspace.
@@ -31435,22 +32864,14 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False,
         return gallery_library.list(folders, favorites=_load_favorites, limit=limit,
                                     offset=offset, search=search, media_filter=media_filter,
                                     favorites_only=favorites_only, multiclip_only=multiclip_only,
-                                    cursor=cursor)
+                                    cursor=cursor, group_director_clips=group_director_clips,
+                                    director_pipeline_id=director_pipeline_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@api.get("/api/v1/file/{filename:path}")
-def serve_file(filename: str, workspace: str = ""):
-    """Serve an output file. Checks active workspace first, then all workspaces.
-
-    Uses share_delete_file_response so that on Windows the file can be
-    deleted/renamed by the gallery delete button even while the browser
-    is actively streaming it (e.g. mid-video playback). Without share-
-    delete, Python's default open() locks the file for delete and the
-    user has to close the entire app to clean up.
-    """
-    from services.win_safe_files import share_delete_file_response
+def _resolve_gallery_media_file(filename: str, workspace: str = "") -> str:
+    """Resolve gallery media with the same folder boundaries as /api/v1/file."""
     save_root = wgp.server_config.get("save_path", "outputs")
     requested_workspace = str(workspace or "").strip()
     if requested_workspace:
@@ -31462,23 +32883,23 @@ def serve_file(filename: str, workspace: str = ""):
                 raise HTTPException(status_code=400, detail="Invalid workspace name")
         filepath = _safe_join(requested_root, filename)
         if filepath and os.path.isfile(filepath):
-            return share_delete_file_response(filepath)
+            return filepath
         raise HTTPException(status_code=404, detail="File not found")
     # 1. Check active workspace
     filepath = _safe_join(_workspace_dir(), filename)
     if filepath and os.path.isfile(filepath):
-        return share_delete_file_response(filepath)
+        return filepath
     # 2. Check base save_path (pre-workspace files)
     filepath = _safe_join(save_root, filename)
     if filepath and os.path.isfile(filepath):
-        return share_delete_file_response(filepath)
+        return filepath
     # 3. Search all workspace subdirectories (Director pipeline may have saved
     #    to a different workspace than the one currently active in the browser)
     if os.path.isdir(save_root):
         for d in os.listdir(save_root):
             candidate = _safe_join(save_root, d, filename)
             if candidate and os.path.isfile(candidate):
-                return share_delete_file_response(candidate)
+                return candidate
     # 4. Uploads folder — the gallery's virtual "Uploads" view lists these
     #    files with the same /api/v1/file/ URLs every other gallery flow
     #    builds (thumbnails, playback, send-to-input). Upload names are
@@ -31486,8 +32907,41 @@ def serve_file(filename: str, workspace: str = ""):
     #    an output name can never be shadowed by an upload.
     filepath = _safe_join(os.path.join(os.getcwd(), "uploads"), filename)
     if filepath and os.path.isfile(filepath):
-        return share_delete_file_response(filepath)
+        return filepath
     raise HTTPException(status_code=404, detail="File not found")
+
+
+@api.get("/api/v1/media-info/{filename:path}")
+def serve_gallery_media_info(filename: str, workspace: str = ""):
+    """Read cached file-header facts without loading browser video or model assets."""
+    from services.media_info import probe_media
+    filepath = _resolve_gallery_media_file(filename, workspace)
+    return probe_media(filepath)
+
+
+@api.get("/api/v1/thumbnail/{filename:path}")
+def serve_gallery_thumbnail(filename: str, workspace: str = "", size: int = 480):
+    """Return an on-demand first-frame JPEG for a local gallery video."""
+    from services.gallery_thumbnails import get_video_poster, SUPPORTED_POSTER_SIZES
+    if size not in SUPPORTED_POSTER_SIZES:
+        raise HTTPException(status_code=400, detail="Unsupported thumbnail size")
+    filepath = _resolve_gallery_media_file(filename, workspace)
+    poster = get_video_poster(filepath, size=size)
+    if poster is None:
+        raise HTTPException(status_code=404, detail="Thumbnail not available")
+    return FileResponse(
+        poster,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=60, must-revalidate"},
+    )
+
+
+@api.get("/api/v1/file/{filename:path}")
+def serve_file(filename: str, workspace: str = ""):
+    """Serve local gallery media, keeping Windows delete/rename sharing."""
+    from services.win_safe_files import share_delete_file_response
+    filepath = _resolve_gallery_media_file(filename, workspace)
+    return share_delete_file_response(filepath)
 
 
 @api.get("/api/v1/outputs/{name}/metadata")
@@ -31497,6 +32951,29 @@ def get_output_metadata(name: str, workspace: str = ""):
     filepath = _safe_join(out_dir, name)
     if filepath is None or not os.path.isfile(filepath):
         raise HTTPException(status_code=404, detail="Output file not found")
+
+    from services.media_info import enrich_metadata
+
+    def _with_file_details(metadata):
+        return enrich_metadata(filepath, metadata,
+            source_roots=(out_dir, os.path.join(os.getcwd(), "uploads")))
+
+    def _director_restore_failure(metadata):
+        params = metadata.get("params") if isinstance(metadata, dict) else None
+        params = params if isinstance(params, dict) else {}
+        if not (
+            (metadata.get("director_pipeline_id") if isinstance(metadata, dict) else None)
+            or params.get("_director_pipeline_id")
+        ):
+            return metadata
+        metadata["director_artifact_kind"] = "unknown"
+        metadata["director_clip_settings_version"] = 1
+        metadata["director_clip_settings_error"] = (
+            "Director clip settings could not be reconstructed safely. "
+            "Open the Director pipeline to inspect the saved clip and assets."
+        )
+        metadata["params"] = None
+        return metadata
 
     # Helper: read embedded metadata from the media file
     def _read_embedded():
@@ -31518,12 +32995,22 @@ def get_output_metadata(name: str, workspace: str = ""):
     # Strategy 1: Read sidecar .meta.json
     meta_path = os.path.join(out_dir, os.path.splitext(name)[0] + ".meta.json")
     if os.path.isfile(meta_path):
+        sidecar = None
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 sidecar = json.load(f)
+        except Exception:
+            sidecar = None
+        if isinstance(sidecar, dict):
+            # An upload date sidecar must not conceal generation metadata
+            # already embedded in an imported image, video or audio file.
+            if "params" not in sidecar:
+                imported_params = _read_embedded()
+                if isinstance(imported_params, dict):
+                    sidecar["params"] = imported_params
             # Merge actual seed from embedded metadata if sidecar has seed=-1
-            params = sidecar.get("params", {})
-            if params.get("seed", -1) == -1:
+            params = sidecar.get("params") or {}
+            if isinstance(params, dict) and params.get("seed", -1) == -1:
                 embedded = _read_embedded()
                 if embedded and "seed" in embedded:
                     params["seed"] = embedded["seed"]
@@ -31531,16 +33018,39 @@ def get_output_metadata(name: str, workspace: str = ""):
                     resolved_seed = _extract_output_seed(name)
                     if resolved_seed is not None:
                         params["seed"] = resolved_seed
-            return {"source": "sidecar", **sidecar}
-        except Exception:
-            pass
+            try:
+                from services.director_clip_settings import (
+                    enrich_director_output_metadata,
+                )
+                sidecar = enrich_director_output_metadata(
+                    out_dir,
+                    workspace or _get_active_workspace(),
+                    name,
+                    sidecar,
+                )
+            except Exception:
+                sidecar = _director_restore_failure(sidecar)
+            return _with_file_details({"source": "sidecar", **sidecar})
 
     # Strategy 2: Read embedded metadata from media file
     embedded = _read_embedded()
     if embedded:
-        return {"source": "embedded", "params": embedded}
+        metadata = {"source": "embedded", "params": embedded}
+        from services.director_clip_settings import (
+            enrich_director_output_metadata,
+        )
+        try:
+            metadata = enrich_director_output_metadata(
+                out_dir,
+                workspace or _get_active_workspace(),
+                name,
+                metadata,
+            )
+        except Exception:
+            metadata = _director_restore_failure(metadata)
+        return _with_file_details(metadata)
 
-    return {"source": "none", "params": None}
+    return _with_file_details({"source": "none", "params": None})
 
 
 @api.post("/api/v1/outputs/rejoin")
@@ -31916,6 +33426,36 @@ def delete_output(name: str, workspace: str = ""):
     return {"deleted": name}
 
 
+@api.delete("/api/v1/uploads/{name}")
+def delete_upload(name: str):
+    """Delete one upload, preserving generated media and active job inputs."""
+    from services.upload_media import upload_path, references_upload, delete_upload_file
+    from services.win_safe_files import safe_delete
+    root = os.path.join(os.getcwd(), "uploads")
+    try:
+        path = upload_path(root, name)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    for job in list(_jobs.values()):
+        state = snapshot_job(job)
+        if state.get("status") in {"held", "queued", "running", "cancelling"} and references_upload(state.get("params"), path):
+            raise HTTPException(409, "This upload is used by an active or queued job. Finish or remove that job before deleting it.")
+    # Director may be planning or waiting for review between its child jobs.
+    # Its queued projects already copy source assets into their own directory.
+    director = sys.modules.get("services.director_pipeline")
+    if director is not None:
+        with director._pipeline_lock:
+            for pipeline in director._pipelines.values():
+                if pipeline.get("status") in director._ACTIVE_PIPELINE_STATUSES and references_upload(pipeline, path):
+                    raise HTTPException(409, "This upload is used by an active Director project. Stop that project before deleting it.")
+    try:
+        return delete_upload_file(root, name, safe_delete=safe_delete)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(409, str(error)) from error
+
+
 @api.post("/api/v1/upload")
 async def upload_image(request: Request, file: UploadFile = File(...), reuse_identical: bool = False):
     """Upload an image or audio/video asset. Image was the original use;
@@ -31994,6 +33534,8 @@ async def upload_image(request: Request, file: UploadFile = File(...), reuse_ide
                         except OSError:
                             pass
 
+    from services.media_info import record_upload
+    record_upload(filepath, file.filename)
     result = {
         "filename": unique_name,
         "path": filepath,
@@ -32328,6 +33870,46 @@ def editor_project_delete(project_id: str, workspace: str = ""):
     if not deleted:
         raise HTTPException(status_code=404, detail="Editor project not found")
     return {"deleted": project_id}
+
+
+@api.post("/api/v1/media/trim")
+async def gallery_media_trim(request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError) as error:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON.") from error
+    if not isinstance(body, dict) or not isinstance(body.get("asset"), dict):
+        raise HTTPException(status_code=400, detail="Asset must be an object.")
+    asset = body["asset"]
+    workspace = asset.get("workspace") or _get_active_workspace()
+    from services.gallery_media_trim import (
+        GalleryMediaTrimBusy,
+        GalleryMediaTrimError,
+        GalleryMediaTrimTimeout,
+        GalleryMediaTrimUnavailable,
+        trim_gallery_media,
+    )
+
+    try:
+        return await asyncio.to_thread(
+            trim_gallery_media,
+            asset,
+            body.get("start_time"),
+            body.get("end_time"),
+            save_root=_editor_save_root(),
+            workspace=workspace,
+            uploads_root=_editor_uploads_root(),
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except GalleryMediaTrimBusy as error:
+        raise HTTPException(status_code=429, detail=str(error)) from error
+    except GalleryMediaTrimTimeout as error:
+        raise HTTPException(status_code=504, detail=str(error)) from error
+    except GalleryMediaTrimUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except GalleryMediaTrimError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @api.post("/api/v1/editor/media/probe")

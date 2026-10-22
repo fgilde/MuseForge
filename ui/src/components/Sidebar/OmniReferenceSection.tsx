@@ -8,6 +8,7 @@ import { ReferenceCharacterPicker } from '../Characters/ReferenceCharacterPicker
 import { characterDisplayName } from '../../lib/characters'
 import { CharacterToolbarItem, SidebarDialog } from './SidebarPanels'
 import { MediaAddTile, MediaInputCard } from './MediaInputCard'
+import { GalleryInput } from '../shared/GalleryInput'
 import type { MiniMaxH3AudioIntent, MiniMaxH3Reference, MiniMaxH3ReferenceType, ModelOptions, SavedOmniCharacter } from '../../types'
 
 const IMAGE_RE = /\.(png|jpe?g|webp|bmp|tiff?)$/i
@@ -15,6 +16,12 @@ const VIDEO_RE = /\.(mp4|mov|mkv|webm|avi|m4v)$/i
 const AUDIO_RE = /\.(wav|mp3|flac|ogg|m4a|aac)$/i
 const EMPTY_REFERENCES: MiniMaxH3Reference[] = []
 const CHARACTER_LIBRARY_EXPANDED_KEY = 'maestro-omni-characters-expanded'
+const AUDIO_INTENT_HELP: Record<MiniMaxH3AudioIntent, string> = {
+  voice: 'Reusable vocal identity for new dialogue. It does not set the soundtrack timeline.',
+  drive: 'Preserves the exact soundtrack and sets total duration to its full length.',
+  style: 'Follows the source timeline across windows; later windows receive silence once the clip ends. H3 borrows its sound or music style.',
+  sound: 'Each window gets the same short sample. Describe the effect and when it happens in your prompt. H3 generates matching sound; it does not play or loop the exact waveform or set total duration.',
+}
 
 function mediaType(file: File): MiniMaxH3ReferenceType | null {
   // Prefer a recognized extension. Some iOS document providers expose M4A
@@ -69,7 +76,7 @@ function groupActiveReferences(references: MiniMaxH3Reference[]): ActiveReferenc
   const items: ActiveReferenceItem[] = []
   const characterItems = new Map<string, Extract<ActiveReferenceItem, { kind: 'character' }>>()
   references.forEach((reference, index) => {
-    const characterId = reference.library_character_id?.trim()
+    const characterId = reference.image_intent === 'object' ? undefined : reference.library_character_id?.trim()
     if (!characterId) {
       items.push({ kind: 'reference', reference, index })
       return
@@ -191,7 +198,7 @@ export function OmniReferenceSection({
   )
 
   const addFiles = async (files: File[]) => {
-    if (disabled || uploading || files.length === 0) return
+    if (disabled || uploading || files.length === 0) return false
     setUploading(true)
     setError('')
     try {
@@ -224,13 +231,16 @@ export function OmniReferenceSection({
           has_audio: type === 'video' ? Boolean('has_audio' in uploaded && uploaded.has_audio) : type === 'audio',
           include_audio: type === 'video' ? Boolean('has_audio' in uploaded && uploaded.has_audio) : undefined,
           audio_intent: type === 'audio' ? 'voice' : undefined,
+          follow_timeline: type === 'video' ? true : undefined,
           role: '',
         })
         counts[type] += 1
       }
       update(next)
+      return next.length > references.length
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Reference upload failed.')
+      return false
     } finally {
       setUploading(false)
     }
@@ -250,6 +260,8 @@ export function OmniReferenceSection({
       update(currentReferences().map(item => item.id === reference.id ? {
         ...item, path: uploaded.path, filename: file.name, url: uploaded.url,
         duration_seconds: uploaded.duration_seconds ?? null,
+        source_duration_seconds: undefined,
+        effective_duration_seconds: undefined,
         has_audio: reference.type === 'video' ? Boolean('has_audio' in uploaded && uploaded.has_audio) : reference.type === 'audio',
       } : item))
     } catch (error) { setError(error instanceof Error ? error.message : 'Could not replace reference.') }
@@ -259,7 +271,7 @@ export function OmniReferenceSection({
   const addCharacter = (character: SavedOmniCharacter) => {
     const current = currentReferences()
     const currentCharacterReferences = current.filter(
-      reference => reference.library_character_id === character.id,
+      reference => reference.library_character_id === character.id && reference.image_intent !== 'object',
     )
     const additions: MiniMaxH3Reference[] = []
     if (!currentCharacterReferences.some(reference => reference.type !== 'audio')) additions.push({
@@ -275,6 +287,7 @@ export function OmniReferenceSection({
       image_intent: character.visual.type === 'image' ? 'identity' : undefined,
       remove_background: character.visual.type === 'image' ? false : undefined,
       video_intent: character.visual.type === 'video' ? 'character' : undefined,
+      follow_timeline: character.visual.type === 'video' ? false : undefined,
       duration_seconds: character.visual.duration_seconds ?? null,
       has_audio: character.visual.type === 'video' ? Boolean(character.visual.has_audio) : undefined,
       include_audio: character.visual.type === 'video' ? false : undefined,
@@ -355,7 +368,7 @@ export function OmniReferenceSection({
   }
 
   const removeCharacter = async (character: SavedOmniCharacter) => {
-    if (references.some(reference => reference.library_character_id === character.id)) {
+    if (references.some(reference => reference.library_character_id === character.id && reference.image_intent !== 'object')) {
       setError(`Remove ${characterDisplayName(character.name)} from the current Omni references before deleting it.`)
       return
     }
@@ -466,7 +479,7 @@ export function OmniReferenceSection({
     update(ordered.flatMap(item => item.kind === 'character' ? item.entries.map(entry => entry.reference) : [item.reference]))
   }
   const addedCharacterIds = characters.filter(character => {
-    const bound = references.filter(reference => reference.library_character_id === character.id)
+    const bound = references.filter(reference => reference.library_character_id === character.id && reference.image_intent !== 'object')
     return bound.some(reference => reference.type !== 'audio')
       && (!character.voice || bound.some(reference => reference.type === 'audio'))
   }).map(character => character.id)
@@ -483,6 +496,16 @@ export function OmniReferenceSection({
         </div>
         <p className="text-[11px] text-text-muted">{item.entries.map(entry => labels[entry.index]).join(' + ')} · Linked to this saved character</p>
         {visualEntry?.reference.refmod_path && <p className="text-[11px] text-text-muted">Uses the saved H3 RefMod appearance.</p>}
+        {visualEntry?.reference.type === 'video' && !visualEntry.reference.refmod_path && <label
+          className="flex min-h-8 cursor-pointer items-center gap-2 text-[11px]"
+          title={scope === 'studio'
+            ? 'Use the matching video segment in each window. Auto duration follows this timeline unless a music / performance timeline sets the length. Leave off to reuse this character sample.'
+            : 'Use the matching video segment in each window. Leave off to reuse this character sample.'}>
+          <input type="checkbox" disabled={disabled} checked={visualEntry.reference.follow_timeline === true}
+            onChange={event => patchReference(visualEntry.index, { follow_timeline: event.target.checked })}
+            className="h-3.5 w-3.5 accent-accent-blue" />
+          Follow window timeline
+        </label>}
         {visualEntry?.reference.type === 'image' && !visualEntry.reference.refmod_path && <label
           className="flex min-h-8 cursor-pointer items-center gap-2 text-[11px]"
           title="Place the character on neutral white before generation when the portrait background leaks into the scene. Leave off to preserve the original lighting context.">
@@ -494,7 +517,12 @@ export function OmniReferenceSection({
     }
 
     const { reference, index } = item
+    const galleryDisabledReason = disabled ? 'References are currently locked.'
+      : uploading ? 'Uploading a reference…' : undefined
     return <div className="space-y-2">
+      {reference.type === 'audio' && <GalleryInput kind="audio"
+        label={`${labels[index]} replacement`} onFile={file => replaceReference(reference, file)}
+        disabledReason={galleryDisabledReason} />}
       <div className="flex flex-wrap gap-2">
         <label className="min-w-[140px] flex-1 space-y-1 text-[11px] text-text-muted">
           <span>Name</span>
@@ -506,31 +534,53 @@ export function OmniReferenceSection({
           <span>Type</span>
           <select aria-label={`${labels[index]} type`} value={reference.image_intent ?? 'identity'} disabled={disabled}
             onChange={event => patchReference(index, { image_intent: event.target.value as MiniMaxH3Reference['image_intent'] })} className={fieldClass}>
-            <option value="identity">Character / identity</option><option value="scene">Scene</option><option value="composition">Composition</option><option value="style">Style reference</option>
+            <option value="identity">Character / identity</option><option value="scene">Scene</option><option value="composition">Composition</option><option value="style">Style reference</option><option value="object">Object / prop</option>
           </select>
         </label>}
         {reference.type === 'audio' && <label className="min-w-[165px] flex-1 space-y-1 text-[11px] text-text-muted">
           <span>Type</span>
           <select aria-label={`${labels[index]} type`} value={reference.audio_intent ?? 'voice'} disabled={disabled}
             onChange={event => setAudioIntent(index, event.target.value as MiniMaxH3AudioIntent)}
-            title="Voice references preserve identity. Music / performance timeline preserves the exact soundtrack and sets the duration. Style-only borrows musical character without exact audio or timing."
+            title={AUDIO_INTENT_HELP[reference.audio_intent ?? 'voice']}
             className={fieldClass}>
-            <option value="voice">Voice reference</option><option value="drive">Music / performance timeline</option><option value="style">Music / sound style only</option>
+            <option value="voice">Voice reference</option><option value="drive">Music / performance timeline</option><option value="style">Music / sound style only</option><option value="sound">Sound effect reference</option>
           </select>
         </label>}
+        {reference.type === 'audio' && <p className="basis-full min-w-0 text-[11px] leading-relaxed text-text-muted">
+          {AUDIO_INTENT_HELP[reference.audio_intent ?? 'voice']}
+        </p>}
+        {reference.type === 'image' && reference.image_intent === 'object' && <p className="basis-full min-w-0 text-[11px] leading-relaxed text-text-muted">
+          Keeps the object's design, shape, proportions, materials, colors and details. The prompt chooses placement, scale, action and count; the source scene, framing, background and pose are ignored.
+        </p>}
       </div>
-      {reference.type === 'image' && !reference.refmod_path && (reference.image_intent ?? 'identity') === 'identity' && <label
+      {reference.type === 'image' && !reference.refmod_path && ((reference.image_intent ?? 'identity') === 'identity' || reference.image_intent === 'object') && <label
         className="flex min-h-8 cursor-pointer items-center gap-2 text-[11px] text-text-secondary"
-        title="Place the subject on neutral white before generation when the portrait background leaks into the scene. Scene, style and composition references are never altered.">
+        title={`Place the ${reference.image_intent === 'object' ? 'object' : 'subject'} on neutral white before generation when its source background leaks into the scene. Scene, style and composition references are never altered.`}>
         <input type="checkbox" disabled={disabled} checked={reference.remove_background === true}
           onChange={event => patchReference(index, { remove_background: event.target.checked })} className="h-3.5 w-3.5 accent-accent-blue" />
-        Isolate subject background
+        {reference.image_intent === 'object' ? 'Isolate object background' : 'Isolate subject background'}
       </label>}
       {reference.type === 'video' && (reference.has_audio || reference.audio_path) && <label className="flex min-h-8 cursor-pointer items-center gap-2 text-[11px] text-text-secondary">
         <input type="checkbox" disabled={disabled} checked={reference.include_audio !== false}
           onChange={event => patchReference(index, { include_audio: event.target.checked })} className="h-3.5 w-3.5 accent-accent-blue" />
         Include soundtrack
       </label>}
+      {reference.type === 'video' && !reference.refmod_path && <div className="space-y-1">
+        <label className="flex min-h-8 cursor-pointer items-center gap-2 text-[11px] text-text-secondary">
+          <input type="checkbox" disabled={disabled}
+            checked={reference.follow_timeline ?? (!reference.library_character_id && reference.video_intent !== 'character')}
+            onChange={event => patchReference(index, { follow_timeline: event.target.checked })}
+            className="h-3.5 w-3.5 accent-accent-blue" />
+          Follow window timeline
+        </label>
+        <p className="text-[10px] leading-relaxed text-text-muted">
+          Each window uses the matching part of this video and its soundtrack. Turn off to reuse the same sample. Past the end, the final frame is held and audio is silent.
+          {scope === 'studio' && ' Auto duration follows the longest timeline video, unless a music / performance timeline sets the length. Choose a time or window count to keep a manual runtime.'}
+        </p>
+      </div>}
+      {reference.type === 'video' && <GalleryInput kind="audio"
+        label={`Audio for ${labels[index]}`} onFile={file => attachAudio(reference.id, file)}
+        disabledReason={galleryDisabledReason} />}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-secondary">
         <label className="inline-flex min-h-8 cursor-pointer items-center hover:text-text-primary focus-within:underline">
           Replace {reference.type}
@@ -556,6 +606,13 @@ export function OmniReferenceSection({
 
   return (
     <section className="space-y-2">
+      {(['image', 'video', 'audio'] as const).map(kind => <GalleryInput key={kind} kind={kind}
+        label={`${scope === 'director' ? 'Director ' : ''}reference ${kind}`}
+        getImages={() => references.filter(ref => ref.type === 'image').map(ref => ({url: ref.url || api.getFileUrl(ref.filename), name: ref.character_name || ref.filename}))}
+        onFile={file => addFiles([file])}
+        disabledReason={disabled ? 'References are currently locked.' : uploading ? 'Uploading a reference…'
+          : references.length >= limits.total || references.filter(item => item.type === kind).length >= limits[kind]
+            ? `${kind === 'image' ? 'Image' : kind === 'video' ? 'Video' : 'Audio'} reference limit reached.` : undefined} />)}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <label className="text-[11px] text-text-muted uppercase tracking-wider">
@@ -610,6 +667,10 @@ export function OmniReferenceSection({
               </button>
             </div>
 
+            {characterFormOpen && libraryOpen && <GalleryInput kind="audio"
+              label={`${scope === 'director' ? 'Director ' : ''}saved character voice`}
+              onFile={file => setCharacterVoice(file)}
+              disabledReason={disabled ? 'References are currently locked.' : savingCharacter ? 'Saving character…' : undefined} />}
             {characterFormOpen && (
               <div className="rounded-md border border-border bg-bg-primary p-2 space-y-1.5">
                 <input
@@ -658,7 +719,7 @@ export function OmniReferenceSection({
                   </label>
                 )}
                 <p className="text-[8px] leading-relaxed text-text-muted">
-                  Videos remain saved at full length. For each run MuseForge makes H3-ready cached copies: 2–15 seconds each and 15 seconds total (three 10s clips become 5s each).
+                  Saved character samples are reused across windows. Originals stay at full length; H3 uses up to 15 seconds of video references per window.
                 </p>
                 <button
                   type="button"
@@ -760,7 +821,7 @@ export function OmniReferenceSection({
 
       {references.filter(reference => reference.type === 'video').reduce((sum, reference) => sum + (Number(reference.duration_seconds) || 0), 0) > 15 && (
         <p className="text-[8px] leading-relaxed text-text-muted">
-          These video references exceed H3's 15-second combined limit. MuseForge will balance cached trimmed copies across them; your originals and saved characters remain unchanged.
+          H3 accepts 15 seconds of video references per window, shared across videos. Timeline references advance with each window; MuseForge balances the reference budget and keeps your originals.
         </p>
       )}
 

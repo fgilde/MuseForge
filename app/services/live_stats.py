@@ -57,8 +57,10 @@ def get_live_stats() -> dict:
         ram_percent = float(vm.percent)
         ram_used_gb = vm.used / (1024 ** 3)
         ram_total_gb = vm.total / (1024 ** 3)
+        ram_available_gb = vm.available / (1024 ** 3)
     except Exception:
         ram_percent = ram_used_gb = ram_total_gb = 0.0
+        ram_available_gb = None
 
     # ---- GPU (NVIDIA / NVML) -----------------------------------------
     gpu_available = False
@@ -77,19 +79,11 @@ def get_live_stats() -> dict:
             # GPU asleep / driver transient — report unavailable this tick.
             gpu_available = False
 
-    # NVML util.gpu is a coarse, sampled compute number that under-reports for
-    # diffusion (matches nvidia-smi, ~40% under load). On Windows prefer the
-    # 3D-engine performance counter Task Manager reads, which tracks real
-    # engine-busy time; keep the NVML value as compute_percent for the tooltip.
+    # Report the same device's compute activity and memory usage. Windows'
+    # 3D-engine counter includes graphics work across adapters and samples
+    # since the previous caller; it is not a reliable CUDA-generation gauge.
+    # Keep compute_percent for clients that already consume that field.
     gpu_compute_percent = gpu_percent
-    if gpu_available:
-        try:
-            from services.gpu_engine_win import get_gpu_3d_utilization
-            win3d = get_gpu_3d_utilization()
-            if win3d is not None:
-                gpu_percent = float(win3d)
-        except Exception:
-            pass
 
     return {
         "cpu": {
@@ -99,6 +93,7 @@ def get_live_stats() -> dict:
             "percent": round(ram_percent, 1),
             "used_gb": round(ram_used_gb, 2),
             "total_gb": round(ram_total_gb, 2),
+            "available_gb": round(ram_available_gb, 2) if ram_available_gb is not None else None,
         },
         "gpu": {
             "available": gpu_available,

@@ -2,11 +2,13 @@ import os, sys
 os.environ["GRADIO_LANG"] = "en"
 # # os.environ.pop("TORCH_LOGS", None)  # make sure no env var is suppressing/overriding
 # os.environ["TORCH_LOGS"]= "recompiles"
-import torch._logging as tlog
-# tlog.set_logs(recompiles=True, guards=True, graph_breaks=True)    
 p = os.path.dirname(os.path.abspath(__file__))
 if p not in sys.path:
     sys.path.insert(0, p)
+from shared.cuda_memory import apply_startup_settings, write_vram_debug_report
+apply_startup_settings(sys.argv, "wgp_config.json")
+import torch._logging as tlog
+# tlog.set_logs(recompiles=True, guards=True, graph_breaks=True)
 # Ensure plugin-side `import wgp` resolves to this live module instance.
 if sys.modules.get("wgp") is not sys.modules.get(__name__):
     sys.modules["wgp"] = sys.modules[__name__]
@@ -24,7 +26,11 @@ import warnings
 warnings.filterwarnings('ignore', message='Failed to find.*', module='triton')
 from services.optional_acceleration import prepare_optional_flash_attention
 prepare_optional_flash_attention()
+import mmgp
 from mmgp import offload, safetensors2, profile_type , quant_router
+from functools import partial
+from shared.utils.default_device import call_with_default_device
+from shared.utils.power_throttling import prevent_power_throttling
 try:
     import triton
 except ImportError:
@@ -106,7 +112,7 @@ AUTOSAVE_ERROR_FILENAME = "error_queue.zip"
 AUTOSAVE_TEMPLATE_PATH = AUTOSAVE_FILENAME
 CONFIG_FILENAME = "wgp_config.json"
 PROMPT_VARS_MAX = 10
-target_mmgp_version = "3.7.12"
+target_mmgp_version = "4.0.0"
 WanGP_version = "10.9875"
 settings_version = 2.58
 max_source_video_frames = 15000  # raised to support frame injection in long sliding-window videos (e.g. 9 windows × 20s × 25fps = 4500 frames)
@@ -117,14 +123,14 @@ CUSTOM_SETTINGS_PER_ROW = 2
 CUSTOM_SETTING_TYPES = {"int", "float", "text"}
 lm_decoder_engine = ""
 enable_int8_kernels = 0
+_loaded_int8_setting = None
 # All media attachment keys for queue save/load
 ATTACHMENT_KEYS = ["image_start", "image_end", "image_refs", "image_guide", "image_mask",
                    "video_guide",  "video_mask", "video_source", "video_end", "audio_guide", "audio_guide2", "audio_guide3", "audio_guide4", "audio_guide5", "audio_guide6", "audio_conditioning_guide", "audio_source", "custom_guide"]
 
-from importlib.metadata import version
-mmgp_version = version("mmgp")
+mmgp_version = getattr(mmgp, "__version__", "unknown")
 if mmgp_version != target_mmgp_version:
-    print(f"Incorrect version of mmgp ({mmgp_version}), version {target_mmgp_version} is needed. Please upgrade with the command 'pip install -r requirements.txt'")
+    print(f"Incorrect version of mmgp ({mmgp_version}), bundled version {target_mmgp_version} is needed. Please update Maestro's source and requirements.")
     exit()
 lock = threading.Lock()
 current_task_id = None
@@ -144,6 +150,7 @@ _HANDLER_MODULES = [
     "shared.qtypes.nunchaku_int4",
     "shared.qtypes.nunchaku_fp4",
     "shared.qtypes.int8_convrot",
+    "shared.qtypes.asym_w4a8_int8",
     "shared.qtypes.gguf",
 ]
 quant_router.unregister_handler(".fp8_quanto_bridge")
@@ -151,7 +158,8 @@ for handler in _HANDLER_MODULES:
     quant_router.register_handler(handler)
 from shared.qtypes import gguf as gguf_handler
 quant_router.register_file_extension("gguf", gguf_handler)
-from shared.kernels.quanto_int8_inject import maybe_enable_quanto_int8_kernel, disable_quanto_int8_kernel
+from shared.kernels import int8_backend
+from shared.kernels import kernel_policy
 
 # All heavyweight runtime modules are already imported at this point. Report
 # their real ABI/kernel status in this same process so startup diagnostics add
@@ -163,17 +171,21 @@ except Exception as _runtime_preflight_error:
     print(f"[Runtime] Preflight skipped: {_runtime_preflight_error}")
 
 
-def apply_int8_kernel_setting(enabled: int, notify_disabled = False) -> bool:
-    global enable_int8_kernels, verbose_level
-    try:
-        enable_int8_kernels = 1 if int(enabled) == 1 else 0
-    except Exception:
-        enable_int8_kernels = 0
-    os.environ["WAN2GP_QUANTO_INT8_KERNEL"] = "1" if enable_int8_kernels == 1 else "0"
-    if enable_int8_kernels == 1:
-        return bool(maybe_enable_quanto_int8_kernel(verbose_level=verbose_level))
-    disable_quanto_int8_kernel(notify_disabled)
-    return False
+def apply_int8_kernel_setting(enabled, notify_disabled=False) -> bool:
+    global enable_int8_kernels, verbose_level, _loaded_int8_setting
+    # Classic callers still pass the legacy 0/1 toggle. Preserve its Triton
+    # selection; new settings can explicitly opt into Kitchen or Auto.
+    if isinstance(enabled, str) and enabled in ("disabled", "auto", "triton", "kitchen"):
+        selection = enabled
+    else:
+        try:
+            selection = "triton" if int(enabled) == 1 else "disabled"
+        except (TypeError, ValueError):
+            selection = "disabled"
+    enable_int8_kernels = int(selection != "disabled")
+    result = bool(int8_backend.configure(selection, verbose_level))
+    _loaded_int8_setting = selection
+    return result
 
 def set_wgp_global(variable_name: str, new_value: any) -> str:
     if variable_name not in globals():
@@ -208,6 +220,8 @@ def release_model():
         previous_offload = None
         gc.collect()
         offload.flush_torch_caches()
+        from shared.cuda_memory import release_ram_cache
+        release_ram_cache()
 
 
 def release_generation_memory():
@@ -793,6 +807,12 @@ def clear_custom_setting_slots(inputs):
     for idx in range(CUSTOM_SETTINGS_MAX):
         inputs.pop(get_custom_setting_key(idx), None)
 
+def apply_model_acceleration_profile(model_type, settings):
+    """Apply an atomic model recipe before validation and adapter loading."""
+    handler = get_model_handler(model_type)
+    apply_profile = getattr(handler, "apply_acceleration_profile", None)
+    return apply_profile(dict(settings), model_def=get_model_def(model_type)) if apply_profile else settings
+
 def validate_settings(state, model_type, single_prompt, inputs):
     def ret():
         return None, None, None, None
@@ -801,6 +821,11 @@ def validate_settings(state, model_type, single_prompt, inputs):
     from models.minimax_h3.duration import apply_h3_duration_override
     model_def = apply_h3_duration_override(inputs, model_def)
     model_handler = get_model_handler(model_type)
+    try:
+        inputs.update(apply_model_acceleration_profile(model_type, inputs))
+    except ValueError as exc:
+        gr.Info(str(exc))
+        return ret()
     image_outputs = inputs["image_mode"] > 0
     any_steps_skipping = (
         model_def.get("tea_cache", False)
@@ -816,7 +841,9 @@ def validate_settings(state, model_type, single_prompt, inputs):
         gr.Info("Adaptive Progressive Guidance and Classifier Free Guidance Star can not be set at the same time")
         return ret()
     prompt = inputs["prompt"]
-    prompt, errors = prompt_parser.process_template(prompt, keep_empty_lines=model_def.get("preserve_empty_prompt_lines", False))
+    errors = ""
+    if not model_def.get("skip_prompt_template", False):
+        prompt, errors = prompt_parser.process_template(prompt, keep_empty_lines=model_def.get("preserve_empty_prompt_lines", False))
     if len(errors) > 0:
         gr.Info("Error processing prompt template: " + errors)
         return ret()
@@ -857,7 +884,9 @@ def validate_settings(state, model_type, single_prompt, inputs):
         _val_refs = inputs.get("image_refs")
         _val_start = inputs.get("image_start")
         _val_ref_path = None
-        if _val_refs:
+        if image_outputs and "V" in str(inputs.get("video_prompt_type") or "") and inputs.get("image_guide") is not None:
+            _val_ref_path = inputs["image_guide"]
+        elif _val_refs:
             _val_ref_path = _val_refs[0] if isinstance(_val_refs, list) else _val_refs
             if isinstance(_val_ref_path, (list, tuple)):
                 _val_ref_path = _val_ref_path[0] if _val_ref_path else None
@@ -993,7 +1022,13 @@ def validate_settings(state, model_type, single_prompt, inputs):
             return ret()
 
     if not model_def.get("motion_amplitude", False): motion_amplitude = 1.
-    if "vae" in spatial_upsampling:
+    from services.native_vae import native_vae_selection
+    try:
+        native_vae_selection(model_def, spatial_upsampling, image_mode)
+    except ValueError as error:
+        gr.Info(str(error))
+        return ret()
+    if "vae" in spatial_upsampling and not spatial_upsampling.startswith("h3_vae"):
         if image_mode not in model_def.get("vae_upsampler", []):
             gr.Info(f"VAE Spatial Upsampling is not available for {medium}")
             return ret()
@@ -2158,7 +2193,7 @@ def update_generation_status(html_content):
     if(html_content):
         return gr.update(value=html_content)
 
-family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.qwen21.qwen21_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.yue2.yue2_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler"]
+family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.flux3.flux3_handler", "models.moss_image.moss_image_handler", "models.qwen.qwen_handler", "models.qwen21.qwen21_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.yue2.yue2_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler", "models.TTS.fish_audio.fish_audio_handler"]
 DEFAULT_LORA_ROOT = "loras"
 
 def register_family_lora_args(parser, lora_root):
@@ -2376,6 +2411,14 @@ def _parse_args():
         default=0,
         help="percent of RAM allocated to Reserved RAM"
     )
+    parser.add_argument("--vram-allocator", choices=["default", "vmm", "vmm_spill"], default=None,
+                        help="VRAM allocator selected before CUDA starts; overrides the saved setting")
+    parser.add_argument("--ram-allocator", choices=["default", "mmgp"], default=None,
+                        help="CPU tensor allocator selected at startup; overrides the saved setting")
+    parser.add_argument("--vram-debug", type=float, default=0, metavar="MIN_MB",
+                        help="Record MMGP allocator allocations of this size or larger")
+    parser.add_argument("--prevent-power-throttling", action=argparse.BooleanOptionalAction, default=True,
+                        help="Keep this process at full CPU speed on Windows while it is in the background")
 
 
 
@@ -2674,6 +2717,7 @@ if not Path(config_load_filename).is_file():
         "metadata_type": "metadata",
         "boost" : 1,
         "enable_int8_kernels": 1,
+        "kernel_precision": "fast",
         "clear_file_list" : 5,
         "enable_4k_resolutions": 0,
         "max_reserved_loras": -1,
@@ -2728,6 +2772,14 @@ else:
     server_config = json.loads(text)
 
 server_config.setdefault("prompt_enhancer_quantization", "quanto_int8")
+from services.generation_preview import DEFAULT_PREVIEW_MODE
+server_config.setdefault("generation_preview", DEFAULT_PREVIEW_MODE)
+from services.memory_settings import apply_memory_defaults
+apply_memory_defaults(server_config)
+from shared import attention_kit
+attention_kit.configure(server_config["attention_head_split"])
+if args.prevent_power_throttling:
+    prevent_power_throttling()
 
 checkpoints_paths = server_config.get("checkpoints_paths", None)
 if checkpoints_paths is None: checkpoints_paths = server_config["checkpoints_paths"] = fl.default_checkpoints_paths
@@ -2820,7 +2872,7 @@ _normalize_profile_defaults(server_config)
 _normalize_output_paths(server_config)
 lm_decoder_engine = server_config.get("lm_decoder_engine", "")
 
-from preprocessing.matanyone.utils.model_assets import migrate_matanyone_install, query_matanyone_download_def
+from preprocessing.matanyone.utils.model_assets import migrate_matanyone_install
 migration_note = migrate_matanyone_install(server_config)
 if migration_note:
     print(migration_note)
@@ -2912,6 +2964,21 @@ def are_model_types_compatible(imported_model_type, current_model_type):
 
 def get_model_def(model_type):
     return models_def.get(model_type, None )
+
+
+def get_runtime_model_def(model_type, runtime_options=None):
+    """Resolve runtime-dependent assets without modifying the shared registry."""
+    model_def = get_model_def(model_type)
+    if not isinstance(model_def, dict):
+        return model_def
+    handler = model_types_handlers.get(get_base_model_type(model_type))
+    resolver = getattr(handler, "resolve_runtime_model_def", None)
+    if resolver is None:
+        return model_def
+    return resolver(dict(model_def), {
+        "transformer_quantization": transformer_quantization,
+        **(runtime_options or {}),
+    })
 
 
 
@@ -3526,7 +3593,10 @@ loaded_profile = force_profile_no = -1
 compile = server_config.get("compile", "")
 boost = server_config.get("boost", 1)
 enable_int8_kernels = server_config.get("enable_int8_kernels", 1)
-apply_int8_kernel_setting(enable_int8_kernels)
+apply_int8_kernel_setting(server_config["int8_kernels"])
+# Optional Kitchen paths follow upstream's precision policy. Keep an explicit
+# strict setting authoritative without changing the independent INT8 toggle.
+kernel_policy.configure(server_config.get("kernel_precision", "fast"))
 vae_config = server_config.get("vae_config", 0)
 if len(args.vae_config) > 0:
     vae_config = int(args.vae_config)
@@ -3978,8 +4048,7 @@ def download_file(url,filename):
 
 RIFE_V4_FILENAME = "rife4.26.pkl"
 RIFE_V3_FILENAME = "flownet.pkl"
-download_shared_done = False
-def download_models(model_filename = None, model_type= None, file_type = 0, submodel_no = 1, force_path = None):
+def download_models(model_filename = None, model_type= None, file_type = 0, submodel_no = 1, force_path = None, VAE_upsampling=None, model_def_override=None):
     def computeList(filename):
         if filename == None:
             return []
@@ -3988,39 +4057,13 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
         return [filename]        
 
 
-    if file_type == 0:
-        shared_def = {
-            "repoId" : "DeepBeepMeep/Wan2.1",
-            "sourceFolderList" : [ "pose", "scribble", "flow", "depth", "wav2vec", "chinese-wav2vec2-base", "roformer", "pyannote", "det_align", "" ],
-            "fileList" : [ ["dw-ll_ucoco_384.onnx", "yolox_l.onnx"],["netG_A_latest.pth"],  ["raft-things.pth"], 
-                        ["depth_anything_v2_vitl.pth","depth_anything_v2_vitb.pth"],
-                        ["config.json", "feature_extractor_config.json", "model.safetensors", "preprocessor_config.json", "special_tokens_map.json", "tokenizer_config.json", "vocab.json"],
-                        ["config.json", "pytorch_model.bin", "preprocessor_config.json"],
-                        ["model_bs_roformer_ep_317_sdr_12.9755.ckpt", "model_bs_roformer_ep_317_sdr_12.9755.yaml", "download_checks.json"],
-                        ["pyannote_model_wespeaker-voxceleb-resnet34-LM.bin", "pytorch_model_segmentation-3.0.bin"], ["detface.pt"], [ RIFE_V3_FILENAME if server_config.get("rife_version", "v3") == "v3" else RIFE_V4_FILENAME  ] ]
-        }
-        process_files_def(**shared_def)
-        process_files_def(**query_matanyone_download_def(server_config))
-
-
-        enhancer_enabled = int(server_config.get("enhancer_enabled", 0) or 0)
-        if enhancer_enabled > 0:
-            from shared.prompt_enhancer import ensure_prompt_enhancer_assets
-
-            ensure_prompt_enhancer_assets(
-                process_files_def,
-                enhancer_enabled=enhancer_enabled,
-                qwen_backend=server_config.get("prompt_enhancer_quantization", "quanto_int8"),
-            )
-
-        download_mmaudio()
-        global download_shared_done
-        download_shared_done = True
-
     if model_filename is None: return
 
     base_model_type = get_base_model_type(model_type)
-    model_def = get_model_def(model_type)
+    model_def = model_def_override if model_def_override is not None else get_runtime_model_def(model_type)
+
+    if file_type == 0:
+        ensure_audio_condition_assets(base_model_type)
     
     any_source = ("source2" if submodel_no ==2 else "source") in model_def
     any_module_source = ("module_source2" if submodel_no ==2 else "module_source") in model_def 
@@ -4037,13 +4080,24 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
             local_model_filename = fl.get_smart_download_location(os.path.basename(model_filename), force_path= force_path)
             url = model_filename
 
-            if not url.startswith("http"):
-                raise Exception(f"Model '{model_filename}' was not found locally and no URL was provided to download it. Please add an URL in the model definition file.")
-            try:
-                download_file(url, local_model_filename)
-            except Exception as e:
-                if os.path.isfile(local_model_filename): os.remove(local_model_filename) 
-                raise Exception(f"'{url}' is invalid for Model '{model_type}' : {str(e)}'")
+            from shared.checkpoint_downloads import download_named_checkpoint, find_named_checkpoint_source
+            named_source = find_named_checkpoint_source(model_def, os.path.basename(model_filename))
+            if named_source is not None:
+                from shared.utils.download import create_progress_hook
+                download_named_checkpoint(
+                    named_source,
+                    local_model_filename,
+                    civitai_api_key=(server_config.get("services") or {}).get("civitai_api_key", ""),
+                    progress_hook=create_progress_hook(os.path.basename(model_filename)),
+                )
+            else:
+                if not url.startswith("http"):
+                    raise Exception(f"Model '{model_filename}' was not found locally and no URL was provided to download it. Please add an URL in the model definition file.")
+                try:
+                    download_file(url, local_model_filename)
+                except Exception as e:
+                    if os.path.isfile(local_model_filename): os.remove(local_model_filename)
+                    raise Exception(f"'{url}' is invalid for Model '{model_type}' : {str(e)}'")
             if file_type!=0: return
 
     for prop, recursive in zip(["preload_URLs", "VAE_URLs"], [True, False]):
@@ -4082,10 +4136,85 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
                 raise Exception(f"Lora URL '{url}' is invalid: {str(e)}'")
             
     if file_type != 0: return            
-    model_files = model_type_handler.query_model_files(computeList, base_model_type, model_def)
+    if VAE_upsampling == "h3_vae*2" and "h3_vae" in model_def.get("vae_upsamplers", {}):
+        model_files = model_type_handler.query_model_files(
+            computeList, base_model_type, model_def, VAE_upsampling=VAE_upsampling)
+    else:
+        model_files = model_type_handler.query_model_files(computeList, base_model_type, model_def)
     if not isinstance(model_files, list): model_files = [model_files]
     for one_repo in model_files:
         process_files_def(**one_repo)
+
+
+def ensure_preprocessor_assets(process_type):
+    """Fetch just the checkpoint needed by a selected video preprocessor."""
+    if process_type in ("pose", "pose_align"):
+        folder = "pose"
+        files = ["dw-ll_ucoco_384.onnx", "yolox_l.onnx"]
+    elif process_type == "depth":
+        folder = "depth"
+        variant = server_config.get("depth_anything_v2_variant", "vitl")
+        filename = "depth_anything_v2_vitl.pth" if variant == "vitl" else "depth_anything_v2_vitb.pth"
+        files = [filename]
+    elif process_type in ("canny", "scribble"):
+        folder = "scribble"
+        files = ["netG_A_latest.pth"]
+    elif process_type == "flow":
+        folder = "flow"
+        files = ["raft-things.pth"]
+    else:
+        return
+
+    process_files_def(
+        repoId="DeepBeepMeep/Wan2.1",
+        sourceFolderList=[folder],
+        fileList=[files],
+    )
+
+
+def ensure_model_preprocessor_assets(base_model_type, custom_settings=None):
+    """Fetch pose weights for model-specific preprocessors that require DWPose."""
+    settings = custom_settings if isinstance(custom_settings, dict) else {}
+    needs_pose = base_model_type in {"scail", "steadydancer"}
+    needs_pose = needs_pose or (
+        str(base_model_type).startswith("scail2_")
+        and settings.get("scail2_animate_preprocessing", "raw") == "pose"
+    )
+    if needs_pose:
+        ensure_preprocessor_assets("pose")
+
+
+def ensure_audio_condition_assets(base_model_type):
+    """Fetch audio encoders only for the model families that consume them."""
+    architecture = str(base_model_type or "").lower()
+    if architecture == "fantasy":
+        folder = "wav2vec"
+        files = [
+            "config.json",
+            "feature_extractor_config.json",
+            "model.safetensors",
+            "preprocessor_config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+            "vocab.json",
+        ]
+    elif architecture in {
+        "multitalk",
+        "infinitetalk",
+        "vace_multitalk_14b",
+        "i2v_2_2_multitalk",
+    }:
+        folder = "chinese-wav2vec2-base"
+        files = ["config.json", "pytorch_model.bin", "preprocessor_config.json"]
+    else:
+        return
+
+    process_files_def(
+        repoId="DeepBeepMeep/Wan2.1",
+        sourceFolderList=[folder],
+        fileList=[files],
+    )
+
 
 offload.default_verboseLevel = verbose_level
 
@@ -4194,6 +4323,8 @@ def setup_loras(model_type, transformer,  lora_dir, lora_preselected_preset, spl
         loras_presets = [ Path(file_path).parts[-1] for file_path in dir_presets_settings + dir_presets]
 
     if transformer !=None:
+        if split_linear_modules_map is None:
+            split_linear_modules_map = getattr(transformer, "split_linear_modules_map", None)
         loras = offload.load_loras_into_model(transformer, loras,  activate_all_loras=False, check_only= True, preprocess_sd=get_loras_preprocessor(transformer, base_model_type), split_linear_modules_map = split_linear_modules_map) #lora_multiplier,
 
     if len(loras) > 0:
@@ -4234,12 +4365,18 @@ def _normalize_output_type(output_type):
 def get_default_profile(output_type):
     if force_profile_no >= 0:
         return force_profile_no
+    # System settings and auto-tune update server_config while Maestro runs.
+    # The startup globals alone would keep using the old profile until restart.
+    # An explicit launcher --profile remains authoritative as at startup.
+    cli_profile = float(getattr(args, "profile", -1))
+    if cli_profile >= 0:
+        return cli_profile
     output_type = _normalize_output_type(output_type)
     if output_type == "image":
-        return default_profile_image
+        return server_config.get("image_profile", default_profile_image)
     if output_type == "audio":
-        return default_profile_audio
-    return default_profile_video
+        return server_config.get("audio_profile", default_profile_audio)
+    return server_config.get("video_profile", default_profile_video)
 
 def compute_profile(override_profile, output_type="video"):
     return override_profile if override_profile != -1 else get_default_profile(output_type)
@@ -4252,10 +4389,34 @@ def get_output_type_for_model(model_type, image_mode=0):
         return "image"
     return "video"
 
-def init_pipe(pipe, kwargs, profile):
-    preload =int(args.preload)
-    if preload == 0:
-        preload = server_config.get("preload_in_VRAM", 0)
+auto_preload_measures = {}
+
+
+def auto_preload_store(model_type):
+    # Dynamic preload measurements belong to this exact model definition.
+    # Refreshing/replacing an imported checkpoint must invalidate them.
+    definition = get_model_def(model_type)
+    # Maestro refreshes existing definition dictionaries in place, so identity
+    # alone cannot detect an edited workflow or replacement checkpoint.
+    signature = (id(definition), json.dumps(definition, sort_keys=True, default=str))
+    stored = auto_preload_measures.get(model_type)
+    if stored is None or stored[0] != signature:
+        stored = auto_preload_measures[model_type] = (signature, {})
+    return stored[1]
+
+
+def init_pipe(pipe, kwargs, profile, output_type="video"):
+    from services.memory_settings import preload_for_output, reserved_ram_fraction, per_job_memory_options
+    _, preload = preload_for_output(server_config, args, output_type)
+    kwargs["readAhead"] = server_config.get("read_ahead", False)
+    kwargs["perc_reserved_mem_max"] = reserved_ram_fraction(server_config, args)
+    job_options = per_job_memory_options(args, output_type)
+    if "read_ahead" in job_options:
+        kwargs["readAhead"] = job_options["read_ahead"]
+    if "reserved_ram_fraction" in job_options:
+        kwargs["perc_reserved_mem_max"] = job_options["reserved_ram_fraction"]
+    if server_config.get("smart_memory_pinning", True):
+        kwargs["smartPinning"] = 0
     # Per-job residency in MB. Unlike preload, this changes only the
     # transformer; VAE, encoder and catch-all streaming limits stay intact.
     transformer_budget = int(getattr(args, "transformer_budget", 0) or 0)
@@ -4267,20 +4428,34 @@ def init_pipe(pipe, kwargs, profile):
     # Skipping this normalization discarded their streaming limits entirely.
     mmgp_profile = int(profile)
     if mmgp_profile in (2, 4, 5):
-        default_transformer_budget = default_transformer2_budget= kwargs.get("budgets", 100) 
-        if isinstance(default_transformer_budget, dict):
-            default_transformer_budget = default_transformer_budget.get("transformer", 100) 
-            default_transformer2_budget = default_transformer2_budget.get("transformer2", 100) 
+        # Supplying budgets replaces MMGP's profile defaults. Keep its reviewed
+        # transformer allowance when a model does not provide its own, rather
+        # than accidentally forcing every model through a 100 MB allowance.
+        profile_budget = {2: 3000, 4: 1200, 5: 400}[mmgp_profile]
+        if isinstance(source_budgets, dict):
+            default_transformer_budget = source_budgets.get("transformer", source_budgets.get("*", profile_budget))
+            default_transformer2_budget = source_budgets.get("transformer2", source_budgets.get("*", profile_budget))
+        else:
+            default_transformer_budget = default_transformer2_budget = source_budgets
+            kwargs["budgets"] = source_budgets = {}
 
         transformer_budget_mb = default_transformer_budget if preload == 0 else preload
         if preload == 0 and transformer_budget > 0:
             transformer_budget_mb = transformer_budget
-        budgets = { "transformer" : transformer_budget_mb, "text_encoder" : 100 if preload  == 0 else preload, "*" : max(1000 if profile==5 else 3000 , preload) }
+        budgets = {"transformer": transformer_budget_mb,
+                   "text_encoder": source_budgets.get("text_encoder", 100) if preload == 0 else preload,
+                   "*": source_budgets.get("*", 1000 if profile == 5 else 3000) if preload == 0 else max(1000 if profile == 5 else 3000, preload)}
         if "transformer2" in pipe:
             budgets["transformer2"] = default_transformer2_budget if preload  == 0 else preload
         source_budgets.update(budgets)
     elif mmgp_profile == 3:
         source_budgets.update({ "*" : "70%" })
+
+    # Per-job activation-heavy models also need an explicit transformer
+    # slice under profiles that ordinarily keep the whole model resident.
+    # The worker restores this temporary allowance after each job.
+    if mmgp_profile in (1, 3) and preload == 0 and transformer_budget > 0:
+        source_budgets["transformer"] = transformer_budget
 
     if "transformer2" in pipe:
         if profile in [3,4]:
@@ -4342,10 +4517,12 @@ def setup_prompt_enhancer(pipe, kwargs):
 
 
 
-def load_models(model_type, override_profile = -1, output_type="video", **model_kwargs):
+def load_models(model_type, override_profile = -1, output_type="video", preview_mode=None, preview_gen=None, **model_kwargs):
     global transformer_type, loaded_profile
+    if server_config.get("int8_kernels", "triton") != _loaded_int8_setting:
+        apply_int8_kernel_setting(server_config.get("int8_kernels", "triton"))
     base_model_type = get_base_model_type(model_type)
-    model_def = get_model_def(model_type)
+    model_def = get_runtime_model_def(model_type, model_kwargs)
     save_quantized = args.save_quantized and model_def != None
     model_filename = get_model_filename(model_type=model_type, quantization= "" if save_quantized else transformer_quantization, dtype_policy = transformer_dtype_policy) 
     if "URLs2" in model_def:
@@ -4369,7 +4546,8 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
     if quantizeTransformer or "quanto" in model_filename:
         transformer_dtype = torch.bfloat16 if "bf16" in model_filename or "BF16" in model_filename else transformer_dtype
         transformer_dtype = torch.float16 if "fp16" in model_filename or"FP16" in model_filename else transformer_dtype
-    perc_reserved_mem_max = args.perc_reserved_mem_max
+    from services.memory_settings import reserved_ram_fraction
+    perc_reserved_mem_max = reserved_ram_fraction(server_config, args)
     # A Full H3 working set is just larger than MMGP's implicit 40% reserved
     # RAM ceiling on a 128 GB workstation. That tiny shortfall forces partial
     # pinning and can make a 5090 dramatically slower than a 4090. Raise only
@@ -4425,7 +4603,9 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
     local_model_file_list= []
     for filename, file_model_type, file_source_type, submodel_no in zip(model_file_list, model_type_list, source_type_list, model_submodel_no_list):
         if len(filename) == 0: continue 
-        download_models(filename, file_model_type, file_source_type, submodel_no)
+        download_models(filename, file_model_type, file_source_type, submodel_no,
+                        VAE_upsampling=model_kwargs.get("VAE_upsampling"),
+                        model_def_override=model_def if file_model_type == model_type else None)
         local_file_name = get_compatible_local_model_filename(
             filename,
             file_model_type,
@@ -4433,7 +4613,7 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         )
         local_model_file_list.append( os.path.basename(filename) if local_file_name is None else local_file_name )
     if len(local_model_file_list) == 0:
-        download_models("", model_type, 0, -1)
+        download_models("", model_type, 0, -1, VAE_upsampling=model_kwargs.get("VAE_upsampling"), model_def_override=model_def)
 
     VAE_dtype = torch.float16 if server_config.get("vae_precision","16") == "16" else torch.float
     mixed_precision_transformer =  server_config.get("mixed_precision","0") == "1"
@@ -4500,7 +4680,7 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
     if lm_decoder_engine_obtained in ("cg", "vllm") and int(profile) not in [ 1, 3]:
         print(f"Unable to use LM Engine '{lm_decoder_engine_obtained}' as it requires a Memory Profile such as 1,3 or 3+ that loads entirely the Main Models in VRAM. Switching to Legacy LM Engine...")
         lm_decoder_engine_obtained = "legacy"
-    torch.set_default_device('cpu')    
+    torch.set_default_device(None)
     wan_model, pipe = model_type_handler.load_model(
                 local_model_file_list, model_type, base_model_type, model_def, quantizeTransformer = quantizeTransformer, text_encoder_quantization = text_encoder_quantization,
                 dtype = transformer_dtype, VAE_dtype = VAE_dtype, mixed_precision_transformer = mixed_precision_transformer, save_quantized = save_quantized, submodel_no_list   = model_submodel_no_list, text_encoder_filename = text_encoder_filename, profile=profile, lm_decoder_engine=lm_decoder_engine_obtained, **model_kwargs )
@@ -4529,7 +4709,31 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         kwargs = pipe
         pipe = kwargs.pop("pipe")
     if "coTenantsMap" not in kwargs: kwargs["coTenantsMap"] = {}
-    mmgp_profile = init_pipe(pipe, kwargs, profile)
+    from services.generation_preview import (
+        configured_preview_mode,
+        preview_mode as normalize_preview_mode,
+    )
+    from shared.preview_runtime import prepare_preview_decoder
+    preview_decoder, preview_key, preview_notice = prepare_preview_decoder(
+        normalize_preview_mode(
+            preview_mode if preview_mode is not None
+            else configured_preview_mode(server_config.get("generation_preview"))
+        ),
+        base_model_type, model_def, gen=preview_gen,
+    )
+    if preview_decoder is not None:
+        pipe["tiny_vae"] = preview_decoder
+        kwargs["coTenantsMap"]["tiny_vae"] = "*"
+    mmgp_profile = init_pipe(pipe, kwargs, profile, output_type)
+    from services.memory_settings import dynamic_preload_supported, preload_for_output
+    if preload_for_output(server_config, args, output_type)[0] == "dynamic":
+        if dynamic_preload_supported(profile):
+            kwargs["autoPreload"] = auto_preload_store(model_type)
+        else:
+            print(f"[Memory] Dynamic preload cannot apply to Profile {profile}; its normal budgets apply.")
+    from services.memory_settings import per_job_memory_options
+    job_options = per_job_memory_options(args, output_type)
+    kwargs["perc_reserved_mem_max"] = job_options.get("reserved_ram_fraction", perc_reserved_mem_max)
     if server_config.get("enhancer_mode", 1) == 0:
         setup_prompt_enhancer(pipe, kwargs)
     loras_transformer = kwargs.pop("loras", [])
@@ -4537,8 +4741,6 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         loras_transformer += ["transformer"]        
     if "transformer2" in pipe:
         loras_transformer += ["transformer2"]
-    if len(compile) > 0 and hasattr(wan_model, "custom_compile"):
-        wan_model.custom_compile(backend= "inductor", mode ="default")
     # model_def can declare compile policy with three modes:
     #   not present       → use user's global compile setting (default)
     #   "transformer" etc → REQUIRE compile, even if user has it off
@@ -4559,16 +4761,57 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         compile_modules = compile
     else:
         compile_modules = ""
+    int8_backend.prepare_compile_cache(bool(compile_modules))
+    if len(compile) > 0 and compile_modules is not False and hasattr(wan_model, "custom_compile"):
+        wan_model.custom_compile(backend="inductor", mode="default")
     if compile_modules == False:
         print("Pytorch compilation is not supported for this Model")
     # kwargs["pinnedMemory"] = "text_encoder"
-    offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)  
+    previous_last_offload = getattr(offload, "last_offload_obj", None)
+    preview_profile_failed = False
+    try:
+        offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)
+    except Exception as error:
+        if preview_decoder is None or isinstance(error, offload.LoadingCancelled):
+            raise
+        # MMGP can partially wrap the main models before configuring the
+        # optional decoder. Retry once with freshly loaded model objects;
+        # reprofiling that partially wrapped pipeline would be unsafe.
+        print(f"[Preview] Model profile failed while Tiny VAE was included: {error}. Retrying without Tiny VAE.")
+        preview_profile_failed = True
+    if preview_profile_failed:
+        partial_offload = getattr(offload, "last_offload_obj", None)
+        if partial_offload is not None and partial_offload is not previous_last_offload:
+            try:
+                partial_offload.release()
+            except Exception as cleanup_error:
+                print(f"[Preview] Partial profile cleanup: {cleanup_error}")
+            finally:
+                offload.last_offload_obj = previous_last_offload
+        partial_offload = None
+        pipe.clear()
+        wan_model = preview_decoder = None
+        gc.collect()
+        offload.flush_torch_caches()
+        if len(args.gpu) > 0:
+            torch.set_default_device(args.gpu)
+        wan_model, offloadobj = load_models(
+            model_type, override_profile, output_type=output_type,
+            preview_mode="rgb", preview_gen=preview_gen, **model_kwargs,
+        )
+        offloadobj.preview_decoder_key = preview_key
+        offloadobj.preview_notice = "Clearer previews could not start. Using fast frames where supported."
+        return wan_model, offloadobj
+    offloadobj.tiny_vae = preview_decoder
+    offloadobj.preview_decoder_key = preview_key
+    offloadobj.preview_notice = preview_notice
     # Let the job-level memory planner tell whether a resident model was
     # profiled with enough activation headroom for a later, heavier request
     # (notably H3 Ref2VA with a video reference). Record the requested budget
     # too: a lighter H3 job can retain more weights instead of streaming them.
     try:
         wan_model._maestro_profile_vram_coefficient = float(vram_safety_coefficient)
+        wan_model._maestro_performance_placement = getattr(args, "_maestro_performance_placement", None)
         wan_model._maestro_profile_transformer_budget_mb = kwargs["budgets"].get("transformer")
         wan_model._maestro_profile_transformer_budget_override_mb = int(
             getattr(args, "transformer_budget", 0) or 0
@@ -4679,9 +4922,70 @@ def get_gen_info(state):
         state["gen"] = cache
     return initialize_gen_info(cache)
 
-def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_meta=None):
+def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_meta=None,
+                   preview_mode=None, preview_image=False, preview_duration=None):
     gen = get_gen_info(state)
     gen["num_inference_steps"] = num_inference_steps
+    from services.generation_preview import (
+        configured_preview_mode,
+        preview_mode as normalize_preview_mode,
+    )
+    from shared.preview_runtime import RGBPreviewSession, preview_context, rgb_preview_supported
+    mode = normalize_preview_mode(
+        preview_mode if preview_mode is not None
+        else configured_preview_mode(server_config.get("generation_preview"))
+    )
+    context = preview_context(gen)
+    disabled = [False]
+    tiny_preview = None
+    session_notice = None
+    model_handler = get_model_handler(transformer_type) if mode != "off" else None
+    rgb_supported = rgb_preview_supported(model_handler)
+
+    def emit_preview(cmd, data=None):
+        try:
+            if cmd == "preview":
+                send_cmd(cmd, {"media": data, "context": dict(context)})
+            else:
+                send_cmd(cmd, data)
+        except Exception as error:
+            disabled[0] = True
+            print(f"[Preview] Could not publish preview update: {error}")
+
+    def capture_rgb(latent):
+        payload = pipe.prepare_preview_payload(latent, preview_meta) if hasattr(pipe, "prepare_preview_payload") else latent
+        if isinstance(payload, dict):
+            payload = payload.copy()
+            if torch.is_tensor(payload.get("latents")):
+                payload["latents"] = payload["latents"].detach().to("cpu")
+        elif torch.is_tensor(payload):
+            payload = payload.detach().to("cpu")
+        if payload is not None:
+            rgb_context = {**context, "mode": "rgb"}
+            send_cmd("preview", {"latents": payload, "context": rgb_context})
+
+    rgb_preview = RGBPreviewSession(capture_rgb, emit_preview, gen) if mode != "off" and rgb_supported else None
+    decoder = getattr(offloadobj, "tiny_vae", None)
+    if mode.startswith("tiny_vae") and decoder is not None:
+        try:
+            from shared.tinyvae.session import PreviewSession
+            context["mode"] = "tiny_vae_video" if mode == "tiny_vae_video" and not preview_image else "tiny_vae_frames"
+            tiny_preview = PreviewSession(decoder, emit_preview, gen, image=preview_image,
+                                          video=mode == "tiny_vae_video", duration=preview_duration)
+        except Exception as error:
+            print(f"[Preview] Could not start preview session: {error}")
+            session_notice = "Live previews could not start. Using fast frames where supported."
+    if mode != "off":
+        if tiny_preview is None:
+            context["mode"] = "rgb"
+        emit_preview("preview_context", dict(context))
+        notice = session_notice or getattr(offloadobj, "preview_notice", None)
+        if notice and mode.startswith("tiny_vae"):
+            emit_preview("preview_notice", notice)
+        elif mode.startswith("tiny_vae") and decoder is None:
+            emit_preview("preview_notice", "Clearer previews are unavailable for this model. Using fast frames where supported.")
+        elif mode == "rgb" and not rgb_supported:
+            emit_preview("preview_notice", "Fast frames are unavailable for this model. Try Clearer Frames or Live Video where supported.")
     start_time = time.time()
     # Cumulative progress tracking across multi-pass pipelines (e.g. 3-stage progressive)
     _cumulative_offset = [0]      # steps completed in previous passes
@@ -4813,21 +5117,45 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
         
         # progress(*progress_args)
         send_cmd("progress", progress_args)
-        if latent is not None:
-            payload = pipe.prepare_preview_payload(latent, preview_meta) if hasattr(pipe, "prepare_preview_payload") else latent
-            if isinstance(payload, dict):
-                data = payload.copy()
-                lat = data.get("latents")
-                if torch.is_tensor(lat):
-                    data["latents"] = lat.to("cpu", non_blocking=True)
-                payload = data
-            elif torch.is_tensor(payload):
-                payload = payload.to("cpu", non_blocking=True)
-            if payload is not None:
-                send_cmd("preview", payload)
+        if latent is not None and not disabled[0]:
+            try:
+                if tiny_preview is not None and not tiny_preview.failed:
+                    if tiny_preview.wants_capture(step_idx - 1, _current_pass_steps[0], pass_no):
+                        payload = pipe.prepare_preview_payload(latent, preview_meta) if hasattr(pipe, "prepare_preview_payload") else latent
+                        lat = payload.get("latents") if isinstance(payload, dict) else payload
+                        if torch.is_tensor(lat):
+                            tiny_preview.capture(lat, step_idx - 1, _current_pass_steps[0], pass_no)
+                elif rgb_preview is not None:
+                    rgb_preview.capture(latent, step_idx - 1, _current_pass_steps[0], pass_no)
+            except Exception as error:
+                preview_error(error)
             
         # gen["progress_args"] = progress_args
             
+    def wants_preview(step, total=None, pass_no=-1):
+        if disabled[0] or gen.get("abort", False):
+            return False
+        session = tiny_preview if tiny_preview is not None and not tiny_preview.failed else rgb_preview
+        return bool(session and session.wants_capture(step, total or _current_pass_steps[0], pass_no))
+
+    def close_preview(cancel=False):
+        for session in (tiny_preview, rgb_preview):
+            if session is not None:
+                try:
+                    session.close(cancel=cancel)
+                except Exception as error:
+                    print(f"[Preview] Could not close preview session: {error}")
+
+    def preview_error(error):
+        if not disabled[0]:
+            disabled[0] = True
+            print(f"[Preview] Preview disabled: {error}")
+            emit_preview("preview_notice", "Live previews are unavailable for this render. Generation will continue.")
+            close_preview(cancel=True)
+
+    callback.wants_preview = wants_preview
+    callback.close_preview = close_preview
+    callback.preview_error = preview_error
     return callback
 
 def pause_generation(state):
@@ -5647,6 +5975,7 @@ def get_resampled_video(video_in, start_frame, max_frames, target_fps, bridge='t
 
 
 def get_preprocessor(process_type, inpaint_color, pre_video_guide=None):
+    ensure_preprocessor_assets(process_type)
     if process_type in ["pose", "pose_align"]:
         from preprocessing.dwpose.pose import PoseBodyFaceVideoAnnotator
         cfg_dict = {
@@ -6098,12 +6427,17 @@ def perform_temporal_upsampling(sample, previous_last_frame, temporal_upsampling
 
 def perform_spatial_upsampling(sample, spatial_upsampling, seed=0, abort_callback=None, progress_callback=None,
                               options=None, still_image=False):
+    if spatial_upsampling == "h3_vae*2":
+        # The native H3 decoder already enlarged its compact RGB output.
+        return sample
     from shared.utils.utils import resize_lanczos
     if str(spatial_upsampling).startswith("dlss5*"):
         from services.media_processing import neural_render
         return neural_render(sample, spatial_upsampling, options=options, still_image=still_image,
                              abort_callback=abort_callback, progress_callback=progress_callback)
-    if spatial_upsampling == "vae2":
+    if spatial_upsampling in {"vae2", "h3_vae*2"}:
+        # Native decoders have already enlarged this tensor. Never apply a
+        # second pixel upscale to their output.
         return sample
     # FlashVSR (DiT super-resolution) dispatch — ported from upstream Wan2GP.
     # When spatial_upsampling is a "flashvsr"/"flashvsr2pass" method, route to
@@ -6246,6 +6580,9 @@ def edit_video(
     sample = None
 
     if mode == "edit_postprocessing":
+        from services.media_info import probe_media, processing_record
+        finishing_source_info = probe_media(video_source)
+        finishing_started = time.monotonic()
         if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 or film_grain_intensity > 0:                
             send_cmd("progress", [0, get_latest_status(state,"Upsampling" if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 else "Adding Film Grain"  )])
             sample = get_resampled_video(video_source, 0, max_source_video_frames, fps)
@@ -6344,6 +6681,13 @@ def edit_video(
 
             if configs != None:
                 from shared.utils.video_metadata import extract_source_images, save_video_metadata
+                if mode == "edit_postprocessing" and (spatial_upsampling or temporal_upsampling):
+                    configs["processing"] = processing_record(
+                        spatial=spatial_upsampling, temporal=temporal_upsampling,
+                        source_name=os.path.basename(video_source), before=finishing_source_info,
+                        after=probe_media(new_video_path), elapsed=time.monotonic() - finishing_started,
+                        completed_at=time.time())
+                    send_cmd("processing_metadata", {"outputs": [new_video_path], "metadata": configs["processing"]})
                 temp_images_path = get_available_filename(save_path, video_source, force_extension= ".temp")
                 embedded_images = extract_source_images(video_source, temp_images_path)
                 save_video_metadata(new_video_path, configs, embedded_images)
@@ -6404,7 +6748,7 @@ class DynamicClass:
         """Alias for assign() - more dict-like"""
         return self.assign(**dict)
 
-def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start, original_image_refs, is_image, audio_only, seed, prompt_enhancer_instructions = None ):
+def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start, original_image_refs, is_image, audio_only, seed, prompt_enhancer_instructions = None, resolution=None ):
     global enhancer_offloadobj
     prompt_enhancer_mode = str(prompt_enhancer or "")
     prompt_enhancer_instructions = model_def.get("image_prompt_enhancer_instructions" if is_image else "video_prompt_enhancer_instructions", None)
@@ -6418,6 +6762,10 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
         prompt_max_tokens_key = "text_prompt_enhancer_max_tokens" if prompt_profile_id == "0" else f"text_prompt_enhancer_max_tokens{prompt_profile_id}"
         prompt_enhancer_instructions = model_def.get(prompt_instructions_key, model_def.get("text_prompt_enhancer_instructions", prompt_enhancer_instructions))
         text_encoder_max_tokens = model_def.get(prompt_max_tokens_key, model_def.get("text_prompt_enhancer_max_tokens", text_encoder_max_tokens))
+
+    if model_def.get("architecture") == "moss_image":
+        from services.moss_image_prompt import render_layout_instructions
+        prompt_enhancer_instructions = render_layout_instructions(prompt_enhancer_instructions, resolution)
 
     from shared.prompt_enhancer.prompt_enhance_utils import generate_cinematic_prompt
     prompt_images = []
@@ -6460,7 +6808,11 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
             seed = enhancer_seed,
             post_image_caption_hook = post_image_caption_hook,
             thinking_enabled = "K" in prompt_enhancer_mode,
+            literal_prompt = model_def.get("architecture") == "moss_image",
         )
+        if model_def.get("architecture") == "moss_image":
+            from services.moss_image_prompt import finalize_enhancement_output
+            prompts = [finalize_enhancement_output(prompt, resolution) for prompt in prompts]
         return prompts
 
 def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_prompts_gen_type, override_profile,  progress=gr.Progress()):
@@ -6470,7 +6822,9 @@ def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_
     inputs = get_model_settings(state, model_type)
     original_prompts = inputs["prompt"]
 
-    original_prompts, errors = prompt_parser.process_template(original_prompts, keep_comments= True)
+    errors = ""
+    if not get_model_def(model_type).get("skip_prompt_template", False):
+        original_prompts, errors = prompt_parser.process_template(original_prompts, keep_comments= True)
     if len(errors) > 0:
         gr.Info("Error processing prompt template: " + errors)
         return gr.update(), gr.update()
@@ -6546,7 +6900,7 @@ def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_
         progress((i , num_prompts), desc=status, total= num_prompts)
 
         try:
-            enhanced_prompt = process_prompt_enhancer(model_def, prompt_enhancer, [one_prompt],  start_images, original_image_refs, is_image, audio_only, seed)    
+            enhanced_prompt = process_prompt_enhancer(model_def, prompt_enhancer, [one_prompt],  start_images, original_image_refs, is_image, audio_only, seed, resolution=inputs.get("resolution"))
         except Exception as e:
             unload_prompt_enhancer_runtime()
             enhancer_offloadobj.unload_all()
@@ -7281,6 +7635,7 @@ def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_
     if guide_frame_count == 0 or any_mask and mask_frame_count == 0:
         return None, None, None, None
 
+    ensure_model_preprocessor_assets(base_model_type, custom_settings)
     video_guide_processed, video_guide_processed2, video_mask_processed, video_mask_processed2  = model_handler.custom_preprocess(base_model_type = base_model_type, pre_video_guide = pre_video_guide, video_guide = video_guide, video_mask = video_mask, height = height, width = width, fit_canvas = fit_canvas , fit_crop = fit_crop, target_fps = target_fps,  block_size = block_size, max_workers = max_workers, expand_scale = expand_scale, video_prompt_type=video_prompt_type, model_def=model_def, custom_settings=custom_settings)
 
     return video_guide_processed, video_guide_processed2, video_mask_processed, video_mask_processed2 
@@ -7512,6 +7867,7 @@ def generate_video(
     mode,
     plugin_data=None,
     audio_frame_offset=0,
+    video_frame_offset=0,
     multi_clip_info=None,
     trim_tail_frames=0,
     stage2_steps=0,
@@ -7587,6 +7943,7 @@ def generate_video(
     minimax_h3_sequence_memory_override=False,
     minimax_h3_extended_duration=False,
     minimax_h3_text_encoder="nvfp4_awq",
+    minimax_h3_video_vae="auto",
     # LTX-2.5 defaults to the conventional fast ConvVAE. The optional NAD
     # diffusion decoder is model state and therefore triggers a model reload
     # when changed in Advanced settings.
@@ -7634,6 +7991,20 @@ def generate_video(
     gen = get_gen_info(state)
     if gen.get("abort", False):
         return False
+    # Head splitting is a generation-boundary setting. Editing settings while
+    # a job runs must not change the attention grouping inside that job.
+    from services.memory_settings import per_job_attention_head_split
+    attention_kit.configure(per_job_attention_head_split(server_config, args))
+    from services.generation_preview import (
+        configured_preview_mode,
+        preview_mode as normalize_preview_mode,
+    )
+    generation_preview_mode = normalize_preview_mode(
+        state.get(
+            "_generation_preview_mode",
+            configured_preview_mode(server_config.get("generation_preview")),
+        ),
+    )
     gen["early_stop"] = False
     gen["early_stop_forwarded"] = False
     torch.set_grad_enabled(False) 
@@ -7652,8 +8023,22 @@ def generate_video(
     model_def = h3_duration_model_def(model_def, {
         "minimax_h3_extended_duration": minimax_h3_extended_duration,
     })
+    recipe = apply_model_acceleration_profile(model_type, {
+        "sample_solver": sample_solver,
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "activated_loras": activated_loras,
+        "loras_multipliers": loras_multipliers,
+    })
+    sample_solver = recipe["sample_solver"]
+    num_inference_steps = recipe["num_inference_steps"]
+    guidance_scale = recipe["guidance_scale"]
+    activated_loras = recipe["activated_loras"]
+    loras_multipliers = recipe["loras_multipliers"]
     is_image = image_mode > 0
     audio_only = model_def.get("audio_only", False)
+    if audio_only:
+        generation_preview_mode = "off"
     duration_def = model_def.get("duration_slider", None)
 
     set_video_prompt_type = model_def.get("set_video_prompt_type", None)
@@ -7688,7 +8073,30 @@ def generate_video(
             time.sleep(1)
     vae_upsampling = model_def.get("vae_upsampler", None)
     model_kwargs = {}
+    overridden_attention = override_attention if len(override_attention) else get_overridden_attention(model_type)
+    requested_h3_veda = (
+        overridden_attention if overridden_attention is not None else attention_mode
+    ) == "veda"
+    if requested_h3_veda:
+        from shared.attention import get_veda_attention_status
+        veda_status = get_veda_attention_status()
+        if not model_def.get("veda_attention") or not veda_status["supported"]:
+            reason = (veda_status.get("reason") if model_def.get("veda_attention") else
+                      "Veda is available only for supported H3 Full, Pruned, and experimental Fused Frames/References models.")
+            send_cmd("info", f"H3 Veda cannot run: {reason}")
+            send_cmd("exit")
+            return True
     if str(model_def.get("architecture") or "").startswith("minimax_h3"):
+        requested_h3_video_vae = str(minimax_h3_video_vae or "auto")
+        model_kwargs["minimax_h3_video_vae"] = requested_h3_video_vae
+        expected_h3_video_vae = get_runtime_model_def(model_type, {"minimax_h3_video_vae": requested_h3_video_vae}).get("minimax_h3_video_vae_variant", "auto")
+        if wan_model is not None and getattr(wan_model, "video_vae_variant", "auto") != expected_h3_video_vae:
+            print(f"[MiniMax H3] Video VAE changed to {requested_h3_video_vae}; reloading the model profile.")
+            reload_needed = True
+        model_kwargs["minimax_h3_veda"] = requested_h3_veda
+        if wan_model is not None and bool(getattr(wan_model, "veda", False)) != requested_h3_veda:
+            print("[MiniMax H3 Veda] Acceleration selection changed; reloading the model profile.")
+            reload_needed = True
         requested_h3_text_encoder = str(
             minimax_h3_text_encoder
             or model_def.get("minimax_h3_text_encoder_default", "nvfp4_awq")
@@ -7731,8 +8139,13 @@ def generate_video(
                 f"{requested_ltx25_video_vae}; reloading the model profile."
             )
             reload_needed = True
-    if vae_upsampling is not None:
-        new_vae_upsampling = None if image_mode not in vae_upsampling or "vae" not in spatial_upsampling else spatial_upsampling
+    native_h3_vae_capability = "h3_vae" in model_def.get("vae_upsamplers", {})
+    if vae_upsampling is not None or native_h3_vae_capability:
+        if native_h3_vae_capability:
+            from services.native_vae import native_vae_selection
+            new_vae_upsampling = native_vae_selection(model_def, spatial_upsampling, image_mode)
+        else:
+            new_vae_upsampling = None if image_mode not in vae_upsampling or "vae" not in spatial_upsampling else spatial_upsampling
         # Read back the currently-applied setting to decide whether a reload
         # is actually needed. Models that expose wan_model.vae.upsampling_set
         # (e.g. Wan) get trusted verbatim. For models that DON'T expose it
@@ -7748,10 +8161,21 @@ def generate_video(
         else:
             old_vae_upsampling = _last_vae_upsampling
         reload_needed = reload_needed or old_vae_upsampling != new_vae_upsampling
-        if new_vae_upsampling: model_kwargs = {"VAE_upsampling": new_vae_upsampling}
+        if new_vae_upsampling: model_kwargs["VAE_upsampling"] = new_vae_upsampling
     output_type = get_output_type_for_model(model_type, image_mode)
     profile = compute_profile(override_profile, output_type)
     enhancer_mode = server_config.get("enhancer_mode", 1)
+    try:
+        from shared.preview_runtime import decoder_key
+        requested_preview_key = decoder_key(generation_preview_mode, get_base_model_type(model_type), model_def)
+    except Exception as preview_setup_error:
+        print(f"[Preview] Could not select preview decoder: {preview_setup_error}")
+        requested_preview_key = None
+    if offloadobj is not None:
+        if getattr(offloadobj, "preview_decoder_key", None) != requested_preview_key or (
+            requested_preview_key is not None and getattr(offloadobj, "tiny_vae", None) is None
+        ):
+            reload_needed = True
     if model_type != transformer_type or reload_needed or profile != loaded_profile:
         release_model()
         # Pre-flight: detect first-use download so the UI can show
@@ -7790,6 +8214,8 @@ def generate_video(
             model_type,
             override_profile,
             output_type=output_type,
+            preview_mode=generation_preview_mode,
+            preview_gen=gen,
             **model_kwargs,
         )
         send_cmd("status", "Model loaded")
@@ -7802,12 +8228,11 @@ def generate_video(
     # Remember the VAE setting we just asked for so the next generation's
     # comparison has a real value to check against (instead of falling back
     # to None and spuriously "detecting a change" every gen on LTX-2).
-    if vae_upsampling is not None:
+    if vae_upsampling is not None or native_h3_vae_capability:
         _last_vae_upsampling = new_vae_upsampling
     if args.test:
         send_cmd("info", "Test mode: model loaded, skipping generation.")
         return True
-    overridden_attention = override_attention if len(override_attention) else get_overridden_attention(model_type)
     # if overridden_attention is not None and overridden_attention !=  attention_mode: print(f"Attention mode has been overriden to {overridden_attention} for model type '{model_type}'")
     attn = overridden_attention if overridden_attention is not None else attention_mode
     if attn == "auto":
@@ -7822,10 +8247,29 @@ def generate_video(
     elif attn == "sla" and not model_def.get("sla_attention", False):
         send_cmd(
             "info",
-            "H3 SLA is available only for compatible fused MiniMax H3 models.",
+            "H3 SLA is available only for compatible MiniMax H3 models.",
         )
         send_cmd("exit")
         return True
+    elif attn == "veda" and not model_def.get("veda_attention", False):
+        send_cmd("info", "Veda is available only for supported H3 Full, Pruned, and experimental Fused Frames/References models.")
+        send_cmd("exit")
+        return True
+    elif attn == "sol" and attn not in override_attention_modes_supported:
+        from shared.attention import get_default_attention_mode, get_sol_attention_status
+
+        status = get_sol_attention_status()
+        attn = get_default_attention_mode()
+        print(
+            "[MiniMax H3 Sol] Requested sparse attention is unavailable "
+            f"({status.get('reason') or 'unsupported runtime'}); "
+            f"using {attn}."
+        )
+        send_cmd(
+            "info",
+            "Sol Engine is unavailable in this runtime; this generation will "
+            f"use the safe dense {attn} backend.",
+        )
     elif attn == "sla" and attn not in override_attention_modes_supported:
         from shared.attention import get_default_attention_mode, get_sla_attention_status
 
@@ -7869,7 +8313,9 @@ def generate_video(
         # establish an output aspect ratio.
         _auto_ref = None
         _auto_ref_kind = "image"
-        if is_image and image_refs:
+        if is_image and "V" in video_prompt_type and (image_guide is not None or video_guide is not None):
+            _auto_ref = image_guide if image_guide is not None else video_guide
+        elif is_image and image_refs:
             _auto_ref = image_refs[0] if isinstance(image_refs, list) else image_refs
         elif image_start:
             _auto_ref = image_start
@@ -8626,6 +9072,8 @@ def generate_video(
         gen["extra_windows"] = 0
         gen["total_windows"] = 1
         gen["window_no"] = 1
+        from shared.preview_runtime import begin_preview_window
+        begin_preview_window(send_cmd, gen, generation_preview_mode)
         input_waveform, input_waveform_sample_rate = None, 0
         # ID-LoRA: load voice reference audio for identity preservation.
         # Max reference duration matches WanGP's constant
@@ -8700,7 +9148,7 @@ def generate_video(
         start_time = time.time()
         if prompt_enhancer_image_caption_model != None and prompt_enhancer !=None and len(prompt_enhancer)>0 and enhancer_mode == 0:
             send_cmd("progress", [0, get_latest_status(state, "Enhancing Prompt")])
-            enhanced_prompts = process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start if image_start is not None else image_end , original_image_refs, is_image, audio_only, seed )
+            enhanced_prompts = process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image_start if image_start is not None else image_end , original_image_refs, is_image, audio_only, seed, resolution=f"{width}x{height}" )
             unload_prompt_enhancer_runtime()
             if enhanced_prompts is not None:
                 print(f"Enhanced prompts: {enhanced_prompts}" )
@@ -8753,6 +9201,7 @@ def generate_video(
                 break
             window_no += 1
             gen["window_no"] = window_no
+            begin_preview_window(send_cmd, gen, generation_preview_mode)
             # Gallery metadata needs the real wall-clock cost of each native
             # window, including conditioning, denoising, VAE decode, and the
             # cumulative save.  Start the window timer before any of that
@@ -8879,6 +9328,12 @@ def generate_video(
             aligned_guide_start_frame = guide_start_frame - alignment_shift
             aligned_guide_end_frame = guide_end_frame - alignment_shift
             aligned_window_start_frame = window_start_frame - alignment_shift  
+            # References and exact soundtrack conditioning share the same
+            # source clock, including overlap and independent-clip origins.
+            reference_start_frame = aligned_window_start_frame
+            if reset_control_aligment:
+                reference_start_frame += source_video_overlap_frames_count
+            reference_start_frame += max(0, int(audio_frame_offset or 0))
             input_waveform, input_waveform_sample_rate = None, 0
             if audio_guide is not None and model_def.get("audio_guide_window_slicing", False):
                 audio_start_frame = aligned_window_start_frame
@@ -9055,6 +9510,11 @@ def generate_video(
                     guide_slice_to_extract  = guide_frames_extract_count
                     guide_frames_extract_count = (-guide_frames_extract_start if guide_frames_extract_start  <0 else 0) +  len( keep_frames_parsed_full[max(0, guide_frames_extract_start):] )
 
+                # Keep-frame choices are local to the clip; decoding uses the
+                # common source video's absolute timeline. Masks use this same
+                # origin through both preprocessor routes below.
+                guide_frames_extract_start += max(0, int(video_frame_offset or 0))
+
                 # Extract Faces to video
                 if "B" in video_prompt_type:
                     send_cmd("progress", [0, get_latest_status(state, "Extracting Face Movements")])
@@ -9065,7 +9525,7 @@ def generate_video(
                 # Sparse Video to Video
                 sparse_video_image = None
                 if "R" in video_prompt_type:
-                    sparse_video_image = get_video_frame(video_guide, aligned_guide_start_frame, return_last_if_missing = True, target_fps = fps, return_PIL = True)
+                    sparse_video_image = get_video_frame(video_guide, aligned_guide_start_frame + max(0, int(video_frame_offset or 0)), return_last_if_missing = True, target_fps = fps, return_PIL = True)
 
                 if not process_all or cached_video_video_start_frame < 0:
                     # Generic Video Preprocessing
@@ -9150,7 +9610,7 @@ def generate_video(
                     image_size = calculate_new_dimensions(height, width, h, w, fit_canvas)
                 sample_fit_canvas = None
                 if repeat_no == 1:
-                    if fit_crop:
+                    if fit_crop and not model_def.get("preserve_image_ref_native_size", False):
                         if any_background_ref == 2:
                             end_ref_position = len(image_refs)
                         elif any_background_ref == 1:
@@ -9191,7 +9651,8 @@ def generate_video(
                                                                                         background_ref_outpainted = model_def.get("background_ref_outpainted", True),
                                                                                         return_tensor= model_def.get("return_image_refs_tensor", False),
                                                                                         ignore_last_refs =model_def.get("no_processing_on_last_images_refs",0),
-                                                                                        background_removal_color = model_def.get("background_removal_color", [255, 255, 255] ))
+                                                                                        background_removal_color = model_def.get("background_removal_color", [255, 255, 255] ),
+                                                                                        preserve_native_size = model_def.get("preserve_image_ref_native_size", False))
 
             custom_postprocessor = model_def.get("custom_image_ref_postprocessor", None)
             if window_no == 1 and repeat_no == 1 and custom_postprocessor is not None:
@@ -9277,7 +9738,11 @@ def generate_video(
             gen["progress_status"] = status
             progress_phase = "Generating Audio" if audio_only else "Encoding Prompt"
             gen["progress_phase"] = (progress_phase , -1 )
-            callback = build_callback(state, trans, send_cmd, status, num_inference_steps)
+            callback = build_callback(
+                state, trans, send_cmd, status, num_inference_steps,
+                preview_mode="off" if audio_only else generation_preview_mode, preview_image=is_image,
+                preview_duration=max(1, current_video_length) / max(1, fps),
+            )
             progress_args = [0, merge_status_context(status, progress_phase )]
             send_cmd("progress", progress_args)
 
@@ -9385,7 +9850,7 @@ def generate_video(
                 samples = call_with_sticky_interrupt(
                     gen,
                     wan_model,
-                    wan_model.generate,
+                    partial(call_with_default_device, model_def, model_type, wan_model.generate),
                     input_prompt = prompt,
                     alt_prompt = alt_prompt,
                     image_start = image_start_tensor,  
@@ -9485,7 +9950,11 @@ def generate_video(
                        if str(model_def.get("architecture") or "").startswith("minimax_h3") else {}),
                     save_masks=args.save_masks,
                     temperature=temperature,
-                    window_start_frame_no = window_start_frame,
+                    window_start_frame_no = (
+                        reference_start_frame
+                        if model_def.get("omni_reference", False)
+                        else window_start_frame
+                    ),
                     input_video_strength = input_video_strength,
                     self_refiner_setting = self_refiner_setting,
                     self_refiner_plan=self_refiner_plan,
@@ -9625,6 +10094,12 @@ def generate_video(
                 send_cmd("error", new_error)
                 clear_status(state)
                 return False
+            finally:
+                callback.close_preview(cancel=gen.get("abort", False))
+                try:
+                    write_vram_debug_report(save_path, model_type)
+                except Exception as debug_error:
+                    print(f"[VRAM debug] Could not write report: {debug_error}")
             src_video = src_video2 = src_mask = src_mask2 = None
             if skip_steps_cache != None :
                 skip_steps_cache.previous_residual = None
@@ -9770,12 +10245,16 @@ def generate_video(
                             prefix_video = _video_tensor_to_uint8_chunk_inplace(prefix_video)
                         elif prefix_video.dtype == torch.uint8:
                             prefix_video = prefix_video.float().div_(127.5).sub_(1.0)
+                    if spatial_upsampling == "h3_vae*2" and prefix_video.shape[1] > 1:
+                        from models.minimax_h3.vae_upsampler import resize_video_canvas
+                        prefix_video = resize_video_canvas(prefix_video, sample.shape[-2], sample.shape[-1])
                     if prefix_video.shape[1] > 1:
                         # remove sliding window overlapped frames at the beginning of the generation
                         sample = torch.cat([ prefix_video, sample[: , source_video_overlap_frames_count:]], dim = 1)
                     else:
                         # remove source video overlapped frames at the beginning of the generation if there is only a start frame
-                        sample = torch.cat([ prefix_video[:, :-source_video_overlap_frames_count], sample], dim = 1)
+                        if prefix_video.shape[1] > source_video_overlap_frames_count:
+                            sample = torch.cat([prefix_video[:, :-source_video_overlap_frames_count], sample], dim=1)
                     prefix_video = None
                     guide_start_frame -= source_video_overlap_frames_count 
                     if generated_audio is not None:
@@ -9845,9 +10324,26 @@ def generate_video(
                     output_new_audio_data = full_generated_audio
 
 
-                if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 and not "vae2" in spatial_upsampling:                
+                if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 and spatial_upsampling not in {"vae2", "h3_vae*2"}:
                     send_cmd("progress", [0, get_latest_status(state,"Upsampling")])
                 
+                inline_processing = None
+                finishing_started = time.monotonic()
+                finishing_input = None
+                if sample is not None and spatial_upsampling == "h3_vae*2":
+                    # H3 preserves the latent canvas and doubles both edges
+                    # during decoding; record that geometry before temporal finishing.
+                    finishing_input = {"width": int(sample.shape[-1]) // 2,
+                                       "height": int(sample.shape[-2]) // 2}
+                    if not is_image:
+                        finishing_input["fps"] = float(fps)
+                if sample is not None and (temporal_upsampling or spatial_upsampling):
+                    # VAE enlargement happens during decoding, before this tensor.
+                    # Its pre-upscale size cannot be measured here.
+                    if spatial_upsampling not in {"vae1", "vae2", "h3_vae*2"}:
+                        finishing_input = {"width": int(sample.shape[-1]), "height": int(sample.shape[-2])}
+                        if not is_image:
+                            finishing_input["fps"] = float(fps)
                 output_fps  = fps
                 if len(temporal_upsampling) > 0:
                     sample, previous_last_frame, output_fps = perform_temporal_upsampling(
@@ -9884,6 +10380,14 @@ def generate_video(
                     if sample is None or gen.get("abort", False):
                         abort = True
                         break
+                if temporal_upsampling or spatial_upsampling:
+                    from services.media_info import processing_record
+                    inline_processing = processing_record(
+                        spatial=spatial_upsampling, temporal=temporal_upsampling,
+                        before=finishing_input, options=custom_settings,
+                        # For sliding-window output this pass is only one part
+                        # of the assembled clip; don't claim a total duration.
+                        elapsed=None if sliding_window or spatial_upsampling == "h3_vae*2" else time.monotonic() - finishing_started)
                 if film_grain_intensity> 0:
                     from postprocessing.film_grain import add_film_grain
                     sample = add_film_grain(sample, film_grain_intensity, film_grain_saturation) 
@@ -10091,6 +10595,11 @@ def generate_video(
                         "outputs": list(saved_artifacts),
                         "metadata": artifact_metadata,
                     })
+                if inline_processing:
+                    from services.media_info import probe_media
+                    for artifact_path in saved_artifacts:
+                        details = {**inline_processing, "output": probe_media(artifact_path), "completed_at": end_time}
+                        send_cmd("processing_metadata", {"outputs": [artifact_path], "metadata": details})
 
                 inputs.pop("send_cmd")
                 inputs.pop("task")
@@ -10119,6 +10628,8 @@ def generate_video(
                 configs["generation_time_basis"] = "active"
                 configs["creation_date"] = datetime.fromtimestamp(end_time).isoformat(timespec="seconds")
                 configs["creation_timestamp"] = int(end_time)
+                if inline_processing:
+                    configs["processing"] = {**inline_processing, "completed_at": end_time}
                 # if sample_is_image: configs["is_image"] = True
                 metadata_choice = server_config.get("metadata_type","metadata")
                 video_path = [video_path] if not isinstance(video_path, list) else video_path
@@ -10758,8 +11269,12 @@ def process_tasks(state):
                     current_model_type = queue[0]["params"].get("model_type")
             
             try:
-                torch.cuda.current_stream().synchronize()
-                preview = None if data is None else generate_preview(current_model_type, data) 
+                if isinstance(data, dict) and "context" in data:
+                    preview = data.get("media")
+                    if "latents" in data:
+                        preview = generate_preview(current_model_type, data["latents"])
+                else:
+                    preview = None if data is None else generate_preview(current_model_type, data)
                 gen["preview"] = preview
                 yield time.time(), gr.Text(), gr.update()
             except Exception:
@@ -12667,6 +13182,8 @@ def refresh_preview(state):
     preview_image = gen.get("preview", None)
     if preview_image is None:
         return ""
+    if callable(getattr(preview_image, "to_html", None)):
+        return preview_image.to_html()
     
     preview_base64 = pil_to_base64_uri(preview_image, format="jpeg", quality=85)
     if preview_base64 is None:
@@ -12712,6 +13229,8 @@ def show_modal_image(state, action_string):
         if parts[0] == 'preview':
             preview_image = gen.get("preview", None)
             if preview_image:
+                if callable(getattr(preview_image, "to_html", None)):
+                    return gr.HTML(value=preview_image.to_html(modal=True)), gr.Column(visible=True)
                 preview_base64 = pil_to_base64_uri(preview_image)
                 if preview_base64:
                     html_content = get_modal_image(preview_base64, "Preview")
@@ -13995,7 +14514,8 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                                     ("Disabled", ""),
                                     ("Lanczos x1.5", "lanczos1.5"), 
                                     ("Lanczos x2.0", "lanczos2"), 
-                                ] + ([("VAE x1.0 (refined)", "vae1"),("VAE x2.0", "vae2")] if any_vae_upsampling else []) ,
+                                ] + ([("VAE x1.0 (refined)", "vae1"),("VAE x2.0", "vae2")] if any_vae_upsampling else [])
+                                  + ([("H3 VAE x2.0", "h3_vae*2")] if (1 if image_outputs else 0) in model_def.get("vae_upsamplers", {}).get("h3_vae", []) else []),
                                 value=spatial_upsampling,
                                 visible=True,
                                 scale = 1,

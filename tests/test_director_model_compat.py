@@ -18,7 +18,10 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 from services import director_pipeline as pipeline  # noqa: E402
-from services.director_model_compat import assess_director_model  # noqa: E402
+from services.director_model_compat import (  # noqa: E402
+    assess_director_model,
+    director_image_reference_mode,
+)
 from services.director.policies import build_character_rules_block  # noqa: E402
 from services.director.prompt_polish import (  # noqa: E402
     polish_prompts_third_pass,
@@ -53,6 +56,20 @@ def _image_editor(**updates):
         "image_ref_choices": {
             "choices": [("None", ""), ("Main plus references", "KI")],
         },
+    }
+    model_def.update(updates)
+    return model_def
+
+
+def _qwen_image_21(**updates):
+    model_def = {
+        "name": "Qwen Image 2.1",
+        "image_outputs": True,
+        "image_ref_choices": {
+            "choices": [("None", ""), ("Reference images", "I")],
+        },
+        "at_least_one_image_ref_needed": False,
+        "max_image_refs": 10,
     }
     model_def.update(updates)
     return model_def
@@ -95,9 +112,13 @@ class TestDirectorModelAssessment(unittest.TestCase):
         self.assertEqual(len(contexts), 1)
         self.assertNotIn("beep", contexts[0].lower())
         self.assertIn("mapped source audio drives this interval", contexts[0])
-        self.assertIn("explicitly lip-syncs every syllable", contexts[0])
         self.assertIn(
-            "without quoting, transcribing, or inventing words",
+            "only a person explicitly assigned as a visible vocalist lip-syncs",
+            contexts[0],
+        )
+        self.assertIn("only to their own audible part", contexts[0])
+        self.assertIn(
+            "do not add a person or transcribe lyrics",
             contexts[0],
         )
 
@@ -110,8 +131,8 @@ class TestDirectorModelAssessment(unittest.TestCase):
             vocal_activity=["silent"],
         )
 
-        self.assertIn("separated vocal stem is silent", contexts[0])
-        self.assertIn("do not depict singing, lip-sync", contexts[0])
+        self.assertIn("with no detected vocal activity", contexts[0])
+        self.assertIn("do not depict singing or lip-sync", contexts[0])
         self.assertNotIn("lip-syncs every syllable", contexts[0])
 
     def test_h3_music_context_keeps_missing_vocal_evidence_unknown(self):
@@ -124,7 +145,8 @@ class TestDirectorModelAssessment(unittest.TestCase):
         )
 
         self.assertIn("vocal activity is unknown", contexts[0])
-        self.assertIn("do not invent lyrics or assert visible singing", contexts[0])
+        self.assertIn("do not invent lyrics or visible singing", contexts[0])
+        self.assertIn("do not add anyone to represent the soundtrack", contexts[0])
         self.assertNotIn("lip-syncs every syllable", contexts[0])
 
     def test_video_only_planner_schemas_forbid_unused_image_fields(self):
@@ -157,7 +179,15 @@ class TestDirectorModelAssessment(unittest.TestCase):
             return json.dumps([{
                 "scene_goal": "Introduce the performer",
                 "scene_type": "performance",
+                "continuity_strategy": "continuous",
+                "physical_state": {
+                    "opening": [],
+                    "transitions": [],
+                    "continuity": "continuous",
+                },
                 "subjects_on_screen": [{
+                    "character_id": "office_performer",
+                    "speaker_name": "Dwight",
                     "visual_description": "Dwight from The Office in a mustard shirt",
                     "position_or_relation": "center frame",
                 }],
@@ -526,10 +556,10 @@ class TestDirectorModelAssessment(unittest.TestCase):
         self.assertTrue(all(shot.subjects_on_screen[0].wardrobe for shot in plan.shots))
         self.assertIn("OPENING CONTINUITY", plan.shots[0].video_prompt)
         self.assertIn("FINAL BLOCKING", plan.shots[0].video_prompt)
-        self.assertIn("naturally move", plan.shots[0].video_prompt)
-        self.assertIn("seated screen-right", plan.shots[0].video_prompt)
-        self.assertIn("naturally move", plan.shots[0].ending_beat)
-        self.assertEqual(plan.shots[1].continuity_strategy, "continuous")
+        self.assertNotIn("naturally move", plan.shots[0].video_prompt)
+        self.assertIn("remains standing screen-left", plan.shots[0].video_prompt)
+        self.assertEqual(plan.shots[0].ending_beat, "The room falls quiet")
+        self.assertEqual(plan.shots[1].continuity_strategy, "independent")
         self.assertIn(
             "<d>[English] Identity theft is not a joke, Jim.</d>",
             plan.shots[0].video_prompt,
@@ -875,6 +905,31 @@ class TestDirectorModelAssessment(unittest.TestCase):
     def test_reference_editor_can_bootstrap_and_edit(self):
         result = assess_director_model("editor", _image_editor())
         self.assertTrue(result["image"]["compatible"])
+        self.assertEqual(result["image_reference_mode"], "KI")
+
+    def test_qwen_21_reference_image_mode_is_compatible(self):
+        model_def = _qwen_image_21()
+        result = assess_director_model("qwen_image_21_7B", model_def)
+
+        self.assertTrue(result["image"]["compatible"])
+        self.assertEqual(director_image_reference_mode(model_def), "I")
+        self.assertEqual(result["image_reference_mode"], "I")
+        self.assertEqual(result["max_image_refs"], 10)
+
+    def test_legacy_mode_is_preferred_when_both_reference_modes_exist(self):
+        model_def = _image_editor(image_ref_choices={
+            "choices": [
+                ("None", ""),
+                ("Reference images", "I"),
+                ("Main plus references", "KI"),
+            ],
+        })
+
+        self.assertEqual(director_image_reference_mode(model_def), "KI")
+        self.assertEqual(
+            assess_director_model("editor", model_def)["image_reference_mode"],
+            "KI",
+        )
 
     def test_plain_image_model_is_not_a_director_image_model(self):
         result = assess_director_model(
@@ -882,7 +937,36 @@ class TestDirectorModelAssessment(unittest.TestCase):
             {"name": "Plain", "image_outputs": True},
         )
         self.assertFalse(result["image"]["compatible"])
-        self.assertIn("reference editing", result["image"]["reason"])
+        self.assertIn("reference-image editing", result["image"]["reason"])
+        self.assertEqual(result["image_reference_mode"], "")
+
+    def test_reference_only_i_mode_cannot_skip_plain_generation_requirement(self):
+        result = assess_director_model(
+            "reference-only",
+            _qwen_image_21(image_ref_choices={
+                "choices": [("Reference images", "I")],
+            }),
+        )
+
+        self.assertFalse(result["image"]["compatible"])
+        self.assertEqual(result["image_reference_mode"], "I")
+        self.assertIn("plain generation", result["image"]["reason"])
+
+    def test_layered_control_only_image_model_remains_unsupported(self):
+        layered = {
+            "name": "Qwen Image Layered",
+            "image_outputs": True,
+            "batch_size_label": "Number of Layers",
+            "set_video_prompt_type": "V",
+            "guide_preprocessing": {
+                "selection": ["V"],
+                "labels": {"V": "Control Image"},
+            },
+        }
+        result = assess_director_model("qwen_image_layered_20B", layered)
+
+        self.assertFalse(result["image"]["compatible"])
+        self.assertEqual(result["image_reference_mode"], "")
 
     def test_editor_that_cannot_bootstrap_is_rejected(self):
         result = assess_director_model(
@@ -1144,6 +1228,18 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
             ],
         }
 
+    @classmethod
+    def _h3_model_with_text_encoders(cls, *, full: bool = False) -> dict:
+        model_def = cls._h3_model(full=full)
+        model_def.update({
+            "minimax_h3_text_encoder_default": "nvfp4_awq",
+            "minimax_h3_text_encoder_variants": {
+                "gguf_q2_k": {},
+                "nvfp4_awq": {},
+            },
+        })
+        return model_def
+
     def test_h3_and_ltx25_lock_director_media_strengths(self):
         for model_type, architecture in (
             ("minimax_h3", "minimax_h3"),
@@ -1365,6 +1461,166 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
         )
         self.assertEqual(params["loras_multipliers"], "1.00")
 
+    def test_director_profile_freezes_hardware_recommended_h3_encoder(self):
+        model_def = self._h3_model_with_text_encoders()
+
+        def recommend(hardware, _model_def):
+            if (
+                float(hardware.get("ram_gb") or 0) < 47.5
+                or float(hardware.get("gpu_vram_gb") or 0) <= 16
+            ):
+                return "gguf_q2_k"
+            return "nvfp4_awq"
+
+        handler = SimpleNamespace(recommend_text_encoder=recommend)
+        registry = SimpleNamespace(
+            get_model_def=lambda _model_type: model_def,
+            get_base_model_type=lambda model_type: model_type,
+            get_model_handler=lambda _base_type: handler,
+        )
+        for hardware, expected in (
+            ({"ram_gb": 32, "gpu_vram_gb": 12}, "gguf_q2_k"),
+            ({"ram_gb": 128, "gpu_vram_gb": 24}, "nvfp4_awq"),
+        ):
+            with self.subTest(hardware=hardware):
+                params = {
+                    "video_model": "minimax_h3",
+                    "video_params": {"resolution": "1280x704"},
+                }
+                with patch.object(pipeline, "_wgp", registry):
+                    profile = pipeline._create_director_video_execution_profile(
+                        params,
+                        model_def=model_def,
+                        hardware=hardware,
+                    )
+                self.assertEqual(profile["minimax_h3_text_encoder"], expected)
+                self.assertEqual(
+                    params["video_params"]["minimax_h3_text_encoder"],
+                    expected,
+                )
+
+    def test_director_explicit_h3_encoder_is_validated_and_applied_to_child(self):
+        model_def = self._h3_model_with_text_encoders()
+        handler = SimpleNamespace(
+            recommend_text_encoder=lambda _hardware, _model_def: "gguf_q2_k"
+        )
+        registry = SimpleNamespace(
+            get_model_def=lambda _model_type: model_def,
+            get_base_model_type=lambda model_type: model_type,
+            get_model_handler=lambda _base_type: handler,
+            override_attention_modes_supported=[],
+        )
+        params = {
+            "video_model": "minimax_h3",
+            "video_params": {
+                "resolution": "1280x704",
+                "minimax_h3_text_encoder": "nvfp4_awq",
+                "minimax_h3_video_vae": "lightvae_int8",
+            },
+        }
+        with patch.object(pipeline, "_wgp", registry):
+            profile = pipeline._create_director_video_execution_profile(
+                params,
+                model_def=model_def,
+                hardware={"ram_gb": 32, "gpu_vram_gb": 12},
+            )
+            child = {}
+            pipeline._apply_director_h3_optimizations(
+                child,
+                params["video_params"],
+                profile,
+            )
+            self.assertEqual(child["minimax_h3_text_encoder"], "nvfp4_awq")
+            self.assertEqual(profile["minimax_h3_video_vae"], "lightvae_int8")
+            self.assertEqual(child["minimax_h3_video_vae"], "lightvae_int8")
+            recovered_child = {}
+            pipeline._apply_director_h3_optimizations(recovered_child, {}, profile)
+            self.assertEqual(recovered_child["minimax_h3_video_vae"], "lightvae_int8")
+
+            invalid = {
+                "video_model": "minimax_h3",
+                "video_params": {
+                    "resolution": "1280x704",
+                    "minimax_h3_text_encoder": "unknown_encoder",
+                },
+            }
+            with self.assertRaisesRegex(
+                ValueError,
+                "Unknown MiniMax H3 text encoder 'unknown_encoder'",
+            ):
+                pipeline._create_director_video_execution_profile(
+                    invalid,
+                    model_def=model_def,
+                    hardware={"ram_gb": 32, "gpu_vram_gb": 12},
+                )
+
+    def test_saved_director_profile_keeps_encoder_and_migrates_legacy_state(self):
+        model_def = self._h3_model_with_text_encoders()
+        state = {
+            "video_model": "minimax_h3",
+            "video_params": {"minimax_h3_text_encoder": "nvfp4_awq"},
+            "_params_snapshot": {
+                "video_model": "minimax_h3",
+                "video_params": {},
+            },
+            "video_execution_profile": {
+                "is_minimax_h3": True,
+                "effective_max_frames": 243,
+                "model_type": "minimax_h3",
+                "minimax_h3_text_encoder": "gguf_q2_k",
+            },
+        }
+        with patch.object(
+            pipeline,
+            "_wgp",
+            SimpleNamespace(get_model_def=lambda _model_type: model_def),
+        ), patch.object(
+            pipeline,
+            "_director_hardware_snapshot",
+            return_value={"ram_gb": 32, "gpu_vram_gb": 12},
+        ):
+            saved = pipeline._saved_director_video_execution_profile(
+                state,
+                model_def=model_def,
+            )
+            self.assertEqual(saved["minimax_h3_text_encoder"], "gguf_q2_k")
+
+            state["video_execution_profile"].pop("minimax_h3_text_encoder")
+            migrated = pipeline._saved_director_video_execution_profile(
+                state,
+                model_def=model_def,
+            )
+        self.assertEqual(migrated["minimax_h3_text_encoder"], "nvfp4_awq")
+
+    def test_legacy_h3_profile_without_encoder_uses_hardware_default(self):
+        model_def = self._h3_model_with_text_encoders()
+        state = {
+            "video_model": "minimax_h3",
+            "_params_snapshot": {"video_model": "minimax_h3", "video_params": {}},
+            "video_execution_profile": {
+                "is_minimax_h3": True,
+                "effective_max_frames": 124,
+                "model_type": "minimax_h3",
+            },
+        }
+        registry = SimpleNamespace(
+            get_base_model_type=lambda model_type: model_type,
+            get_model_handler=lambda _: SimpleNamespace(
+                recommend_text_encoder=lambda hardware, model: "gguf_q2_k"
+            ),
+        )
+        with patch.object(pipeline, "_wgp", registry), patch.object(
+            pipeline, "_director_hardware_snapshot",
+            return_value={"ram_gb": 32, "gpu_vram_gb": 12},
+        ):
+            profile = pipeline._saved_director_video_execution_profile(
+                state, model_def=model_def,
+            )
+            child = {}
+            pipeline._apply_director_h3_optimizations(child, {}, profile)
+        self.assertEqual(profile["minimax_h3_text_encoder"], "gguf_q2_k")
+        self.assertEqual(child["minimax_h3_text_encoder"], "gguf_q2_k")
+        self.assertNotIn("minimax_h3_text_encoder", state["video_execution_profile"])
     def test_execution_profile_persists_all_h3_optimizations(self):
         profile = build_director_video_execution_profile(
             "minimax_h3",
@@ -1509,6 +1765,8 @@ class TestDirectorBackendValidation(unittest.TestCase):
         self.original_wgp = pipeline._wgp
         definitions = {
             "image": _image_editor(),
+            "qwen21": _qwen_image_21(),
+            "legacy_image": _image_editor(max_image_refs=10),
             "ltx": _ltx_video(),
             "ovi": {
                 "name": "Ovi",
@@ -1589,6 +1847,25 @@ class TestDirectorBackendValidation(unittest.TestCase):
             pid="test",
         )
         self.assertEqual(refs, ["source.png", "character.png"])
+
+    def test_image_reference_routing_uses_selected_format_and_source_first_cap(self):
+        self.assertEqual(
+            pipeline._director_image_prompt_type("qwen21", ["source.png", "ref.png"]),
+            "I",
+        )
+        self.assertEqual(
+            pipeline._director_image_prompt_type(
+                "legacy_image", ["source.png", "ref.png"],
+            ),
+            "KI",
+        )
+        self.assertEqual(pipeline._director_image_prompt_type("qwen21", []), "")
+
+        refs = ["source.png", *[f"ref-{index}.png" for index in range(12)]]
+        limited = pipeline._limit_director_image_refs("qwen21", refs, pid="test")
+        self.assertEqual(len(limited), 10)
+        self.assertEqual(limited[0], "source.png")
+        self.assertEqual(limited, refs[:10])
 
     def test_native_window_uses_selected_model_default(self):
         frames = pipeline._director_native_window_frames(
@@ -2400,7 +2677,9 @@ class TestDirectorUICatalogContract(unittest.TestCase):
         self.assertIn("resolution: directorVideoResolution", store)
         self.assertIn("minimax_h3_turbo_mode: directorTurboEnabled", store)
         self.assertIn("minimax_h3_turbo_preset: directorTurboPreset?.id", store)
-        self.assertIn("override_attention: directorSlaEnabled", store)
+        self.assertIn("override_attention: directorVedaEnabled", store)
+        self.assertIn("? 'veda'", store)
+        self.assertIn(": directorSlaEnabled", store)
         self.assertIn("? 'sla'", store)
         self.assertIn("? 'sdpa'", store)
         self.assertIn("? 'sol'", store)

@@ -28,7 +28,9 @@ import type { OutputFile } from '../../types'
  * What the grid buys beyond the fix: selecting several items at once, which is
  * the only sane way to favourite, move or delete more than one thing.
  */
-export function MediaGrid() {
+type OpenViewer = (file: OutputFile, options?: { compare?: boolean; currentTime?: number }) => void
+
+export function MediaGrid({ onOpenViewer }: { onOpenViewer?: OpenViewer } = {}) {
   // filteredOutputs(), not the raw list: the type filter and the search box
   // live there, and — more importantly — selectedOutput is an index INTO the
   // filtered list. Rendering the raw one made the filter do nothing and would
@@ -239,6 +241,7 @@ export function MediaGrid() {
 
       {openIndex !== null && outputs[openIndex] && (
         <DetailDialog
+          onOpenViewer={onOpenViewer}
           index={openIndex}
           onClose={() => setOpenIndex(null)}
           onStep={delta => {
@@ -356,8 +359,9 @@ function MediaCard({ file, index, picked, anyPicked, current, onPick, onOpen, on
 /** The big view. Mounts the existing feed item, which already carries every
  *  per-item action — reroll, load settings, copy prompt, upscale, revoice,
  *  move, delete — so none of that is duplicated here. */
-function DetailDialog({ index, onClose, onStep }: {
+function DetailDialog({ index, onClose, onStep, onOpenViewer }: {
   index: number
+  onOpenViewer?: OpenViewer
   onClose: () => void
   onStep: (delta: number) => void
 }) {
@@ -421,6 +425,9 @@ function DetailDialog({ index, onClose, onStep }: {
             onActivate={() => {}}
             onPlaybackStart={() => {}}
             onMeasured={() => {}}
+            // The full-screen viewer replaces this dialog rather than
+            // stacking on top of it, so Escape closes one thing at a time.
+            onOpenViewer={onOpenViewer && ((one, options) => { onClose(); onOpenViewer(one, options) })}
           />
         </div>
       </div>

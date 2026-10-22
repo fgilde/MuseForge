@@ -1,16 +1,35 @@
-import { useRef, useState, useEffect, useMemo } from 'react'
-import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, Layers, ChevronDown, ChevronUp } from 'lucide-react'
+import { outputIdentity } from '../../lib/galleryIdentity'
+import { isDirectorRenderChild } from '../../lib/directorJobs'
+import { useRef, useCallback, useState, useEffect, useMemo } from 'react'
+import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, Layers, ChevronDown, ChevronUp, Maximize2 } from 'lucide-react'
 import { TabFilter } from './TabFilter'
 import { MediaGrid } from './MediaGrid'
 import { ChatView } from './ChatView'
 import { AudiobookEditor } from './AudiobookEditor'
 import { VoicesView } from './VoicesView'
+import { GalleryViewer, type GalleryImageChoice } from './GalleryViewer'
+import { GenerationPreview } from './GenerationPreview'
 import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
-import { useIsMobile } from '../../lib/useIsMobile'
+import { useIsMobileSidecar } from '../../lib/useIsMobile'
+import { captureGallerySourceImages } from '../../lib/galleryInputs'
+import { createGalleryViewerSurface } from '../../lib/galleryFullscreen'
+import { toggleFavorite as saveFavorite } from '../../api/client'
 import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
 import { PROMPT_ENHANCEMENT_ACTIVITY } from '../../lib/promptEnhancementActivity'
-import type { GenerationJob } from '../../types'
+import type { GenerationJob, OutputFile } from '../../types'
+
+type ViewerSession = {
+  id: string
+  items: OutputFile[]
+  initialId: string
+  initialCompare?: boolean
+  initialTime?: number
+  sourceImages: GalleryImageChoice[]
+  workspace: string
+  allowFavorite: boolean
+  surface: ReturnType<typeof createGalleryViewerSurface>
+}
 
 function WorkspaceSelector() {
   const workspaces = useStore(s => s.workspaces)
@@ -188,13 +207,7 @@ function stripTimeSuffix(msg: string): string {
   return msg.replace(/\s*\|\s*\d+:\d+.*$/, '').trim()
 }
 
-function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop?: () => void; onDismiss: () => void }) {
-  const hasSteps = job.totalSteps > 0
-  const progressPct = hasSteps ? (job.step / job.totalSteps) * 100 : job.progress * 100
-  const phase = stripTimeSuffix(job.phase || job.message)
-  const isFailed = job.status === 'failed' || job.status === 'cancelled'
-  const isPromptPlanning = job.kind === 'prompt_enhancement'
-  const errorText = job.error || job.message || (job.status === 'cancelled' ? 'Cancelled' : 'Generation failed')
+function H3PromptDisclosure({ job }: { job: GenerationJob }) {
   const h3PlanSignature = job.h3WindowPlan?.signature
   const [h3PromptDisclosure, setH3PromptDisclosure] = useState({
     signature: h3PlanSignature,
@@ -205,6 +218,75 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
   )
   const h3WindowMatch = (job.phase || job.message || '').match(/Sliding Window\s+(\d+)\/(\d+)/i)
   const activeH3Window = job.currentWindow ?? (h3WindowMatch ? Number(h3WindowMatch[1]) : 1)
+  const activeH3PlanWindow = job.h3WindowPlan?.windows.find(
+    window => window.index === activeH3Window,
+  ) || job.h3WindowPlan?.windows[0]
+  return (
+    <>
+      {job.h3WindowPlan && activeH3PlanWindow && (
+        <div className="border-t border-border bg-bg-secondary/60 px-3 py-2">
+          <div className="flex items-center justify-between gap-2 text-[10px] text-text-muted">
+            <span className="font-medium text-text-secondary">
+              Exact H3 prompt · Window {activeH3PlanWindow.index}/{job.h3WindowPlan.window_count}
+            </span>
+            <button
+              type="button"
+              onClick={() => setH3PromptDisclosure(current => ({
+                signature: h3PlanSignature,
+                open: current.signature === h3PlanSignature ? !current.open : true,
+              }))}
+              className="flex items-center gap-1 text-accent-blue hover:text-accent-blue/80"
+            >
+              {showH3Prompts ? 'Hide all' : 'View all'}
+              {showH3Prompts ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+            </button>
+          </div>
+          <p className="mt-1 text-[10px] leading-relaxed text-text-muted line-clamp-3 whitespace-pre-wrap break-words">
+            {activeH3PlanWindow.prompt}
+          </p>
+          {showH3Prompts && (
+            <div className="mt-2 max-h-80 overflow-y-auto space-y-2 border-t border-border pt-2">
+              {job.h3WindowPlan.windows.map(window => (
+                <div
+                  key={`${window.index}-${window.start_frame}`}
+                  className={`rounded-md border p-2 ${
+                    window.index === activeH3Window
+                      ? 'border-accent-blue/70 bg-accent-blue/5'
+                      : 'border-border bg-bg-tertiary/60'
+                  }`}
+                >
+                  <div className="mb-1 flex items-center justify-between text-[9px] text-text-muted">
+                    <span>
+                      Window {window.index}: {window.title || `Beat ${window.index}`}
+                      {window.index === activeH3Window ? ' · Generating now' : ''}
+                    </span>
+                    <span>{window.start_seconds.toFixed(1)}–{window.end_seconds.toFixed(1)}s</span>
+                  </div>
+                  <pre className="whitespace-pre-wrap break-words font-sans text-[10px] leading-relaxed text-text-secondary">
+                    {window.prompt}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
+
+export function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop?: () => void; onDismiss: () => void }) {
+  const hasSteps = job.totalSteps > 0
+  const progressPct = hasSteps ? (job.step / job.totalSteps) * 100 : job.progress * 100
+  const phase = stripTimeSuffix(job.phase || job.message)
+  const isFailed = job.status === 'failed' || job.status === 'cancelled'
+  const preview = isFailed ? null : job.preview ?? null
+  const [previewPausedByUser, setPreviewPausedByUser] = useState(false)
+  const [previewInfoVisible, setPreviewInfoVisible] = useState(true)
+  const isPromptPlanning = job.kind === 'prompt_enhancement'
+  const errorText = job.error || job.message || (job.status === 'cancelled' ? 'Cancelled' : 'Generation failed')
+  const h3WindowMatch = (job.phase || job.message || '').match(/Sliding Window\s+(\d+)\/(\d+)/i)
+  const activeH3Window = job.currentWindow ?? (h3WindowMatch ? Number(h3WindowMatch[1]) : 1)
   const totalStudioWindows = job.totalWindows ?? (h3WindowMatch ? Number(h3WindowMatch[2]) : 1)
   const isMultiWindow = totalStudioWindows > 1
   const isMultiClip = (job.totalClips ?? 1) > 1
@@ -212,15 +294,19 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
   const windowClock = formatEstimatedClock(job.windowCompletionAt)
   const generationEta = formatEtaDuration(job.generationEtaSeconds)
   const generationClock = formatEstimatedClock(job.generationCompletionAt)
-  const activeH3PlanWindow = job.h3WindowPlan?.windows.find(
-    window => window.index === activeH3Window,
-  ) || job.h3WindowPlan?.windows[0]
 
   return (
-    <div className={`rounded-xl border overflow-hidden ${
+    <div data-generation-job-id={job.id} className={`rounded-xl border overflow-hidden ${
       isFailed ? 'border-red-500/30 bg-bg-tertiary' : 'border-accent-blue/30 bg-bg-tertiary'
     }`}>
       <div className="w-full aspect-video flex items-center justify-center relative">
+        {preview && <GenerationPreview
+          preview={preview}
+          infoVisible={previewInfoVisible}
+          onToggleInfo={() => setPreviewInfoVisible(visible => !visible)}
+          initiallyPaused={previewPausedByUser}
+          onPausedChange={setPreviewPausedByUser}
+        />}
         {/* Dismiss button (top-right, failed only) */}
         {isFailed && (
           <button
@@ -231,11 +317,13 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
             <X size={14} />
           </button>
         )}
-        <div className="flex flex-col items-center gap-3 text-text-muted w-full max-w-md px-4">
-          <Film size={40} className={isFailed ? 'text-red-400' : 'animate-pulse'} />
+        <div hidden={!!preview && !previewInfoVisible} className={`flex flex-col items-center gap-3 w-full max-w-md px-4 text-text-muted ${preview
+          ? 'pointer-events-none absolute inset-x-0 bottom-0 z-10 max-w-none bg-gradient-to-t from-black/95 via-black/75 to-transparent px-3 pb-2 pt-9 text-white'
+          : ''} ${preview && !previewInfoVisible ? 'hidden' : ''}`}>
+          {!preview && <Film size={40} className={isFailed ? 'text-red-400' : 'animate-pulse'} />}
 
           <div className="text-center w-full">
-            <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : 'text-text-secondary'}`}>
+            <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : preview ? 'text-white' : 'text-text-secondary'}`}>
               {isFailed
                 ? (job.status === 'cancelled' ? 'Cancelled' : 'Generation Failed')
                 : isPromptPlanning
@@ -246,6 +334,11 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
             </p>
             {!isFailed && phase && (
               <p className="text-xs mt-1 truncate">{phase}</p>
+            )}
+            {!isFailed && job.previewNotice && (
+              <p className={`text-[10px] mt-0.5 truncate ${preview ? 'text-white/75' : 'text-text-muted'}`}>
+                {job.previewNotice}
+              </p>
             )}
             {hasSteps && !isFailed && (
               <p className="text-[10px] text-text-muted mt-0.5">
@@ -304,54 +397,7 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
         </div>
       </div>
 
-      {job.h3WindowPlan && activeH3PlanWindow && (
-        <div className="border-t border-border bg-bg-secondary/60 px-3 py-2">
-          <div className="flex items-center justify-between gap-2 text-[10px] text-text-muted">
-            <span className="font-medium text-text-secondary">
-              Exact H3 prompt · Window {activeH3PlanWindow.index}/{job.h3WindowPlan.window_count}
-            </span>
-            <button
-              type="button"
-              onClick={() => setH3PromptDisclosure(current => ({
-                signature: h3PlanSignature,
-                open: current.signature === h3PlanSignature ? !current.open : true,
-              }))}
-              className="flex items-center gap-1 text-accent-blue hover:text-accent-blue/80"
-            >
-              {showH3Prompts ? 'Hide all' : 'View all'}
-              {showH3Prompts ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-            </button>
-          </div>
-          <p className="mt-1 text-[10px] leading-relaxed text-text-muted line-clamp-3 whitespace-pre-wrap break-words">
-            {activeH3PlanWindow.prompt}
-          </p>
-          {showH3Prompts && (
-            <div className="mt-2 max-h-80 overflow-y-auto space-y-2 border-t border-border pt-2">
-              {job.h3WindowPlan.windows.map(window => (
-                <div
-                  key={`${window.index}-${window.start_frame}`}
-                  className={`rounded-md border p-2 ${
-                    window.index === activeH3Window
-                      ? 'border-accent-blue/70 bg-accent-blue/5'
-                      : 'border-border bg-bg-tertiary/60'
-                  }`}
-                >
-                  <div className="mb-1 flex items-center justify-between text-[9px] text-text-muted">
-                    <span>
-                      Window {window.index}: {window.title || `Beat ${window.index}`}
-                      {window.index === activeH3Window ? ' · Generating now' : ''}
-                    </span>
-                    <span>{window.start_seconds.toFixed(1)}–{window.end_seconds.toFixed(1)}s</span>
-                  </div>
-                  <pre className="whitespace-pre-wrap break-words font-sans text-[10px] leading-relaxed text-text-secondary">
-                    {window.prompt}
-                  </pre>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      <H3PromptDisclosure job={job} />
 
       {/* Bottom bar */}
       <div className="px-3 py-2 min-h-[40px] flex items-center justify-between">
@@ -372,13 +418,15 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
   )
 }
 
-function PipelinePlaceholder() {
+function PipelinePlaceholder({ job }: { job: GenerationJob | null }) {
   const pipelineStatus = useStore(s => s.pipelineStatus)
   const pipelineId = useStore(s => s.pipelineId)
   const stopPipeline = useStore(s => s.stopPipeline)
   const resumePipeline = useStore(s => s.resumePipeline)
   const reattachDirectorPipeline = useStore(s => s.reattachDirectorPipeline)
   const [resuming, setResuming] = useState(false)
+  const [previewPausedByUser, setPreviewPausedByUser] = useState(false)
+  const [previewInfoVisible, setPreviewInfoVisible] = useState(true)
 
   if (!pipelineId || !pipelineStatus) return null
   if (pipelineStatus.status === 'completed') return null
@@ -388,6 +436,11 @@ function PipelinePlaceholder() {
   const message = progress?.message || phase
   const isFailed = pipelineStatus.status === 'failed' || pipelineStatus.status === 'cancelled'
   const errorText = pipelineStatus.error || message || 'Director pipeline stopped'
+  const preview = !isFailed && job?.preview ? {
+    ...job.preview,
+    clip: progress?.current_clip ?? Math.max(1, progress?.current ?? job.preview.clip),
+    total_clips: progress?.total_clips ?? progress?.total ?? job.preview.total_clips,
+  } : null
 
   const hasSteps = (progress?.total_steps ?? 0) > 0
   const progressPct = hasSteps
@@ -404,8 +457,15 @@ function PipelinePlaceholder() {
   const projectClock = formatEstimatedClock(progress?.project_completion_at)
 
   return (
-    <div className={`rounded-xl overflow-hidden border ${isFailed ? 'border-red-500/30' : 'border-accent-blue/30'} bg-bg-tertiary`}>
+    <div data-director-pipeline-id={pipelineId} className={`rounded-xl overflow-hidden border ${isFailed ? 'border-red-500/30' : 'border-accent-blue/30'} bg-bg-tertiary`}>
       <div className="w-full aspect-video flex items-center justify-center relative">
+        {preview && <GenerationPreview
+          preview={preview}
+          infoVisible={previewInfoVisible}
+          onToggleInfo={() => setPreviewInfoVisible(visible => !visible)}
+          initiallyPaused={previewPausedByUser}
+          onPausedChange={setPreviewPausedByUser}
+        />}
         {isFailed && (
           <button
             type="button"
@@ -416,11 +476,15 @@ function PipelinePlaceholder() {
             <X size={14} />
           </button>
         )}
-        <div className="flex flex-col items-center gap-3 text-text-muted w-full max-w-xs px-4">
-          <Film size={40} className={isFailed ? 'text-red-400' : 'animate-pulse'} />
+        <div hidden={!!preview && !previewInfoVisible} className={
+          'flex flex-col items-center gap-3 text-text-muted w-full max-w-md px-4 '
+          + (preview ? 'pointer-events-none absolute inset-x-0 bottom-0 z-10 max-w-none bg-gradient-to-t from-black/95 via-black/75 to-transparent px-3 pb-2 pt-9 text-white' : '')
+          + (preview && !previewInfoVisible ? ' hidden' : '')
+        }>
+          {!preview && <Film size={40} className={isFailed ? 'text-red-400' : 'animate-pulse'} />}
 
           <div className="text-center w-full">
-            <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : 'text-text-secondary'}`}>
+            <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : preview ? 'text-white' : 'text-text-secondary'}`}>
               {isFailed
                 ? (pipelineStatus.status === 'cancelled' ? 'Director Cancelled' : 'Director Failed')
                 : pipelineStatus.status === 'paused' ? 'Paused — Review' : 'Director'}
@@ -482,6 +546,8 @@ function PipelinePlaceholder() {
         </div>
       </div>
 
+      {job && <H3PromptDisclosure job={job} />}
+
       {/* Bottom bar with stop button */}
       <div className="px-3 py-2 min-h-[40px] flex items-center justify-between">
         <div className="text-[11px] text-text-muted truncate flex-1">
@@ -528,31 +594,94 @@ function PipelinePlaceholder() {
 }
 
 export function MainContent() {
-  const isMobile = useIsMobile()
+  const isMobile = useIsMobileSidecar()
   const outputs = useStore(s => s.filteredOutputs())
   // Unfiltered count, to tell "no generations yet" apart from "the filter
   // hides them all" — the first-run text is wrong for the second case.
   const loadedCount = useStore(s => s.outputs.length)
   const outputsTotal = useStore(s => s.outputsTotal)
+  const rootOutputsLoaded = loadedCount
+  const hasMoreOutputs = useStore(s => s.outputs.length < s.outputsTotal)
   const jobs = useStore(s => s.jobs)
+  const pipelineId = useStore(s => s.pipelineId)
+  const pipelineStatus = useStore(s => s.pipelineStatus)
+  const directorChildren = useMemo(
+    () => jobs.filter(job => isDirectorRenderChild(job, pipelineId, pipelineStatus)),
+    [jobs, pipelineId, pipelineStatus],
+  )
+  const directorJob = directorChildren.find(job => job.status === 'running') ?? directorChildren[0] ?? null
   const isEnhancing = useStore(s => s.isEnhancing)
   const generationMode = useStore(s => s.generationMode)
   const audioSubMode = useStore(s => s.audioSubMode)
   const stopGeneration = useStore(s => s.stopGeneration)
   const dismissJob = useStore(s => s.dismissJob)
+  const activeIndex = useStore(s => s.selectedOutput)
+  const [viewerSession, setViewerSession] = useState<ViewerSession | null>(null)
+  const releaseViewerImages = useRef<(() => void) | null>(null)
+  useEffect(() => () => { releaseViewerImages.current?.() }, [])
+
+  const openViewer = useCallback((file: OutputFile, options?: {compare?: boolean; currentTime?: number}) => {
+    if (file.type === 'audio') return
+    const state = useStore.getState()
+    releaseViewerImages.current?.()
+    const sources = captureGallerySourceImages()
+    const surface = createGalleryViewerSurface(!options?.compare)
+    releaseViewerImages.current = () => { sources.release(); surface.release() }
+    setViewerSession({
+      id: `${Date.now()}:${outputIdentity(file)}`,
+      items: state.filteredOutputs().filter(item => item.type !== 'audio'),
+      initialId: outputIdentity(file), initialCompare: options?.compare, initialTime: options?.currentTime,
+      sourceImages: sources.images, workspace: state.activeWorkspace, allowFavorite: !state.browsingUploads, surface,
+    })
+  }, [])
+
+  const favoriteInViewer = useCallback(async (file: OutputFile) => {
+    if (!viewerSession?.allowFavorite) return
+    const origin = file.workspace || viewerSession.workspace
+    const result = await saveFavorite(file.name, origin)
+    useStore.getState().setGalleryOutputFavorite(file.name, origin, result.favorite)
+    // Keep this viewing session stable even when removing an item from Favorites.
+    setViewerSession(current => current && current.id === viewerSession.id ? {...current,
+      items: current.items.map(item => outputIdentity(item) === outputIdentity(file)
+        ? {...item, favorite: result.favorite} : item),
+    } : current)
+  }, [viewerSession])
+
+  const loadMoreForViewer = useCallback(async () => {
+    if (!viewerSession) return
+    await useStore.getState().loadMoreOutputs()
+    const next = useStore.getState().filteredOutputs().filter(item => item.type !== 'audio')
+    setViewerSession(current => {
+      if (!current || current.id !== viewerSession.id) return current
+      const known = new Set(current.items.map(outputIdentity))
+      return {...current, items: [...current.items, ...next.filter(item => !known.has(outputIdentity(item)))]}
+    })
+  }, [viewerSession])
+
+  // Closing the full-screen viewer leaves the grid's selection on whatever
+  // the viewer showed last, so returning lands where the user was looking.
+  const closeViewer = useCallback((id: string) => {
+    setViewerSession(null)
+    releaseViewerImages.current?.()
+    releaseViewerImages.current = null
+    const state = useStore.getState()
+    const index = state.filteredOutputs().findIndex(output => outputIdentity(output) === id)
+    if (index >= 0) state.setSelectedOutput(index)
+  }, [])
   // Waiting work now lives in the universal top-bar queue. Keep the gallery
   // focused on media plus useful live/error cards instead of large blank
   // placeholders for every job that has not started yet.
   const galleryJobs = useMemo(
     () => {
       const visibleJobs = jobs.filter(job => (
-        job.status !== 'held'
+        !directorChildren.includes(job)
+        && job.status !== 'held'
         && job.status !== 'completed'
         && (job.status !== 'queued' || job.showInGallery === true)
       ))
       return isEnhancing ? [PROMPT_ENHANCEMENT_ACTIVITY, ...visibleJobs] : visibleJobs
     },
-    [isEnhancing, jobs],
+    [isEnhancing, jobs, directorChildren],
   )
 
   // The virtualizer that used to live here is gone: measured heights, an
@@ -589,9 +718,10 @@ export function MainContent() {
         <TabFilter />
         <div className="flex items-center gap-2 shrink-0">
           <div className="hidden text-xs text-text-muted xl:block">
-            {outputsTotal > outputs.length
-              ? `${outputs.length} / ${outputsTotal} items`
-              : `${outputs.length} ${outputs.length === 1 ? 'item' : 'items'}`}
+            {outputsTotal > rootOutputsLoaded
+              ? `${rootOutputsLoaded} / ${outputsTotal} outputs`
+              : `${outputsTotal} ${outputsTotal === 1 ? 'output' : 'outputs'}`}
+            {outputs.length > rootOutputsLoaded && ` · ${outputs.length - rootOutputsLoaded} expanded`}
           </div>
           {/* Blueprints belong here, not only on the empty state: once a mode
               had a single output the only way in was a bare bookmark icon in
@@ -615,6 +745,16 @@ export function MainContent() {
             <Layers size={13} />
             <span className="hidden md:inline">LoRAs</span>
           </button>
+          <button type="button" aria-label="Open full-screen gallery" title="Open full-screen gallery"
+            disabled={!outputs.some(file => file.type !== 'audio')}
+            onClick={() => {
+              const selected = outputs[activeIndex]
+              const file = selected && selected.type !== 'audio' ? selected : outputs.find(item => item.type !== 'audio')
+              if (file) openViewer(file)
+            }}
+            className="rounded-lg p-1.5 text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-35">
+            <Maximize2 size={16} />
+          </button>
           <WorkspaceSelector />
           {!isMobile && <GlobalQueuePopover />}
         </div>
@@ -626,7 +766,7 @@ export function MainContent() {
       <div className="flex flex-1 flex-col overflow-hidden">
         {jobs.length > 0 ? (
           <div className="shrink-0 space-y-3 border-b border-border px-3 py-3 md:px-5">
-            <PipelinePlaceholder />
+            <PipelinePlaceholder key={pipelineId} job={directorJob} />
             {galleryJobs.map((j, i) => (
               <JobPlaceholder
                 key={j.id || `pending-${i}`}
@@ -637,7 +777,7 @@ export function MainContent() {
             ))}
           </div>
         ) : (
-          <PipelinePlaceholder />
+          <PipelinePlaceholder key={pipelineId} job={directorJob} />
         )}
 
         {outputs.length === 0 && jobs.length === 0 && loadedCount > 0 ? (
@@ -684,9 +824,21 @@ export function MainContent() {
           </div>
           )
         })() : (
-          <MediaGrid />
+          <MediaGrid onOpenViewer={openViewer} />
         )}
       </div>
+      {viewerSession && (
+        <GalleryViewer key={viewerSession.id}
+          surface={viewerSession.surface}
+          items={viewerSession.items} initialId={viewerSession.initialId}
+          initialCompare={viewerSession.initialCompare} initialTime={viewerSession.initialTime}
+          sourceImages={viewerSession.sourceImages}
+          comparisonImages={viewerSession.items.filter(file => file.type === 'image').map(file => ({
+            id: outputIdentity(file), url: file.url, name: file.workspace ? `${file.workspace} / ${file.name}` : file.name,
+          }))}
+          allowFavorite={viewerSession.allowFavorite} onFavorite={favoriteInViewer} onClose={closeViewer}
+          hasMore={hasMoreOutputs} onLoadMore={loadMoreForViewer} />
+      )}
     </main>
   )
 }

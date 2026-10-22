@@ -8,13 +8,29 @@ Choose Video, Image or Audio and a workflow at the top of Studio. The complete w
 
 The fixed settings strip keeps Characters on the left and groups Recipes, Resolution, Aspect, Duration and Advanced together on the right, with Recipes immediately beside Resolution. Advanced becomes an icon with its active count when the sidebar is narrow, and the output indicators keep their values without decorative icons. In the smallest layouts, Characters also uses its icon so the controls remain separate and tappable. Indicators show the current choices; Auto duration shows its recommended length below a small Auto label and updates as the recommendation changes. The Auto toggle's tooltip also previews the recommendation before enabling it. Resolution and Aspect open lists sized to their labels, directly above the clicked button on desktop and mobile, without redundant headings. Selecting a value closes its list; keyboard users can use the arrow keys, Home/End and Escape. The options still come from the selected model, including Auto and model-specific tiers. Duration and Advanced retain their detailed overlays. Opening a setting does not resize the prompt or move Generate. Click another indicator to switch panels or click outside to dismiss.
 
-Video Duration has **Time** and **Window** tabs. The **Auto** toggle and current duration stay visible above both tabs. Enabling Auto from either view returns to Time and follows the automatic recommendation. The time slider, presets and custom time entry appear dimmed but remain interactive: grabbing the slider, adjusting it with arrow keys, choosing a preset or editing the timecode turns Auto off immediately. You can also turn Auto off explicitly. Time uses the model-aligned slider through five minutes, or **10m, 15m, 30m, 60m or Custom** where supported. Window retains its exact count presets, slider and number field. Adjustable **Window Length** stays visible and automatically follows shorter durations up to the GPU recommendation or saved/manual limit. Automatic sizing continues while the popup is closed. Window overrides and saved GPU/model preferences work as before. **Window overlap** starts collapsed in both tabs and opens when needed; unsupported overlap controls remain hidden. H3 Reference sequences keep their **Carry motion and sound between windows** option here. Speech and Director retain their specialized duration controls.
+Video Duration has **Time** and **Window** tabs. The **Auto** toggle and current duration stay visible above both tabs. Enabling Auto from either view returns to Time and follows the automatic recommendation. The time slider, presets and custom time entry appear dimmed but remain interactive: grabbing the slider, adjusting it with arrow keys, choosing a preset or editing the timecode turns Auto off immediately. You can also turn Auto off explicitly. **Time keeps the total runtime fixed** when you change Window Length and recalculates how many passes are needed. It uses the model-aligned slider through five minutes, or **10m, 15m, 30m, 60m or Custom** where supported. **Window keeps the selected window count fixed** and updates total duration as Window Length changes: one 10.1s window becomes one 14.4s window. Multiple continuation windows account for overlap and discarded frames; independent hard-cut clips use their full lengths. Window retains its exact count presets, slider and number field. A note below Window Length explains which duration behavior is active. Auto continues following the prompt or source media. Adjustable **Window Length** stays visible and automatically follows shorter Time durations up to the GPU recommendation or saved/manual limit. Automatic sizing continues while the popup is closed. Window overrides and saved GPU/model preferences work as before. **Window overlap** starts collapsed in both tabs and opens when needed; unsupported overlap controls remain hidden. H3 Reference sequences keep their **Carry motion and sound between windows** option here. Speech and Director retain their specialized duration controls.
 
-For H3 **Frames** and **References**, open Duration and enable **Allow 30s clips · Experimental** above Window Length. This sets the manual window limit to 30s. Choose **Time → Custom → 00:00:30**, or **Window → 1**, for one pass without continuation windows. H3's frame spacing makes this 719 frames (29.96s at 24 fps). You can lower Window Length to experiment with shorter passes. Longer timelines can still use multiple extended windows. Selecting Auto exits the experiment and restores GPU-based sizing. This exceeds the model's published 15s duration: it needs more VRAM and time, and motion or identity may drift. The setting travels with queued jobs and output settings; Animate's fixed motion-transfer windows and audio-reference limits are unchanged.
+For H3 **Frames** and **References**, open Duration and enable **Allow 30s clips · Experimental** below the window assessment. This sets the manual window limit to 30s. **Window keeps its selected count** when you enable or disable the experiment, and total duration follows the selected window length throughout the extended range. **Time keeps its target runtime**. Choose **Time → Custom → 00:00:30**, or **Window → 1**, for one pass without continuation windows. H3's frame spacing makes this 719 frames (29.96s at 24 fps). You can lower Window Length to experiment with shorter passes. Longer timelines can still use multiple extended windows. Selecting Auto exits the experiment and restores GPU-based sizing. This exceeds the model's published 15s duration: it needs more VRAM and time, and motion or identity may drift. The setting travels with queued jobs and output settings; Animate's fixed motion-transfer windows and audio-reference limits are unchanged.
 
 On mobile, settings overlays fit within the sidebar. Video Duration opens directly above its button with a compact, steady height while values change. Additional controls scroll inside it. Sequence details sit below the sliders, so switching between one window and a longer sequence does not move the slider you are adjusting. The panel follows its button when the keyboard or available screen size changes. Close it with Escape, its indicator, or a click outside.
 
 Image generation includes **21:9** ultrawide alongside the other aspect ratios. Choosing a fixed aspect while Resolution is **Auto** selects **720p** so the generated image uses that shape; you can then choose another resolution tier.
+
+H3 **Window Length** shows a live speed-path estimate and a separate GPU memory assessment. The estimate includes the selected resolution, reference media and carried history, and describes the largest pass actually needed by the timeline. A 30-second window limit with a shorter timeline is assessed at the shorter generated length. **Faster path expected** means the estimated workload fits the native normalization path; **Slower path expected** means it requires bounded normalization chunks. Neither label promises an overall render time. Expand **Why this estimate?** for estimated packed rows and uncertainty. Memory guidance uses the selected checkpoint's existing VRAM profile, so the recommended window can change across GPUs and resolutions. References can require additional headroom.
+
+Enable **Allow 30s clips · Experimental** to move Window Length through the full 30-second range. The duration band marks H3's recommended **14.4s** limit, and any larger selected limit shows a warning. Longer passes can be much slower, run out of memory, or drift in quality; use shorter consecutive windows when possible. The UI does not assign a universal slowdown multiplier or treat 75,000 rows as a VRAM limit. **Auto** exits the experiment and restores the GPU-aware recommendation.
+
+## Krea 2 Identity Edit
+
+Krea 2 RAW and Turbo Identity Edit expose three controls in **Advanced → Generation**:
+
+- **Subject likeness** controls reference fidelity from 0 to 10. The default, 1, keeps the original behavior; **Strong likeness · 4** is a useful starting point for stronger identity preservation. High values can resist requested changes or over-copy the reference.
+- **Scene likeness** appears with two references. Image 1 supplies the scene; Image 2 supplies the subject. With one image, Subject likeness controls that image. In image editing workflows, the source image comes before any additional reference.
+- **Grounding resolution** caps the reference image's longest edge for the vision encoder, from 384 to 1536 pixels. The default is 768. Lower values can favor edits; 1024 can help preserve reference detail but uses more memory. The trained range is 384–768, so higher values are experimental. This does not change output resolution or the VAE reference size, and smaller source images are not enlarged.
+
+RAW and Turbo remember these choices independently across model switches and restarts. Each queued job keeps its submitted values. Generated image information records the controls; **Load settings**, reroll and saved presets restore them for repeatable comparisons.
+
+Identity Edit preserves the aspect ratio and content of uploaded references before grounding, then fits their latent tokens to the output grid. A portrait reference used for a landscape output is not padded into a wide image before the grounding encoder sees it. Likeness values are a tuning aid rather than a guarantee; compare with the same prompt, references and seed. Turbo always runs with guidance disabled, so its ineffective Guidance Scale control is hidden. RAW retains adjustable guidance.
 
 ## Gallery scope and search
 
@@ -28,13 +44,108 @@ apply before pagination. Each result shows its source folder; use that label to 
 the folder. Favorites, deletion, download, reference reuse and Editor import retain
 that origin even when another folder contains an identically named file.
 
+Click a thumbnail on the right to bring that asset into the gallery and keep it
+selected while media details load or new results arrive. Scroll the main gallery
+to resume selecting the card being browsed.
+
+Completed Director runs show **Show clips** beneath the latest joined video in
+**All**, **Video** and **Multi-clip**. The shots start collapsed; expand them to
+browse their individual cards and normal media actions, then **Hide clips** to
+close the group. **Edit Director shots** opens the saved production, where a
+shot can be edited and rerun as a replacement. **Rejoin** uses the current saved
+takes and creates a new final video, retaining the previous output. Search and
+Favorites find individual clips directly. Runs without a final show completed
+clips normally. Clips load on demand and stay associated with their source folder.
+
+In **Editor → Media**, choose the **Director** clapperboard filter and
+**Add run** to import the production as separate timeline shots with their
+Director prompts and original soundtrack. Adding the joined video as ordinary
+media adds one video file. Interrupted standard runs can import their completed
+shots; seamless runs use separate source ranges from the cumulative render.
+
+Gallery cards show a local date and time. Open **Info** for the exact timestamp,
+file size, measured resolution, and video/audio duration. Videos also show their
+frame rate and frame count when recorded in the file. Dates are labeled Generated,
+Processed, Uploaded, or File date according to the available record.
+
+Upscaled and enhanced outputs include a **Processing** section: method (such as
+DLSS, FlashVSR or Lanczos), spatial multiplier, before/after dimensions, source,
+processing time, and frame-rate changes or DLSS settings where applicable. New
+outputs retain these measurements even after the source is removed. Older Tools
+outputs recover available details from saved settings and an existing source;
+unknown dimensions are left unknown.
+
+In **Uploads**, choose **More → Delete upload**, then click again to confirm.
+This removes the uploaded source and its metadata, while generated outputs stay.
+Saved setups that reference the removed source will need a replacement upload.
+Maestro refuses deletion while an active or queued Studio job or active Director
+project still uses the file. A locked-file error leaves the item visible for retry.
+
 ## Characters and media
+
+The gallery **More** menu offers **Use as…** actions for the inputs available in
+the current sidebar mode. Images and captured video frames go to image inputs;
+videos go to video inputs; audio goes to soundtrack, voice or audio-reference
+inputs. Destination labels identify the role, including individual voices.
+
+Choosing an audio or video destination opens a trim preview. Use the waveform or
+filmstrip handles, enter exact start/end times, or choose a 3-, 5- or 10-second
+excerpt from the selected start. **Preview selection** plays that range;
+**Zoom to selection** makes short excerpts from long clips easier to adjust.
+**Use selection** creates a separate excerpt and sends it to the chosen input.
+**Use full clip** skips trimming. The gallery original stays unchanged, and the
+destination's usual file limits still apply. Current-frame image actions remain
+one-click actions.
 
 **Characters** uses the same person icon in Reference, supported Image, Viggle and Speech workflows. It opens the saved library beside the sidebar on desktop and in a sheet on mobile. A Reference character remains one card containing its appearance and voice. Speech uses its saved voice; Image uses chosen original or recovered views. Viggle can prepare a character replacement frame or accept a manually edited frame.
 
 Reference mode shows compact input cards and keeps one **Add reference** drop zone while the selected model has room. Drop files or tap to choose them. Click a card to expand its name, type and supported options directly beneath that thumbnail row. The fields flow with the sidebar instead of covering the prompt. Use the eye button for a larger preview; replacement, image/audio roles, video soundtracks and background isolation remain available. Drag thumbnails to reorder them, or focus a thumbnail and use Alt+Left/Right. Reference labels update with their order, and saved character appearance and voice move together. Escape closes the inline settings and returns focus to the thumbnail. Larger input collections scroll together with the prompt.
 
+For H3 image references, **Object / prop** preserves the pictured object's design, shape, proportions, materials, colors and details while ignoring its source scene, framing, background and pose. The prompt chooses where it appears, its scale and action, and how many copies appear. Object references remain **Pictures** rather than saved-character identities. **Isolate object background** is available when the source background gets in the way. For example: “AT-ATs matching <Picture 2> advance in the background and fire at Chewy.”
+
 Frames and Extend use the same compact, three-column tile layout as Reference mode, including on mobile. They keep their specific input roles: source video, start/end/timed frames, control video, soundtrack and supported references. Tiles wrap instead of scrolling sideways. Frame positions and per-input settings stay with their inputs. Image and Viggle keep their model-specific source/mask and preparation controls. Files still count against each model's real limits.
+
+## Long source media across windows
+
+In **Frames**, upload the full control video and choose the output duration and
+window count. Each native sliding window reads the matching part of the control
+video and mask. Source-video audio or an uploaded soundtrack uses the same
+timeline. Separately rendered clips also advance through a shared control video
+by their assembled durations, including any trimmed clip tails.
+
+In H3 **References**, ordinary uploaded videos default to **Follow window
+timeline**. Each window uses the corresponding source segment, including its
+embedded or attached soundtrack when **Include soundtrack** is enabled. Window
+overlap reads the same source times again to preserve continuity. Turn off
+**Follow window timeline** to reuse a short motion or appearance sample. Saved
+character videos default to reusable samples; encoded RefMods stay reusable.
+
+With **Duration → Auto**, loading a video with **Follow window timeline** enabled
+sets the total duration to its full length and plans the required windows. With
+several timeline videos, Auto follows the longest; they run in parallel rather
+than one after another. Replacing or removing a video updates the recommendation,
+even while the Duration popup is closed. Reusable character samples and RefMods
+do not set the duration. Turn Auto off, or choose a time or window count, to keep
+a manual runtime when loading videos. Model frame timing and the one-hour total
+duration limit still apply.
+
+**Music / performance timeline** takes precedence over video length and retains
+its exact soundtrack behavior, setting the duration to the soundtrack length.
+**Music / sound style only** follows the source timeline across windows; later
+windows receive silence once the clip ends. H3 borrows its sound or music style.
+**Voice reference** remains a reusable identity sample.
+
+**Sound effect reference** guides generated effects by their sound and timbre.
+Each window gets the same short sample. Describe the effect and when it happens
+in your prompt. H3 generates matching sound; it does not play or loop the exact
+waveform or set total duration.
+
+H3's 15-second combined video-reference budget applies to each window. With one
+long video, its segment covers up to 15 seconds of the window; with several
+videos, Maestro shares that budget and takes a shorter segment from each at the
+same window start. Originals
+stay untouched. Timeline references hold their final frame and pad audio with
+silence if the selected output continues beyond the source.
 
 ## Advanced
 
@@ -50,6 +161,14 @@ H3 Fused 4-Step **Frames** and **References** support **4–12 Total Steps**, wi
 Each section heading shows a circular badge when it has active settings, including while collapsed. For example, one enabled adapter gives **LoRAs & presets** a **1** badge. The Advanced button totals the same section counts; badge tooltips list the settings. Controls located elsewhere, such as video's Window Length override in Duration, do not add to Advanced's count. **Face refinement & character mapping** in the Reference character library opens the same Finishing settings. Gallery face refinement remains available for previous videos.
 
 The green LoRA info button opens its usage guide. Guides stay within the visible screen, including with the mobile keyboard open, and long text can be scrolled. Hover for a quick look or click/tap to keep the guide open. Escape dismisses the guide first, leaving Advanced open; tapping elsewhere or pressing the info button again also dismisses it. The same guide behavior is shared by Studio and Director's LoRA pickers.
+
+## Generation previews
+
+Open **Settings → Performance → Generation Preview** and choose **Fast Frames**, **Clearer Frames (Tiny VAE)**, **Live Video (Tiny VAE)** or **Off**. **Live Video** is the default when no choice has been saved; existing choices are preserved. The choice applies when the next generation begins, including queued jobs, and does not require disabling Performance Auto.
+
+The preview appears inside Studio's **Generating…** card while progress and ETA remain visible. Its label identifies the current clip and window. Live Video loops silently; click the video or use its pause/play button to pause playback while generation continues. The pause choice survives refreshed previews and window changes for that job.
+
+Previews show approximate intermediate output, with reduced resolution and frame rate. They can add GPU work and generation time. Tiny VAE supports H3 and supported Wan/LTX variants; other models use Fast Frames where available. Audio-only jobs do not show video previews. A preview failure leaves generation running. Temporary previews clear when a job finishes or is cancelled and are not gallery outputs. See [preview details and API](Generation-preview.md).
 
 ## Prompt and actions
 

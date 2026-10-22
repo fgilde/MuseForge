@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useStore } from '../../stores/useStore'
 import { FileUploadZone } from '../shared/FileUploadZone'
 import * as api from '../../api/client'
+import { GalleryInput } from '../shared/GalleryInput'
 
 /**
  * SFX mode controls for MMAudio — sound effects generation.
@@ -45,6 +46,7 @@ export function SfxControls() {
       video.src = url
     } catch (e) {
       console.error('Upload failed:', e)
+      return false
     } finally {
       setUploading(false)
     }
@@ -52,6 +54,8 @@ export function SfxControls() {
 
   return (
     <div className="space-y-3">
+      <GalleryInput kind="video" label="sound effects source" onFile={handleVideoUpload}
+        disabledReason={uploading ? 'Uploading a video…' : undefined} />
       {/* Video clip upload (optional) */}
       <div>
         <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
@@ -61,6 +65,7 @@ export function SfxControls() {
           label={uploading ? 'Uploading...' : 'Drop video to generate matching audio'}
           accept=".mp4,.webm,.avi,.mov,.mkv"
           filename={restoredVideoFilename}
+          videoUrl={restoredVideoFilename ? api.getFileUrl(restoredVideoFilename) : undefined}
           onFile={handleVideoUpload}
           onClear={() => {
             setParam('video_guide' as keyof typeof params, undefined)

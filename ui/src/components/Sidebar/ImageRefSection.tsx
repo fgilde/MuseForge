@@ -1,16 +1,19 @@
 import { useState, useCallback, useEffect } from 'react'
-import { Image as ImageIcon, X } from 'lucide-react'
+import { X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { CharacterImagePickerButton } from '../Characters/CharacterImagePicker'
 import { CharacterToolbarItem } from './SidebarPanels'
 import { MediaAddTile } from './MediaInputCard'
+import { GalleryInput } from '../shared/GalleryInput'
 
 export function ImageRefSection() {
   const modelOptions = useStore(s => s.modelOptions)
   const generationMode = useStore(s => s.generationMode)
   const imageWorkflow = useStore(s => s.studioImageWorkflow)
   const imageMode = useStore(s => Number(s.params.image_mode ?? 1))
+  const imageGuide = useStore(s => s.params.image_guide)
+  const videoPromptType = useStore(s => s.params.video_prompt_type)
   const imageRefs = useStore(s => s.imageRefs)
   const imageRefType = useStore(s => s.imageRefType)
   const removeBackgroundRefs = useStore(s => s.removeBackgroundRefs)
@@ -19,13 +22,7 @@ export function ImageRefSection() {
   const reorderImageRefs = useStore(s => s.reorderImageRefs)
   const setImageRefType = useStore(s => s.setImageRefType)
   const setRemoveBackgroundRefs = useStore(s => s.setRemoveBackgroundRefs)
-  const outputs = useStore(s => s.outputs)
-  const selectedOutput = useStore(s => s.selectedOutput)
-  const selectedGalleryImage = outputs[selectedOutput]?.type === 'image'
-    ? outputs[selectedOutput]
-    : null
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
-  const [copyingGalleryImage, setCopyingGalleryImage] = useState(false)
 
   const config = modelOptions?.image_ref_choices
   const isAdaptiveImageGenerate = generationMode === 'image' && imageWorkflow === 'generate'
@@ -33,7 +30,12 @@ export function ImageRefSection() {
   // max_image_refs is the model's total conditioning-image budget. In Edit
   // mode the uploaded source already consumes one slot.
   const configuredMaxRefs = modelOptions?.max_image_refs ?? null
-  const maxRefs = configuredMaxRefs == null ? null : Math.max(0, configuredMaxRefs - (imageMode === 2 ? 1 : 0))
+  const qwenHasSource = modelOptions?.architecture === 'qwen_image_21_7B' && (
+    imageWorkflow === 'inpaint' || imageWorkflow === 'outpaint'
+    || (!!imageGuide && String(videoPromptType || '').includes('V'))
+  )
+  const sourceSlots = imageMode === 2 || qwenHasSource ? 1 : 0
+  const maxRefs = configuredMaxRefs == null ? null : Math.max(0, configuredMaxRefs - sourceSlots)
   const canAddMore = maxRefs == null || imageRefs.length < maxRefs
 
   const addFiles = useCallback((files: File[]) => {
@@ -57,27 +59,6 @@ export function ImageRefSection() {
     }
   }, [config, defaultRefType, imageRefs.length, imageRefType, setImageRefType])
 
-  const addSelectedGalleryImage = useCallback(async () => {
-    if (!selectedGalleryImage || !canAddMore) return
-    setCopyingGalleryImage(true)
-    try {
-      const response = await fetch(selectedGalleryImage.url)
-      if (!response.ok) throw new Error(`Gallery image returned ${response.status}`)
-      const blob = await response.blob()
-      addFiles([
-        new File(
-          [blob],
-          selectedGalleryImage.name,
-          { type: blob.type || 'image/png' },
-        ),
-      ])
-    } catch (error) {
-      console.error('Could not add selected gallery image:', error)
-    } finally {
-      setCopyingGalleryImage(false)
-    }
-  }, [addFiles, canAddMore, selectedGalleryImage])
-
   // Image Generate must always expose its optional source picker. Starting
   // from a T2I model is valid; adding the first image immediately filters and
   // switches the selector to a compatible I2I/edit model.
@@ -85,6 +66,9 @@ export function ImageRefSection() {
 
   return (
     <div className="space-y-2">
+      <GalleryInput kind="image" label="reference image" onFile={file => addFiles([file])}
+        getImages={() => imageRefs}
+        disabledReason={!canAddMore ? 'Reference image limit reached.' : undefined} />
       <label className="text-[11px] text-text-muted uppercase tracking-wider block">
         {isAdaptiveImageGenerate ? 'Source / Reference Images (Optional)' : 'Reference Images'}
       </label>
@@ -118,7 +102,7 @@ export function ImageRefSection() {
           >
             <img
               src={URL.createObjectURL(file)}
-              alt={`Ref ${i + 1}`}
+              alt={`Ref ${i + 1 + (qwenHasSource ? 1 : 0)}`}
               className="w-full h-full object-cover pointer-events-none"
             />
             {i === 0 && imageRefs.length > 1 && hasLandscapeMode && imageRefType === 'KI' && (
@@ -126,14 +110,14 @@ export function ImageRefSection() {
                 Main
               </div>
             )}
-            {i === 0 && isAdaptiveImageGenerate && (
+            {i === 0 && isAdaptiveImageGenerate && !qwenHasSource && (
               <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[8px] text-white text-center py-0.5">
                 Source
               </div>
             )}
             {/* Position number */}
             <span className="absolute top-0.5 left-0.5 bg-black/60 text-white text-[8px] px-1 rounded pointer-events-none">
-              {i + 1}
+              {i + 1 + (qwenHasSource ? 1 : 0)}
             </span>
             <button
               type="button" aria-label={`Remove reference image ${i + 1}`}
@@ -159,25 +143,12 @@ export function ImageRefSection() {
           addFiles(files)
         }}/></CharacterToolbarItem>}
 
-      {isAdaptiveImageGenerate && (
-        <button
-          type="button"
-          onClick={() => void addSelectedGalleryImage()}
-          disabled={!selectedGalleryImage || !canAddMore || copyingGalleryImage}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-bg-tertiary py-1.5 text-[11px] text-text-secondary transition-colors hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <ImageIcon size={12} />
-          {copyingGalleryImage
-            ? 'Adding selected image…'
-            : selectedGalleryImage
-              ? 'Add selected gallery image'
-              : 'Select an image in the gallery to add it'}
-        </button>
-      )}
-
       {maxRefs != null && (
-        <p className="text-[9px] text-text-muted">
-          Up to {maxRefs} reference image{maxRefs === 1 ? '' : 's'}.
+        <p className={`text-[9px] ${imageRefs.length > maxRefs ? 'text-indicator-warning' : 'text-text-muted'}`}>
+          {imageRefs.length > maxRefs
+            ? `Remove ${imageRefs.length - maxRefs} reference image(s) before generating.`
+            : `Up to ${maxRefs} reference image${maxRefs === 1 ? '' : 's'}.`}
+          {qwenHasSource && ' The source/control image is image 1.'}
         </p>
       )}
 

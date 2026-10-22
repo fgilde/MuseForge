@@ -3,6 +3,7 @@ import { Plus, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { ChoiceControl } from '../shared/ChoiceControl'
 import { FileUploadZone } from '../shared/FileUploadZone'
+import { GalleryInput } from '../shared/GalleryInput'
 import * as api from '../../api/client'
 import type { SavedOmniCharacter } from '../../types'
 import { ttsVoiceLimit } from '../../lib/ttsVoices'
@@ -136,6 +137,7 @@ export function AudioModeSection() {
       }
     } catch (e) {
       console.error('Upload failed:', e)
+      return false
     } finally {
       setUploading(false)
     }
@@ -167,6 +169,16 @@ export function AudioModeSection() {
         selectedIds={ttsVoices.slice(0, ttsVoiceCount).flatMap(voice => voice.characterId ? [voice.characterId] : [])}
         canAdd={canAddCharacter} disabled={uploading || modelOptionsLoading} switchToClone={switchToClone}
       />}
+      {!isAudioOnly && needsAudioUpload && <GalleryInput kind="audio" label="audio prompt source"
+        onFile={file => handleLegacyUpload(file, 'audio_guide', setAudioGuideFilename)}
+        disabledReason={uploading ? 'Uploading audio…' : undefined} />}
+      {isAudioOnly && maxVoiceCount > 0 && ttsVoiceCount > 0 && ttsVoices.slice(0, ttsVoiceCount).map((_, index) => (
+        <GalleryInput key={`voice-${index}`} kind="audio"
+          label={modelOptions.architecture === 'index_tts2' && audioBaseMode === 'AB' && index === 1
+            ? 'emotion reference' : `voice ${index + 1} reference`}
+          onFile={file => handleVoiceUpload(file, index)}
+          disabledReason={uploading ? 'Uploading a voice reference…' : modelOptionsLoading ? 'Model options are loading.' : undefined} />
+      ))}
       {error && <p role="alert" className="text-[10px] text-indicator-error">{error}</p>}
       {/* Audio mode selector — shown for any model that exposes audio_prompt_type_sources
           UNLESS the model opted into voice-count-driven mode (KugelAudio). For those,
@@ -360,6 +372,9 @@ export function AudioModeSection() {
       {/* Non-TTS: Video guide upload (control video for soundtrack) */}
       {!isAudioOnly && needsVideoGuideUpload && (
         <div>
+          <GalleryInput kind="video" label="control video"
+            onFile={file => handleLegacyUpload(file, 'video_guide', setVideoGuideFilename)}
+            disabledReason={uploading ? 'Uploading control media…' : undefined} />
           <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
             Control Video
           </label>
@@ -367,6 +382,7 @@ export function AudioModeSection() {
             label={uploading ? 'Uploading...' : 'Drop video file (.mp4)'}
             accept=".mp4,.webm,.mkv"
             filename={restoredVideoGuideFilename}
+            videoUrl={restoredVideoGuideFilename ? api.getFileUrl(restoredVideoGuideFilename) : undefined}
             onFile={file => handleLegacyUpload(file, 'video_guide', setVideoGuideFilename)}
             onClear={() => {
               setParam('video_guide', undefined)

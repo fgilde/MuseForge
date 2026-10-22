@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 import torch
 from PIL import Image
+from diffusers import FlowMatchEulerDiscreteScheduler
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
@@ -20,7 +21,7 @@ from models.qwen21.qwen21_handler import MODEL_TYPE, family_handler
 from models.qwen21.transformer_qwenimage21 import QwenImage21KVCache, QwenImage21Transformer2DModel
 from models.qwen21.autoencoder_kl_qwenimage21 import AutoencoderKLQwenImage21
 from models.qwen21.pipeline_qwenimage21 import QwenImage21Pipeline
-from models.qwen21.runtime import model_factory, GenerationCancelled
+from models.qwen21.runtime import MaestroQwenImage21Pipeline, model_factory, GenerationCancelled
 from services.enhance_guides import get_enhance_guide
 
 
@@ -76,6 +77,39 @@ class ArchitectureTests(unittest.TestCase):
         torch.testing.assert_close(full, cached, atol=1e-5, rtol=1e-5)
 
     @torch.inference_mode()
+    def test_pipeline_recomputes_all_ten_references_when_cache_does_not_fit(self):
+        class Processor(SimpleNamespace):
+            pass
+        processor = Processor(tokenizer=SimpleNamespace(encode=lambda _: [99]),
+                              apply_chat_template=lambda *_, **__: [1])
+        pipe = MaestroQwenImage21Pipeline(FlowMatchEulerDiscreteScheduler(), tiny_vae(),
+                                          torch.nn.Linear(8, 8), processor, tiny_transformer())
+        pipe.execution_device = torch.device("cpu")
+        pipe.set_progress_bar_config(disable=True)
+        embeds = torch.randn(1, 21, 8)
+        mask = torch.tensor([[False, True] * 10 + [False]])
+        images = [Image.new("RGBA", (32, 32), (20 * i, 50, 70, 255)) for i in range(10)]
+        seen = []
+        def inspect(_module, _args, kwargs):
+            seen.append((kwargs["kv_cache_mode"], len(kwargs["img_shapes"][0])))
+        hook = pipe.transformer.register_forward_pre_hook(inspect, with_kwargs=True)
+        def run(budget):
+            with patch.object(pipe, "encode_prompt", return_value=(embeds, None, mask)), \
+                 patch("models.qwen21.pipeline_qwenimage21.reference_cache_plan", return_value=(1024, budget)):
+                return pipe(prompt="Combine", image=images, height=32, width=32, output_resolution=32,
+                            num_inference_steps=3, generator=torch.Generator("cpu").manual_seed(7),
+                            use_kv_cache=True, output_type="latent").images
+        try:
+            cached = run(2048)
+            self.assertEqual(seen, [("extract", 11), ("cached", 11), ("cached", 11)])
+            seen.clear()
+            uncached = run(0)
+            self.assertEqual(seen, [(None, 11)] * 3)
+            torch.testing.assert_close(cached, uncached, atol=1e-5, rtol=1e-5)
+        finally:
+            hook.remove()
+
+    @torch.inference_mode()
     def test_rgba_vae_tiled_roundtrip_shapes(self):
         vae = tiny_vae()
         vae.enable_tiling(tile_sample_min_height=48, tile_sample_min_width=48,
@@ -103,10 +137,14 @@ class ArchitectureTests(unittest.TestCase):
         settings = {}
         family_handler.update_default_settings(MODEL_TYPE, {}, settings)
         self.assertEqual(settings["num_inference_steps"], 40)
-        self.assertEqual(settings["guidance_scale"], 1)
+        self.assertEqual(settings["guidance_scale"], 4)
         self.assertEqual(settings["video_prompt_type"], "I")
-        self.assertIsNone(family_handler.validate_generative_settings(MODEL_TYPE, {}, {"image_refs": [1] * 10}))
-        self.assertIn("10", family_handler.validate_generative_settings(MODEL_TYPE, {}, {"image_refs": [1] * 11}))
+        self.assertIsNone(family_handler.validate_generative_settings(
+            MODEL_TYPE, {}, {"video_prompt_type": "I", "image_refs": [1] * 10}
+        ))
+        self.assertIn("10", family_handler.validate_generative_settings(
+            MODEL_TYPE, {}, {"video_prompt_type": "I", "image_refs": [1] * 11}
+        ))
         self.assertTrue(family_handler.get_lora_dir(MODEL_TYPE, SimpleNamespace(), "loras").endswith("qwen21"))
         tree = ast.parse((ROOT / "app/models/qwen/qwen_handler.py").read_text(encoding="utf-8"))
         owner = next(node for node in tree.body if isinstance(node, ast.ClassDef))
@@ -181,6 +219,9 @@ class JobAdapterTests(unittest.TestCase):
         instance.device = torch.device("cpu")
         instance._abort = False
         instance.transformer = torch.nn.Linear(2, 2)
+        instance.text_encoder = SimpleNamespace(
+            visual=SimpleNamespace(blocks=[torch.nn.Linear(2, 2)]),
+            language_model=SimpleNamespace(layers=[torch.nn.Linear(2, 2)]))
         instance.vae = SimpleNamespace(enable_tiling=Mock(), enable_slicing=Mock(), clear_cache=Mock(),
                                       decoder=torch.nn.Linear(2, 2))
         def produce(**kw):
@@ -208,11 +249,12 @@ class JobAdapterTests(unittest.TestCase):
         self.assertFalse(instance.transformer._forward_pre_hooks)
         instance.vae.clear_cache.assert_called_once()
 
-    def test_disabled_references_and_default_cfg(self):
+    def test_disabled_references_and_base_cfg_default(self):
         instance = self.runtime()
         instance.generate(input_prompt="Cat", input_ref_images=[Image.new("RGB", (32, 32))])
         self.assertIsNone(instance.pipeline.call_args.kwargs["image"])
-        self.assertIsNone(instance.pipeline.call_args.kwargs["negative_prompt"])
+        self.assertEqual(instance.pipeline.call_args.kwargs["negative_prompt"], " ")
+        self.assertEqual(instance.pipeline.call_args.kwargs["true_cfg_scale"], 4)
 
     def test_cancellation_does_not_save_partial_image(self):
         instance = self.runtime()
@@ -229,6 +271,20 @@ class JobAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "generation error"):
             instance.generate(input_prompt="Cat")
         self.assertFalse(instance.vae.decoder._forward_pre_hooks)
+        self.assertFalse(instance.text_encoder.visual.blocks[0]._forward_pre_hooks)
+        self.assertFalse(instance.text_encoder.language_model.layers[0]._forward_pre_hooks)
+        instance.vae.clear_cache.assert_called_once()
+
+    def test_cancellation_during_prompt_encoding(self):
+        instance = self.runtime()
+        def cancel(**_):
+            instance._interrupt = True
+            instance.text_encoder.language_model.layers[0](torch.zeros(1, 2))
+            self.fail("The encoder should stop before another block executes")
+        instance.pipeline.side_effect = cancel
+        self.assertIsNone(instance.generate(input_prompt="Combine ten references"))
+        self.assertFalse(instance.text_encoder.language_model.layers[0]._forward_pre_hooks)
+        self.assertFalse(instance.text_encoder.visual.blocks[0]._forward_pre_hooks)
         instance.vae.clear_cache.assert_called_once()
 
     def test_over_limit_not_silently_truncated(self):

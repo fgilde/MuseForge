@@ -85,6 +85,24 @@ def _normalize_workflow(workflow: str | None) -> str | None:
     raise ValueError(f"Unknown MiniMax H3 workflow '{workflow}'.")
 
 
+def minimax_h3_adapter_workflow(model_def: dict | None) -> str:
+    """Return the checkpoint's adapter family, independent of Studio mode.
+
+    Singularity uses the pruned Ref2VA checkpoint's AdaLN layout and recommended
+    Turbo adapter in both its Frames and References workflows.
+    """
+
+    definition = model_def or {}
+    native_workflow = definition.get("minimax_h3_lora_workflow")
+    if native_workflow in {"fl2va", "ref2va"}:
+        return native_workflow
+    return (
+        "ref2va"
+        if definition.get("minimax_h3_singularity") or definition.get("minimax_h3_dasiwa") or definition.get("omni_reference")
+        else "fl2va"
+    )
+
+
 def minimax_h3_turbo_presets_for_workflow(
     workflow: str | None,
     *,
@@ -157,6 +175,17 @@ def minimax_h3_turbo_preset_for_path(path: str) -> dict | None:
     basename = os.path.basename(str(path or "").replace("\\", "/")).lower()
     preset = _MINIMAX_H3_TURBO_PRESETS_BY_FILENAME.get(basename)
     return dict(preset) if preset is not None else None
+
+
+def minimax_h3_default_turbo_preset(model_def: dict | None = None) -> str | None:
+    """Return a model-specific Turbo preset ID when one is declared."""
+
+    if not isinstance(model_def, dict):
+        return None
+    preset_id = str(
+        model_def.get("minimax_h3_default_turbo_preset") or ""
+    ).strip()
+    return preset_id or None
 
 
 # Backward-compatible constants always describe Maestro's current default.
@@ -277,11 +306,23 @@ def find_minimax_h3_pdd_loras(paths) -> list[str]:
     return [str(path) for path in (paths or []) if is_minimax_h3_pdd_lora(str(path))]
 
 
+def find_minimax_h3_accelerators(paths) -> list[str]:
+    """Return each selected H3 Turbo/PDD accelerator in request order."""
+
+    return [
+        str(path)
+        for path in (paths or [])
+        if is_minimax_h3_turbo_lora(str(path))
+        or is_minimax_h3_pdd_lora(str(path))
+    ]
+
+
 def normalize_minimax_h3_turbo_request(
     body: dict,
     *,
     full_checkpoint: bool,
     workflow: str | None = None,
+    model_def: dict | None = None,
 ) -> bool:
     """Apply Maestro's one-click Turbo preset to a generation request.
 
@@ -298,11 +339,41 @@ def normalize_minimax_h3_turbo_request(
     fallback.
     """
 
-    if not isinstance(body, dict) or body.get("minimax_h3_turbo_mode") is not True:
+    if not isinstance(body, dict):
+        return False
+    if (model_def or {}).get("minimax_h3_baked_turbo"):
+        from .imported import normalize_baked_h3_request
+        normalize_baked_h3_request(body, model_def)
+        return False
+    turbo_mode = body.get("minimax_h3_turbo_mode")
+    if turbo_mode is None and model_def:
+        # Experimental model defaults are opt-in at the model-definition
+        # boundary. Existing H3 definitions do not declare this field, so
+        # their request behavior stays unchanged.
+        if model_def.get("minimax_h3_turbo_mode_default") is True:
+            body["minimax_h3_turbo_mode"] = True
+            turbo_mode = True
+    if turbo_mode is not True:
+        # A client can explicitly disable the model-specific four-step
+        # recipe without sending the ordinary H3 step count. Fill only a
+        # missing value so user-selected steps and every existing model's
+        # defaults keep their current behavior.
+        if body.get("minimax_h3_turbo_mode") is False and model_def:
+            raw_default_steps = model_def.get(
+                "minimax_h3_unaccelerated_default_steps"
+            )
+            if body.get("num_inference_steps") in (None, "") and raw_default_steps:
+                try:
+                    default_steps = int(raw_default_steps)
+                except (TypeError, ValueError):
+                    default_steps = 0
+                if default_steps > 0:
+                    body["num_inference_steps"] = default_steps
         return False
 
     preset = minimax_h3_turbo_preset(
-        body.get("minimax_h3_turbo_preset"),
+        body.get("minimax_h3_turbo_preset")
+        or minimax_h3_default_turbo_preset(model_def),
         workflow=workflow,
         full_checkpoint=full_checkpoint,
     )
@@ -416,12 +487,15 @@ __all__ = [
     "MINIMAX_H3_TURBO_PRESET_WEIGHT",
     "find_minimax_h3_turbo_loras",
     "find_minimax_h3_pdd_loras",
+    "find_minimax_h3_accelerators",
     "h3_scheduler_grid_points",
     "is_minimax_h3_pdd_lora",
     "is_minimax_h3_turbo_lora",
     "minimax_h3_turbo_preset",
     "minimax_h3_turbo_preset_for_path",
     "minimax_h3_turbo_presets_for_workflow",
+    "minimax_h3_adapter_workflow",
+    "minimax_h3_default_turbo_preset",
     "normalize_minimax_h3_turbo_request",
     "safetensors_header",
     "safetensors_metadata",

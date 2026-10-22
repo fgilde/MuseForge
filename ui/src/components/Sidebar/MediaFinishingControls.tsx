@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 type Capabilities = {
-  neural_rendering: { available: boolean; reason: string }
+  neural_rendering: { available: boolean; reason: string; experimental?: boolean; scales: number[] }
   frame_generation: { available: boolean; reason: string; factors: number[] }
 }
 
@@ -22,6 +22,8 @@ export function MediaFinishingControls({ spatial, temporal, onTemporal, options,
   }, [refreshCount])
   const hasNeural = spatial.startsWith('dlss5*')
   const hasFrameGen = temporal.startsWith('dlssg*') && !image
+  const directNR = hasNeural && !!capabilities?.neural_rendering.experimental
+  const needsGuides = hasFrameGen || (hasNeural && (!directNR || spatial !== 'dlss5*1'))
   const selectClass = 'w-full bg-bg-tertiary border border-border rounded-lg px-2 py-2 text-xs text-text-primary'
   const patch = (key: string, value: unknown) => onOptions({ ...options, [key]: value })
   return <div className="space-y-3 text-xs">
@@ -34,27 +36,32 @@ export function MediaFinishingControls({ spatial, temporal, onTemporal, options,
           disabled={!capabilities?.frame_generation.factors.includes(n)}>DLSS Frame Generation ×{n}{n > 4 ? ' (RTX 50)' : ''}</option>)}
       </select>
     </label>}
+    {!image && capabilities && !capabilities.frame_generation.available && <p className={hasFrameGen ? 'text-indicator-warning' : 'text-text-muted text-[11px]'}>
+      DLSS Frame Generation unavailable: {capabilities.frame_generation.reason}.
+    </p>}
     {(hasNeural || hasFrameGen) && <div className="space-y-2">
       {hasNeural && <>
         <label className="block">Neural Rendering intensity: {Number(options.dlss_intensity ?? 1).toFixed(2)}
           <input className="w-full" type="range" min={0} max={2} step={0.05} value={Number(options.dlss_intensity ?? 1)} onChange={e => patch('dlss_intensity', Number(e.target.value))} />
         </label>
-        <label className="block">Depth precision
+        {needsGuides && <label className="block">Depth precision
           <select className={selectClass} value={String(options.dlss_depth ?? 'half')} onChange={e => patch('dlss_depth', e.target.value)}>
             <option value="quarter">Quarter resolution (faster)</option><option value="half">Half resolution</option><option value="full">Full resolution</option>
           </select>
-        </label>
+        </label>}
       </>}
-      <label className="block">Motion estimation
+      {needsGuides && <label className="block">Motion estimation
         <select className={selectClass} value={String(options.dlss_motion ?? 'original')} onChange={e => patch('dlss_motion', e.target.value)}>
           <option value="original">OpenCV DIS (faster)</option><option value="raft">RAFT (more detail)</option>
         </select>
-      </label>
-      <p className="text-text-muted text-[11px]">Depth and motion are estimated from your footage. Results depend on the content.</p>
+      </label>}
+      <p className="text-text-muted text-[11px]">{directNR
+        ? `Experimental Windows 10 backend. ${spatial === 'dlss5*1' ? 'Enhances at the original resolution.' : 'DLSS upscaling followed by neural enhancement.'} Video uses NVIDIA optical flow. Frame Generation is installed separately and requires RTX 40 or newer with HAGS enabled.`
+        : 'Depth and motion are estimated from your footage. Results depend on the content.'}</p>
+      {hasNeural && capabilities?.neural_rendering.available && !capabilities.neural_rendering.scales.includes(Number(spatial.split('*')[1])) && <p className="text-indicator-warning">Choose a supported DLSS scale: {capabilities.neural_rendering.scales.join('×, ')}×.</p>}
       {hasNeural && capabilities && !capabilities.neural_rendering.available && <p className="text-indicator-warning">DLSS Neural Rendering: {capabilities.neural_rendering.reason}. See docs/DLSS5.md in the MuseForge project.</p>}
-      {hasFrameGen && capabilities && !capabilities.frame_generation.available && <p className="text-indicator-warning">DLSS Frame Generation: {capabilities.frame_generation.reason}.</p>}
     </div>}
     {error && <p className="text-indicator-warning">{error}</p>}
-    <button type="button" className="text-text-muted underline text-[10px]" onClick={() => { setError(''); setRefreshCount(count => count + 1) }}>Refresh DLSS availability</button>
+    <button type="button" className="text-text-muted underline text-[10px]" onClick={() => { setError(''); setRefreshCount(count => count + 1); window.dispatchEvent(new Event('maestro-dlss-refresh')) }}>Refresh DLSS availability</button>
   </div>
 }
