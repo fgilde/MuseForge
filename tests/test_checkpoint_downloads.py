@@ -69,7 +69,7 @@ class TestCheckpointDownloads(unittest.TestCase):
                 patch.object(tqdm.tqdm, "__init__", tqdm.tqdm.__init__), \
                 patch.object(tqdm.tqdm, "update", tqdm.tqdm.update), \
                 patch.object(tqdm.tqdm, "close", tqdm.tqdm.close), \
-                patch.object(tqdm.tqdm, "_maestro_progress_patched", False, create=True):
+                patch.object(tqdm.tqdm, "_museforge_progress_patched", False, create=True):
             safe_download._install_tqdm_hook()
             with patch("requests.get", return_value=FakeResponse(content)):
                 download_named_checkpoint(

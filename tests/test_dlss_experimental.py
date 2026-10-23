@@ -18,8 +18,12 @@ class ExperimentalRoutingTests(unittest.TestCase):
                 patch.object(runtime.sys, "getwindowsversion", return_value=SimpleNamespace(build=build), create=True), \
                 patch.object(runtime, "_missing", return_value=list(missing)) as missing_check, \
                 patch.object(runtime, "_gpu_series", return_value=gpu), \
+                patch.object(runtime, "_gpu_identity", return_value=("GeForce RTX 4090, 555.00",)), \
                 patch.object(runtime, "_hags_enabled", return_value=hags), \
-                patch.object(runtime, "dlssg_capabilities", return_value=probe or {}) as worker_probe:
+                patch.object(runtime, "dlssg_capabilities", return_value=probe or {}) as worker_probe, \
+                patch.object(runtime, "neural_rendering_capabilities", return_value={
+                    "available": True, "reason": "", "deferred": False,
+                }):
             yield missing_check, worker_probe
 
     def test_opt_in_is_required_and_direct_backend_does_not_enable_frame_generation(self):
@@ -125,6 +129,9 @@ class ExperimentalRoutingTests(unittest.TestCase):
         from services.media_processing import capabilities, validate_methods
         with patch.object(runtime, "unavailable_reason", return_value=""), \
                 patch.object(runtime, "uses_experimental_backend", return_value=True), \
+                patch.object(runtime, "neural_rendering_capabilities", return_value={
+                    "available": True, "reason": "", "deferred": False,
+                }), \
                 patch.object(runtime, "dlssg_capabilities", return_value={}), \
                 patch.object(runtime, "is_rtx_50_series", return_value=False):
             caps = capabilities()
@@ -134,6 +141,281 @@ class ExperimentalRoutingTests(unittest.TestCase):
         with patch("services.media_processing.capabilities", return_value=caps):
             for scale in scales:
                 validate_methods(f"dlss5*{scale}")
+
+    def test_neural_probe_evaluates_unaligned_upscale_and_caches_success(self):
+        import numpy as np
+        import threading
+        from postprocessing.dlss5 import runtime
+        from services.job_lifecycle import configure_generation_probe_lock
+
+        session = Mock(
+            render_width=144, render_height=160,
+            output_width=216, output_height=240, needs_guides=True,
+        )
+        session.process_frame.return_value = np.zeros((240, 216, 4), dtype=np.uint8)
+        generation_lock = threading.Lock()
+        configure_generation_probe_lock(generation_lock)
+        runtime.clear_neural_rendering_probe_cache()
+        try:
+            with patch.object(runtime, "unavailable_reason", return_value=""), \
+                    patch.object(runtime, "uses_experimental_backend", return_value=False), \
+                    patch.object(runtime, "_neural_rendering_probe_signature", return_value=("cpu-test",)), \
+                    patch.object(runtime, "create_neural_session", return_value=session) as factory:
+                first = runtime.neural_rendering_capabilities()
+                second = runtime.neural_rendering_capabilities()
+            self.assertTrue(first["available"])
+            self.assertTrue(second["available"])
+            self.assertFalse(first["deferred"])
+            factory.assert_called_once()
+            self.assertEqual(factory.call_args.args, (144, 160, 1, 1.5, 1.0))
+            args, kwargs = session.process_frame.call_args
+            self.assertEqual(args[0], 0)
+            self.assertEqual(args[1].shape, (160, 144, 4))
+            self.assertEqual(args[2].shape, (160, 144, 2))
+            self.assertTrue(kwargs["depth"].min() > 0)
+            session.close.assert_called_once_with(abort=False)
+        finally:
+            runtime.clear_neural_rendering_probe_cache()
+            configure_generation_probe_lock(None)
+
+    def test_neural_probe_caches_native_failure_and_refresh_retries(self):
+        import threading
+        from postprocessing.dlss5 import runtime
+        from services.job_lifecycle import configure_generation_probe_lock
+
+        session = Mock(render_width=144, render_height=160)
+        session.process_frame.side_effect = RuntimeError(
+            "DLSS Neural Rendering failed on frame 0 (NGX 0xBAD00000)."
+        )
+        generation_lock = threading.Lock()
+        configure_generation_probe_lock(generation_lock)
+        runtime.clear_neural_rendering_probe_cache()
+        try:
+            with patch.object(runtime, "unavailable_reason", return_value=""), \
+                    patch.object(runtime, "uses_experimental_backend", return_value=False), \
+                    patch.object(runtime, "_neural_rendering_probe_signature", return_value=("cpu-failure-test",)), \
+                    patch.object(runtime, "create_neural_session", return_value=session) as factory:
+                failed = runtime.neural_rendering_capabilities()
+                cached = runtime.neural_rendering_capabilities()
+                self.assertFalse(failed["available"])
+                self.assertIn("0xBAD00000", failed["reason"])
+                self.assertIn("ReShade.log", failed["reason"])
+                self.assertEqual(cached, failed)
+                factory.assert_called_once()
+                runtime.clear_neural_rendering_probe_cache()
+                retried = runtime.neural_rendering_capabilities()
+                self.assertFalse(retried["available"])
+                self.assertEqual(factory.call_count, 2)
+        finally:
+            runtime.clear_neural_rendering_probe_cache()
+            configure_generation_probe_lock(None)
+
+    def test_neural_probe_rejects_an_uncropped_padded_output(self):
+        import numpy as np
+        import threading
+        from postprocessing.dlss5 import runtime
+        from services.job_lifecycle import configure_generation_probe_lock
+
+        session = Mock(render_width=144, render_height=160,
+                       output_width=256, output_height=256, needs_guides=True)
+        session.process_frame.return_value = np.zeros((256, 256, 4), dtype=np.uint8)
+        configure_generation_probe_lock(threading.Lock())
+        runtime.clear_neural_rendering_probe_cache()
+        try:
+            with patch.object(runtime, "unavailable_reason", return_value=""), \
+                    patch.object(runtime, "uses_experimental_backend", return_value=False), \
+                    patch.object(runtime, "_neural_rendering_probe_signature", return_value=("uncropped",)), \
+                    patch.object(runtime, "create_neural_session", return_value=session):
+                result = runtime.neural_rendering_capabilities()
+            self.assertFalse(result["available"])
+            self.assertIn("invalid evaluation frame", result["reason"])
+            session.close.assert_called_once_with(abort=True)
+        finally:
+            runtime.clear_neural_rendering_probe_cache()
+            configure_generation_probe_lock(None)
+
+    def test_neural_probe_uses_the_real_alignment_adapter_before_native_evaluation(self):
+        import math
+        import numpy as np
+        import threading
+        from postprocessing.dlss5 import runtime
+        from services.job_lifecycle import configure_generation_probe_lock
+
+        native_sessions = []
+
+        def native_factory(width, height, frames, scale, intensity, abort_callback):
+            output_width = math.floor(width * scale / 2 + 0.5) * 2
+            output_height = math.floor(height * scale / 2 + 0.5) * 2
+            self.assertEqual(output_width % 64, 0)
+            self.assertEqual(output_height % 64, 0)
+            session = Mock(render_width=width, render_height=height,
+                           output_width=output_width, output_height=output_height,
+                           needs_guides=True)
+            session.process_frame.return_value = np.zeros((output_height, output_width, 4), dtype=np.uint8)
+            native_sessions.append(session)
+            return session
+
+        configure_generation_probe_lock(threading.Lock())
+        runtime.clear_neural_rendering_probe_cache()
+        try:
+            with patch.object(runtime, "unavailable_reason", return_value=""), \
+                    patch.object(runtime, "uses_experimental_backend", return_value=False), \
+                    patch.object(runtime, "_neural_rendering_probe_signature", return_value=("aligned-probe",)), \
+                    patch.object(runtime, "NeuralRenderingSession", side_effect=native_factory):
+                result = runtime.neural_rendering_capabilities()
+            self.assertTrue(result["available"], result["reason"])
+            self.assertEqual(len(native_sessions), 1)
+            session = native_sessions[0]
+            rgba, motion = session.process_frame.call_args.args[1:3]
+            depth = session.process_frame.call_args.kwargs["depth"]
+            self.assertEqual(rgba.shape[:2], (session.render_height, session.render_width))
+            self.assertEqual(motion.shape[:2], rgba.shape[:2])
+            self.assertEqual(depth.shape, rgba.shape[:2])
+            self.assertGreater(session.render_width, 144)
+            self.assertGreater(session.render_height, 160)
+            session.close.assert_called_once_with(abort=False)
+        finally:
+            runtime.clear_neural_rendering_probe_cache()
+            configure_generation_probe_lock(None)
+
+    def test_neural_probe_busy_deferral_is_not_cached_and_retries_after_generation(self):
+        import threading
+        import numpy as np
+        from postprocessing.dlss5 import runtime
+        from services.job_lifecycle import configure_generation_probe_lock, generation_slot
+
+        session = Mock(
+            render_width=144, render_height=160,
+            output_width=216, output_height=240, needs_guides=True,
+        )
+        session.process_frame.return_value = np.zeros((240, 216, 4), dtype=np.uint8)
+        runtime.clear_neural_rendering_probe_cache()
+        generation_lock = threading.Lock()
+        configure_generation_probe_lock(generation_lock)
+        try:
+            with patch.object(runtime, "unavailable_reason", return_value=""), \
+                    patch.object(runtime, "uses_experimental_backend", return_value=False), \
+                    patch.object(runtime, "_neural_rendering_probe_signature", return_value=("cpu-busy-test",)), \
+                    patch.object(runtime, "create_neural_session", return_value=session) as factory:
+                with generation_slot(generation_lock, {"status": "running"}) as acquired:
+                    self.assertTrue(acquired)
+                    deferred = runtime.neural_rendering_capabilities()
+                    self.assertFalse(deferred["available"])
+                    self.assertTrue(deferred["deferred"])
+                    self.assertIn("generation is active", deferred["reason"])
+                    factory.assert_not_called()
+                ready = runtime.neural_rendering_capabilities()
+            self.assertTrue(ready["available"])
+            factory.assert_called_once()
+        finally:
+            runtime.clear_neural_rendering_probe_cache()
+            configure_generation_probe_lock(None)
+
+    def test_neural_probe_timeout_uses_abort_callback_without_waiting(self):
+        import threading
+        import numpy as np
+        from types import SimpleNamespace
+        from postprocessing.dlss5 import runtime
+        from services.job_lifecycle import configure_generation_probe_lock
+
+        class FakeClock:
+            now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+        clock = FakeClock()
+        session = Mock(
+            render_width=144, render_height=160,
+            output_width=216, output_height=240, needs_guides=True,
+        )
+        session.process_frame.return_value = np.zeros((240, 216, 4), dtype=np.uint8)
+        generation_lock = threading.Lock()
+        configure_generation_probe_lock(generation_lock)
+        runtime.clear_neural_rendering_probe_cache()
+        abort_callbacks = []
+
+        def evaluate(*_args, **_kwargs):
+            clock.now = runtime.NR_PROBE_TIMEOUT_SECONDS + 1
+            self.assertTrue(abort_callbacks[-1]())
+            return session.process_frame.return_value
+
+        def create_session(*_args, **kwargs):
+            abort_callbacks.append(kwargs["abort_callback"])
+            return session
+
+        session.process_frame.side_effect = evaluate
+        try:
+            with patch.object(runtime, "time", SimpleNamespace(monotonic=clock.monotonic)), \
+                    patch.object(runtime, "unavailable_reason", return_value=""), \
+                    patch.object(runtime, "uses_experimental_backend", return_value=False), \
+                    patch.object(runtime, "_neural_rendering_probe_signature", return_value=("cpu-timeout-test",)), \
+                    patch.object(runtime, "create_neural_session", side_effect=create_session) as factory:
+                result = runtime.neural_rendering_capabilities()
+
+            self.assertFalse(result["available"])
+            self.assertIn("timed out after 60 seconds", result["reason"])
+            factory.assert_called_once()
+            session.close.assert_called_once_with(abort=True)
+        finally:
+            runtime.clear_neural_rendering_probe_cache()
+            configure_generation_probe_lock(None)
+
+    def test_neural_probe_unconfigured_lock_defers_without_caching(self):
+        import threading
+        import numpy as np
+        from postprocessing.dlss5 import runtime
+        from services.job_lifecycle import configure_generation_probe_lock
+
+        session = Mock(
+            render_width=144, render_height=160,
+            output_width=216, output_height=240, needs_guides=True,
+        )
+        session.process_frame.return_value = np.zeros((240, 216, 4), dtype=np.uint8)
+        runtime.clear_neural_rendering_probe_cache()
+        configure_generation_probe_lock(None)
+        generation_lock = threading.Lock()
+        try:
+            with patch.object(runtime, "unavailable_reason", return_value=""), \
+                    patch.object(runtime, "uses_experimental_backend", return_value=False), \
+                    patch.object(runtime, "_neural_rendering_probe_signature", return_value=("cpu-unconfigured-test",)), \
+                    patch.object(runtime, "create_neural_session", return_value=session) as factory:
+                deferred = runtime.neural_rendering_capabilities()
+                self.assertFalse(deferred["available"])
+                self.assertTrue(deferred["deferred"])
+                self.assertIn("generation lock is not configured", deferred["reason"])
+                factory.assert_not_called()
+
+                configure_generation_probe_lock(generation_lock)
+                retried = runtime.neural_rendering_capabilities()
+
+            self.assertTrue(retried["available"])
+            factory.assert_called_once()
+            session.close.assert_called_once_with(abort=False)
+        finally:
+            runtime.clear_neural_rendering_probe_cache()
+            configure_generation_probe_lock(None)
+
+    def test_media_capability_refresh_invalidates_neural_probe_cache(self):
+        from postprocessing.dlss5 import runtime
+        from services.media_processing import capabilities
+
+        with patch.object(runtime, "unavailable_reason", return_value=""), \
+                patch.object(runtime, "neural_rendering_capabilities", return_value={
+                    "available": False, "reason": "synthetic failure", "deferred": False,
+                }) as probe, \
+                patch.object(runtime, "clear_neural_rendering_probe_cache") as clear_probe, \
+                patch.object(runtime, "_gpu_series", return_value=40), \
+                patch.object(runtime, "_gpu_identity", return_value=("RTX 4090, 555.00",)), \
+                patch.object(runtime, "_hags_enabled", return_value=True), \
+                patch.object(runtime, "dlssg_capabilities", return_value={}), \
+                patch.object(runtime, "uses_experimental_backend", return_value=False):
+            result = capabilities(refresh=True, probe_neural=False)
+
+        clear_probe.assert_called_once_with()
+        probe.assert_called_once_with(allow_probe=False)
+        self.assertFalse(result["neural_rendering"]["available"])
+        self.assertEqual(result["neural_rendering"]["reason"], "synthetic failure")
 
     def test_backend_capability_can_narrow_allowed_runtime_modes(self):
         from services.media_processing import validate_methods

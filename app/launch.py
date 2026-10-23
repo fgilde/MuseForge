@@ -288,12 +288,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from services.access_log_filter import install_quiet_access_filter
 from services.http_runtime import configure_http_runtime
+from services.ui_delivery import UIStartupGZipMiddleware
 
 # Uvicorn's logging configuration replaces handlers but retains logger-level
 # filters. Install early, then idempotently confirm it again before startup.
 install_quiet_access_filter()
 
 api = FastAPI(title="MuseForge API", version="1.0.0")
+api.add_middleware(UIStartupGZipMiddleware)
 api.add_event_handler("startup", configure_http_runtime)
 
 # Upload size caps — enforced in upload handlers. Tuned for real-world
@@ -343,6 +345,7 @@ api.add_middleware(
 from services.job_lifecycle import (
     GENERATED_MEDIA_EXTENSIONS,
     collect_job_outputs,
+    configure_generation_probe_lock,
     finish_job,
     generation_slot,
     is_cancel_requested,
@@ -392,6 +395,7 @@ register_terminal_listener(_studio_job_archive.save)
 register_terminal_listener(lambda job, status: _generation_previews.clear(str(job.get("id") or "")))
 _studio_submission_lock = threading.RLock()
 _gen_lock = threading.Lock()
+configure_generation_probe_lock(_gen_lock)
 
 
 def _play_host_completion_sound() -> None:
@@ -416,12 +420,15 @@ def _on_generation_job_terminal(job: dict, status: str) -> None:
     is_editor = job.get("kind") == "editor_export"
     surface = "Editor" if is_editor else "Studio"
     if status == "completed":
+        finishing_warnings = job.get("finishing_warnings") or []
         _play_host_completion_sound()
         _web_push.dispatch(
             category="completion",
-            title=f"{surface} {'export' if is_editor else 'generation'} complete",
+            title=f"{surface} {'export' if is_editor else 'generation'} complete"
+                  + (" with warnings" if finishing_warnings else ""),
             body=(
-                "Your Maestro edit is ready."
+                "\n".join(finishing_warnings) if finishing_warnings
+                else "Your Maestro edit is ready."
                 if is_editor
                 else "Your Maestro generation is ready."
             ),
@@ -2513,6 +2520,7 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         not architecture.startswith("minimax_h3")
         or (model_def or {}).get("minimax_h3_fused_turbo", False)
         or (model_def or {}).get("minimax_h3_baked_turbo", False)
+        or (model_def or {}).get("minimax_h3_fasth3", False)
         or (model_def or {}).get("audio_only", False)
         or (model_def or {}).get("vdn", False)
     ):
@@ -6924,6 +6932,8 @@ def get_model_options(model_type: str):
             "minimax_h3_fused_turbo", False
         ),
         "minimax_h3_baked_turbo": md.get("minimax_h3_baked_turbo", False),
+        "minimax_h3_fasth3": md.get("minimax_h3_fasth3", False),
+        "minimax_h3_fasth3_omniref": md.get("minimax_h3_fasth3_omniref", False),
         "minimax_h3_full_checkpoint": md.get("minimax_h3_full_checkpoint", False),
         "loras_disabled": md.get("loras_disabled", False),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
@@ -7584,7 +7594,7 @@ async def apply_system_detect():
         flag noting this so the UI can show the user.
     """
     from services.hardware_detect import detect_hardware
-    from services.perf_recommend import apply_auto_performance, applied_keys
+    from services.perf_recommend import apply_auto_performance
     from services.memory_settings import MODEL_LOAD_KEYS
     from shared.cuda_memory import allocator_status
 
@@ -7623,7 +7633,7 @@ async def apply_system_detect():
         return {
             "status": "ok",
             "hardware": hw,
-            "applied": {k: rec[k] for k in applied_keys() if k in rec},
+            "applied": result["applied"],
             "label": rec.get("_recommendation_label", ""),
             "reason": rec.get("_recommendation_reason", ""),
             # Tells UI to show "changes take effect on next model load" toast
@@ -11755,10 +11765,38 @@ def _interactive_enhancement_slot(function):
         try:
             await request.json()  # Cache request body before moving off the API loop.
             def run():
-                with enhancement_context(_enhancement_settings_snapshot(), lambda: False):
-                    if wgp.wan_model is not None or wgp.offloadobj is not None:
-                        wgp.release_model()
-                    return asyncio.run(function(request))
+                from services.enhancement_diagnostics import DraftHistoryArchive, record_rejection
+                history_id = uuid.uuid4().hex
+                archive = DraftHistoryArchive(Path(_app_dir) / "settings" / "llm_drafts")
+                history = {"id": history_id, "created_at": time.time(), "state": "running", "drafts": []}
+                def save_drafts(drafts):
+                    history["drafts"] = drafts
+                    archive.save(history_id, history)
+                try:
+                    with enhancement_context(_enhancement_settings_snapshot(), lambda: False,
+                                             on_drafts=save_drafts):
+                        if wgp.wan_model is not None or wgp.offloadobj is not None:
+                            wgp.release_model()
+                        try:
+                            result = asyncio.run(function(request))
+                        except Exception as error:
+                            record_rejection([str(getattr(error, "detail", None) or error)], stage="Interactive enhancement")
+                            raise
+                    history["state"] = "complete"
+                    if isinstance(result, dict):
+                        result["draft_history_id"] = history_id
+                    return result
+                except Exception as error:
+                    history.update(state="failed", error=str(getattr(error, "detail", None) or error))
+                    raise HTTPException(
+                        getattr(error, "status_code", 500), detail=history["error"],
+                        headers={"X-Maestro-Draft-History": history_id},
+                    ) from error
+                finally:
+                    try:
+                        archive.save(history_id, history)
+                    except OSError as save_error:
+                        print(f"[LLM diagnostics] Could not save interactive writer history: {save_error}")
             worker = asyncio.create_task(asyncio.to_thread(run))
             try:
                 return await asyncio.shield(worker)
@@ -11772,6 +11810,18 @@ def _interactive_enhancement_slot(function):
         finally:
             _gen_lock.release()
     return wrapped
+
+
+@api.get("/api/v1/llm/drafts/{history_id}")
+def get_interactive_writer_drafts(history_id: str):
+    from services.enhancement_diagnostics import DraftHistoryArchive
+    try:
+        record = DraftHistoryArchive(Path(_app_dir) / "settings" / "llm_drafts").load(history_id)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    if record is None:
+        raise HTTPException(404, "Writer history not found")
+    return record
 
 
 @api.post("/api/v1/llm/plan-h3-windows")
@@ -11930,6 +11980,8 @@ async def llm_plan_h3_sequence(request: Request):
             require_visual=False,
             allow_empty=True,
         )
+        from services.h3_reference_audio import measure_video_audio_metadata
+        references = await asyncio.to_thread(measure_video_audio_metadata, references)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     sequence_inputs = {
@@ -13283,6 +13335,16 @@ def director_pipeline_status(pid: str):
     return p
 
 
+@api.get("/api/v1/director/pipeline/{pid}/llm-drafts")
+def director_pipeline_drafts(pid: str):
+    """Load full writer evidence only when requested, not on each status poll."""
+    from services.director_pipeline import get_pipeline_drafts
+    drafts = get_pipeline_drafts(pid, wgp.server_config.get("save_path", "outputs"))
+    if drafts is None:
+        raise HTTPException(404, "Pipeline not found")
+    return {"drafts": drafts}
+
+
 @api.post("/api/v1/director/pipeline/{pid}/continue")
 async def director_pipeline_continue(pid: str, request: Request):
     """Resume a paused pipeline, optionally with updated clip plans."""
@@ -14148,6 +14210,15 @@ async def _prepare_generation_submission(
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    if _generation_model_def.get("minimax_h3_fasth3"):
+        if _generation_model_def.get("minimax_h3_fasth3_omniref"):
+            from models.minimax_h3.fasth3_omniref import validate_request as validate_fasth3_request
+        else:
+            from models.minimax_h3.fasth3 import validate_fasth3_request
+        try:
+            validate_fasth3_request(body)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     # Apply atomic checkpoint recipes before preparation captures the request
     # for enhancement, queue retries and restorable output metadata.
     if not is_sfx:
@@ -14216,6 +14287,16 @@ async def _prepare_generation_submission(
                 body["minimax_h3_references"] = validate_reference_manifest(
                     body.get("minimax_h3_references"),
                     require_files=True,
+                )
+            from services.h3_reference_audio import measure_video_audio_metadata
+            if per_clip_references is not None:
+                body["per_clip_minimax_h3_references"] = [
+                    await asyncio.to_thread(measure_video_audio_metadata, manifest)
+                    for manifest in body["per_clip_minimax_h3_references"]
+                ]
+            else:
+                body["minimax_h3_references"] = await asyncio.to_thread(
+                    measure_video_audio_metadata, body["minimax_h3_references"]
                 )
             detail = str(body.get("minimax_h3_reference_detail") or "match").strip().lower()
             if detail not in {"match", "max"}:
@@ -14829,10 +14910,15 @@ async def _prepare_generation_submission(
             )
 
             runtime_references, drive_audio_path, drive_audio_ordinal = (
-                split_exact_drive_audio_reference(
-                    body.get("minimax_h3_references") or []
+                await asyncio.to_thread(
+                    split_exact_drive_audio_reference,
+                    body.get("minimax_h3_references") or [],
                 )
             )
+            # Typed video audio roles may add voice/style/effect references
+            # even when no exact target soundtrack is selected. Keep these
+            # runtime rows separate from the original saved UI manifest.
+            body["minimax_h3_runtime_references"] = runtime_references
             if drive_audio_path:
                 # ``drive`` is not a creative Ref2VA audio reference. Route it
                 # through the same frozen target-audio path as Director while
@@ -28737,7 +28823,12 @@ def _prepare_job_enhancement(job: dict) -> None:
         # Diffusion may be cached from the previous queue entry.
         if wgp.wan_model is not None or wgp.offloadobj is not None:
             wgp.release_model()
-        with enhancement_context(record["settings"], lambda: is_cancel_requested(job)):
+        def save_drafts(drafts):
+            record["drafts"] = drafts
+            _studio_job_archive.save(job)
+
+        with enhancement_context(record["settings"], lambda: is_cancel_requested(job),
+                                 drafts=record.get("drafts"), on_drafts=save_drafts):
             prepared = asyncio.run(prepare_enhanced_job(
                 record["original_params"], wgp.get_model_def(job["params"]["model_type"]) or {},
                 _llm_enhance_prompt_payload, _prepare_generation_submission,
@@ -28827,6 +28918,18 @@ def _apply_deferred_generation_preparation(job: dict) -> None:
                 "[Queue] Automatic sequence planner unload skipped: "
                 f"{unload_error}"
             )
+
+
+def _normalize_viggle_job_source(job: dict) -> None:
+    """Check original video bounds before spending GPU time on its character."""
+    if not (wgp.get_model_def(job["params"].get("model_type")) or {}).get("minimax_h3_viggle"):
+        return
+    from services.viggle_media import normalize_control_selection
+    job["params"].update(normalize_control_selection(
+        job["params"],
+        resolve_media=lambda path: _resolve_tool_clip_path(path, job.get("workspace")),
+        aborted=lambda: is_cancel_requested(job),
+    ))
 
 
 def _prepare_viggle_character_frame(job: dict) -> bool:
@@ -28947,6 +29050,10 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 if is_cancel_requested(job):
                     return False
                 _apply_deferred_generation_preparation(job)
+                _normalize_viggle_job_source(job)
+            except InterruptedError as error:
+                finish_job(job, "cancelled", message=str(error))
+                return False
             except Exception as error:
                 detail = getattr(error, "detail", None) or str(error)
                 finish_job(job, "failed", error=str(detail), message=str(detail))
@@ -29472,6 +29579,15 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         clip_params["minimax_h3_references"] = (
                             per_clip_h3_references[i]
                         )
+                        from models.minimax_h3.reference_manifest import split_exact_drive_audio_reference
+                        clip_runtime_refs, clip_drive_audio, clip_drive_ordinal = split_exact_drive_audio_reference(
+                            per_clip_h3_references[i]
+                        )
+                        clip_params["minimax_h3_runtime_references"] = clip_runtime_refs
+                        if clip_drive_audio:
+                            clip_params["audio_prompt_type"] = "AD"
+                            clip_params["audio_guide"] = clip_drive_audio
+                            clip_params["minimax_h3_exact_drive_audio_ordinal"] = clip_drive_ordinal
                     # Set per-clip image_prompt_type based on which images are present
                     has_start = bool(clip_params.get("image_start"))
                     has_end = bool(clip_end)
@@ -31374,7 +31490,6 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 # Run temporal and DLSS processing over the assembled clip so
                 # audio timing and native temporal history span H3 windows.
                 if success and (pp_media_spatial or pp_media_temporal):
-                    from services.media_flow import process_video
                     wgp.release_model()
                     for fname in new_files:
                         if os.path.splitext(fname)[1].lower() not in {".mp4", ".webm", ".mkv"}:
@@ -31385,22 +31500,73 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         def media_progress(phase, step=None, total=None):
                             update_job(job, phase=phase, message=phase, step=int(step or 0),
                                        total_steps=int(total or 0))
+                        before_processing = {}
+                        finishing_started = time.monotonic()
                         try:
+                            from services.media_flow import process_generation_video
                             from services.media_info import probe_media, processing_record
                             before_processing = probe_media(video_path)
-                            finishing_started = time.monotonic()
-                            process_video(video_path, temporary, spatial=pp_media_spatial,
+                            process_generation_video(video_path, temporary, spatial=pp_media_spatial,
                                 temporal=pp_media_temporal, options=pp_media_options,
                                 abort=lambda: is_cancel_requested(job), progress=media_progress)
-                            os.replace(temporary, video_path)
+                        except Exception as media_error:
+                            if is_cancel_requested(job):
+                                raise
+                            detail = str(media_error).strip() or type(media_error).__name__
+                            warning = (
+                                f"Media Flow failed for {fname}; the generated original was kept. "
+                                f"{detail}"
+                            )
+                            if (str(pp_media_spatial).startswith("dlss5*")
+                                    or str(pp_media_temporal).startswith("dlssg*")):
+                                warning += (
+                                    " Check docs/DLSS5.md and app/dlss5/host/ReShade.log, "
+                                    "then use Refresh DLSS availability while Maestro is idle."
+                                )
+                            print(f"  [Media Flow] Warning: {warning}")
+                            traceback.print_exc()
+                            finishing_warnings = list(job.get("finishing_warnings") or [])
+                            finishing_warnings.append(warning)
+                            if not update_job(job, finishing_warnings=finishing_warnings):
+                                if is_cancel_requested(job):
+                                    raise
+                            try:
+                                warning_record = processing_record(
+                                    spatial=pp_media_spatial, temporal=pp_media_temporal,
+                                    before=before_processing, after=before_processing,
+                                    options=pp_media_options)
+                            except Exception:
+                                warning_record = {
+                                    "method": pp_media_spatial or pp_media_temporal,
+                                }
+                            warning_record.update(status="warning", warnings=[warning])
+                            processing_by_output[fname] = warning_record
+                            continue
+                        try:
                             processing_by_output[fname] = processing_record(
                                 spatial=pp_media_spatial, temporal=pp_media_temporal,
                                 before=before_processing, after=probe_media(video_path),
                                 elapsed=time.monotonic() - finishing_started,
                                 completed_at=time.time(), options=pp_media_options)
-                        finally:
-                            if os.path.isfile(temporary):
-                                os.remove(temporary)
+                        except Exception as metadata_error:
+                            if is_cancel_requested(job):
+                                raise
+                            warning = (
+                                f"Media Flow completed for {fname}, but its processing details could not be recorded: "
+                                f"{str(metadata_error).strip() or type(metadata_error).__name__}"
+                            )
+                            print(f"  [Media Flow] Warning: {warning}")
+                            traceback.print_exc()
+                            finishing_warnings = list(job.get("finishing_warnings") or [])
+                            finishing_warnings.append(warning)
+                            if not update_job(job, finishing_warnings=finishing_warnings):
+                                if is_cancel_requested(job):
+                                    raise
+                            processing_by_output[fname] = {
+                                "method": pp_media_spatial or pp_media_temporal,
+                                "status": "warning",
+                                "warnings": [warning],
+                            }
 
                 # Post-generation FlashVSR pass — whole-file upscale on the
                 # assembled video (see the pop near the top of this function
@@ -31427,10 +31593,13 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             before_processing = probe_media(video_path)
                             finishing_started = time.monotonic()
                             _apply_spatial_upsampling_to_file(video_path, pp_spatial_upsampling, job=job)
+                            prior_warnings = processing_by_output.get(fname, {}).get("warnings", [])
                             processing_by_output[fname] = processing_record(
                                 spatial=pp_spatial_upsampling, before=before_processing,
                                 after=probe_media(video_path), elapsed=time.monotonic() - finishing_started,
                                 completed_at=time.time())
+                            if prior_warnings:
+                                processing_by_output[fname]["warnings"] = list(prior_warnings)
                             print(f"  [Upscale] Done: {fname}")
                         except Exception as up_err:
                             print(f"  [Upscale] Warning: failed on {fname} (keeping original): {up_err}")
@@ -32499,6 +32668,7 @@ def get_status(job_id: str):
         "phase": j.get("phase", ""),
         "message": j["message"],
         "output_files": j["output_files"],
+        "finishing_warnings": j.get("finishing_warnings", []),
         "reconstruction_report": j.get("reconstruction_report"),
         "error": j["error"],
         "viggle_preparation": j.get("viggle_preparation"),
@@ -32536,7 +32706,7 @@ def get_job_enhancement(job_id: str):
     if not job or not job.get("enhancement"):
         raise HTTPException(404, "Enhanced job not found")
     record = job["enhancement"]
-    return {"enhancement": public_enhancement(record),
+    return {"enhancement": public_enhancement(record, include_drafts=True),
             "original_params": record["original_params"],
             "prepared": record.get("prepared")}
 
@@ -32729,7 +32899,7 @@ def list_jobs():
         j = snapshot_job(job)
         if j.get("dismissed"):
             continue
-        if j["status"] in ("held", "queued", "running") or j.get("enhancement"):
+        if j["status"] in ("held", "queued", "running") or j.get("enhancement") or j.get("finishing_warnings"):
             active.append({
                 "job_id": j["id"],
                 "client_submission_id": j.get("client_submission_id"),
@@ -32742,6 +32912,7 @@ def list_jobs():
                 "phase": j.get("phase", ""),
                 "message": j["message"],
                 "output_files": j["output_files"],
+                "finishing_warnings": j.get("finishing_warnings", []),
                 "error": j["error"],
                 "enhancement": public_enhancement(j.get("enhancement"), summary=True),
                 "oom_info": j.get("oom_info"),
@@ -32909,6 +33080,25 @@ def _resolve_gallery_media_file(filename: str, workspace: str = "") -> str:
     if filepath and os.path.isfile(filepath):
         return filepath
     raise HTTPException(status_code=404, detail="File not found")
+
+
+@api.post("/api/v1/viggle/source-info")
+def serve_viggle_source_info(body: dict):
+    """Return the same video bounds used to validate Animate jobs, without GPU work."""
+    from services.viggle_media import probe_control_video
+    raw_path = body.get("video_path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise HTTPException(status_code=400, detail="Choose an Animate control video.")
+    workspace = body.get("workspace")
+    if workspace is not None and not isinstance(workspace, str):
+        raise HTTPException(status_code=400, detail="Choose a valid workspace.")
+    source = _resolve_tool_clip_path(raw_path, workspace)
+    if not source:
+        raise HTTPException(status_code=400, detail="The Animate control video is missing. Load it again.")
+    try:
+        return probe_control_video(source)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @api.get("/api/v1/media-info/{filename:path}")

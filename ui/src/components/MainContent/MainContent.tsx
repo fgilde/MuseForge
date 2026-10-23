@@ -602,6 +602,9 @@ export function MainContent() {
   const outputsTotal = useStore(s => s.outputsTotal)
   const rootOutputsLoaded = loadedCount
   const hasMoreOutputs = useStore(s => s.outputs.length < s.outputsTotal)
+  const outputsLoading = useStore(s => s.outputsLoading)
+  const galleryInitializing = useStore(s => s.galleryInitializing)
+  const galleryLoading = outputsLoading || galleryInitializing
   const jobs = useStore(s => s.jobs)
   const pipelineId = useStore(s => s.pipelineId)
   const pipelineStatus = useStore(s => s.pipelineStatus)
@@ -788,6 +791,13 @@ export function MainContent() {
               {loadedCount} item{loadedCount === 1 ? '' : 's'} in this workspace —
               switch the type filter back to All, or clear the search.
             </p>
+          </div>
+        ) : galleryLoading && outputs.length === 0 && jobs.length === 0 ? (
+          <div role="status" className="flex flex-1 items-center justify-center">
+            <div className="flex flex-col items-center gap-3 text-text-muted">
+              <Loader2 size={24} className="animate-spin text-accent-blue" />
+              <p className="text-sm">{galleryInitializing ? 'Loading workspace...' : 'Indexing workspace...'}</p>
+            </div>
           </div>
         ) : outputs.length === 0 && jobs.length === 0 ? (() => {
           const noun = generationMode === 'image' ? 'images'

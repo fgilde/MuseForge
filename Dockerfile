@@ -8,6 +8,9 @@ WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci
 COPY ui/ ./
+# The UI imports the shared H3 performance policy from the backend tree
+# (src/lib/h3PerformanceAdvice.ts), at the same relative path as in the repo.
+COPY app/shared/h3_performance_policy.json /app/shared/h3_performance_policy.json
 RUN npm run build
 
 # ============================================================================

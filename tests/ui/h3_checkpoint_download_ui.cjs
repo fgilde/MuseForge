@@ -115,7 +115,8 @@ async function testH3ChoicesAreSubmittedAndHttp400IsVisible() {
   const requests = [];
   const inspectionRequests = [];
   const errorText = 'Select the creator-listed H3 workflow and sampling recipe.';
-  const api = loadTypeScript('ui/src/api/client.ts', () => {
+  const api = loadTypeScript('ui/src/api/client.ts', name => {
+    if (name === './readRequest') return loadTypeScript('ui/src/api/readRequest.ts', () => ({}));
     throw new Error('client.ts unexpectedly imported a runtime module');
   }, {
     fetch: async (url, init = {}) => {

@@ -179,7 +179,8 @@ async function renderUntilSettled(hooks, render) {
   assert.fail('UI did not settle');
 }
 
-const api = loadTypeScript('ui/src/api/client.ts', () => {
+const api = loadTypeScript('ui/src/api/client.ts', name => {
+  if (name === './readRequest') return loadTypeScript('ui/src/api/readRequest.ts', () => ({}));
   throw new Error('client.ts unexpectedly imported a runtime module');
 }, {fetch: (url, init) => fetchHandler(url, init)});
 

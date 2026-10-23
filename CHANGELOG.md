@@ -3,6 +3,111 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [3.2.0] - 2026-10-22
+
+Public Main and Dev release, including the 20–22 October Dev preview fixes. See the
+[v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
+
+Dev follow-up fixes, 22 October:
+
+- Prioritize Studio/Director model controls during UI startup, defer gallery
+  scans and writer discovery, and load hidden panels on first use. Recover
+  failed startup reads automatically with a visible Retry control, including
+  mobile reconnects after a server restart. Compress large model-control JSON
+  and hashed UI assets without changing media or event-stream delivery.
+- Keep mobile mode, workflow and reference controls visible when browser chrome
+  or a restored tab changes the viewport height. Compact the sidecar only for
+  a focused text field with an actual keyboard-height reduction; restore its
+  controls on blur and browser return without requiring a refresh.
+- Show workspace loading throughout initial gallery startup, including saved
+  folder restoration, so model controls no longer hand off to a blank gallery
+  or premature empty-state message before the media request starts.
+- Fix H3 enhancement falsely treating motion-video retention entries as new
+  characters. Save writer drafts and specific rejection reasons locally for
+  Studio and Director, including failed/interrupted requests. Review them in
+  Studio's prompt history or the Director Dashboard.
+- Preserve accepted multi-window prompts during focused repairs and retain
+  usable camera cards when a repair call fails. Keep incomplete schedules
+  reviewable without replacing them with one repeated original paragraph.
+- Give video soundtracks explicit audio roles in Studio and Director: preserve
+  soundtrack, voice, music/sound style, sound effect, ignore, or the previous
+  generative audio-reference behavior. Existing saved checkbox settings retain
+  their meaning. See [H3 reference audio and draft recovery](docs/H3-Reference-Audio-and-Drafts.md).
+- Restore all fifteen optimized MiniMax-Music3 downloads from a surviving
+  Hugging Face snapshot, repair three local-writer vision projector downloads
+  while reusing existing cached filenames, and correct the hidden Z-Image
+  eight-step ControlNet BF16 export and YuE2 model-weight license link.
+- Carry each Director shot's visual style into the complete H3 frame, including
+  subjects and backgrounds. Preserve it through saved projects, resume, native
+  timeline splits and individual clip reruns, while keeping edited prompts
+  authoritative.
+- Stop treating the noun in choreography descriptions such as "dancing with
+  spins" as a mandatory story action, or the requester in "I want" as its actor.
+  Keep genuine first-person actions and the original creative brief intact.
+- Clarify music-video planning instructions for rendering style, visible
+  performance across a clip, and matching loop composition and camera position.
+  Preserve explicitly requested stillness and timed holds.
+
+Dev follow-up fixes, 21 October:
+
+- Use checked video-track bounds for Viggle Animate's timeline, source frame and
+  submitted trim so a longer soundtrack cannot trigger a false out-of-range
+  error. Recheck restored settings, clear bounds across source/workflow changes,
+  and validate ranges before character preparation. Reconcile measured full-file
+  audio tails while retaining rejection of genuinely invalid selections.
+- Repair H3 VDN Full and Pruned module/default-LoRA downloads and the bundled
+  eight-step Turbo preset after the old Hugging Face revision stopped serving
+  them. Redirect the four known obsolete URLs retained in saved presets and
+  reuse existing local files.
+- Incorporate PR #189's conditional clone before Face Refiner overlap blending,
+  fixing inference-tensor writes on clips longer than one refinement window (#188).
+- Preserve saved Studio generations when optional Media Flow finishing fails,
+  retaining a visible warning in queue history, completion notices and output
+  processing metadata. Standalone processing jobs still report their own failures.
+  Gate Windows 11 DLSS Neural Rendering on a bounded cached native evaluation,
+  rather than installed files alone; refresh retries the probe while idle (#190).
+- Add Windows 11 DLSS internal edge padding for the output-size alignment
+  pattern reported in #190, padding frames and motion/depth guides together
+  and cropping back to the requested even-rounded dimensions. Check padded
+  native limits before worker startup and make the small availability probe
+  exercise an unaligned 1.5x request. Native RTX 5090 confirmation is pending;
+  the pinned binaries and separate Windows 10 backend are unchanged.
+- Tile WGPKernels row preparation within its native row limit and temporary
+  memory budget. Preserve valid manual INT8 backend choices when reapplying
+  Auto-tune and return the settings actually applied to the UI (#191).
+- Verify the existing Qwen 2.1 processor repair against all ten public replacement
+  assets, with fresh-install and cached-download regressions (#192).
+- Normalize unambiguous external-LLM music-arc JSON containers against Director's
+  fixed timeline, with bounded corrective retries. Keep exact group coverage,
+  unique indices and source-action assignments enforced (#193).
+- Keep the complete music-outline response format in the prompt when an LLM
+  endpoint cannot enforce structured output. Accept unambiguous row-local `beat`
+  and `prompt` aliases for `visual_beat`, while rejecting conflicting values,
+  incomplete rows and invalid timeline or source-action assignments.
+
+- Add experimental FastH3 V2 eight-step text-to-video with generated audio,
+  its trained VSA-H3 attention and fixed DMD sampling recipe. Keep it separate
+  from ordinary H3 accelerators, LoRAs and reference workflows.
+- Add experimental FastH3 OmniRef eight-step generation with ordered image,
+  video and audio references, native 32-head PDD sampling and trained VSA-H3
+  attention. Require at least one image or video reference and reject unsupported
+  continuation, Director and extra-LoRA routes instead of using an incompatible recipe.
+- Use official, pinned Omni Comfy BF16, INT8 ConvRot and FP8 exports. Reuse the
+  byte-identical earlier INT8 download. Offer the QAD-trained NVFP4 export as a
+  separate experimental model for supported Blackwell GPUs with a native kernel;
+  preserve fused quantized QKV and retained FP32 heads/AdaLN precision.
+- Repair Qwen Image 2.1 processor downloads after upstream asset moves, using
+  a verified replacement source and canonical filenames for generation and
+  prompt enhancement while reusing existing local processor files.
+- Reduce Qwen 2.1 final VAE decode memory by omitting unused temporal caches,
+  and address thin tile-boundary lines with full-sized edge tiles, at least
+  512px context in lower-memory modes, overlapping interiors and FP32 CPU blending
+  before one final pixel conversion. Denoising and final decode remain separate
+  memory stages; decoder checks do not establish that every full render fits 8GB.
+- Document source contracts, hardware requirements and validation limits. FastVideo's
+  public near-real-time OmniRef measurements used eight GB200 GPUs; Maestro does
+  not yet include its full FP4-attention/NVFP4-decoder acceleration stack.
+
 ## [3.1.0] - 2026-10-19
 
 Public Main and Dev release. See the

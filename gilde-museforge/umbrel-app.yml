@@ -2,7 +2,7 @@ manifestVersion: 1.1
 id: gilde-museforge
 category: ai
 name: MuseForge
-version: "3.1.0"
+version: "3.2.0"
 tagline: Self-hosted AI studio for video, images, audio and audiobooks
 description: >-
   MuseForge generates video, images, audio, long-form text and complete
@@ -34,14 +34,15 @@ description: >-
     downloads its files once, often tens of gigabytes for a video model,
     before anything appears. Later runs start immediately.
 releaseNotes: >-
-  Level with Maestro 3.1.0. New models: MOSS Image 5B and native FLUX 3
-  Klein with LoRA import, plus community MiniMax H3 checkpoint imports and
-  Krea 2 Turbo.
+  Level with Maestro 3.2.0. New experimental FastH3 models: V2 8-step text
+  to video with generated audio, and OmniRef 8-step for image, video and
+  audio references. Qwen Image 2.1 downloads and VAE decoding are fixed,
+  the app starts faster, and Director keeps visual styles and choreography.
 
 
-  Lower memory use and faster H3 on 12 GB GPUs (native 1080p), an optional
-  2x VAE video decoder, live previews while a generation runs, a full-screen
-  gallery viewer with image comparison, and cancellable model downloads.
+  Since 3.1.0: MOSS Image 5B, native FLUX 3 Klein with LoRA import, lower
+  memory H3 with native 1080p on 12 GB, live previews, a full-screen gallery
+  viewer and cancellable model downloads.
 
 
 developer: Florian Gilde

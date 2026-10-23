@@ -169,6 +169,8 @@ export interface GenerateParams {
   _duration_planning_mode?: 'duration' | 'windows' | 'auto'
   _viggle_edited_frame?: string
   _viggle_source_seconds?: number
+  /** Ephemeral server-verified video bounds, tied to the current source. */
+  _viggle_source_info?: { source: string; workspace: string; duration_seconds: number }
   _viggle_frame_seconds?: number
   /** Absolute source-video trim bounds; end is exclusive. */
   _viggle_trim_start?: number
@@ -295,6 +297,7 @@ export interface LTXWindowPlan {
 
 export type MiniMaxH3ReferenceType = 'image' | 'video' | 'audio'
 export type MiniMaxH3AudioIntent = 'voice' | 'drive' | 'style' | 'sound'
+export type MiniMaxH3VideoAudioRole = 'ignore' | 'legacy' | MiniMaxH3AudioIntent
 
 export interface MiniMaxH3Reference {
   id: string
@@ -308,6 +311,7 @@ export interface MiniMaxH3Reference {
   remove_background?: boolean
   video_intent?: 'character' | 'motion' | 'scene'
   follow_timeline?: boolean
+  video_audio_role?: MiniMaxH3VideoAudioRole
   library_character_id?: string
   character_name?: string
   refmod_path?: string
@@ -442,6 +446,7 @@ export interface H3WindowPlanWindow {
 }
 
 export interface H3WindowPlan {
+  draft_history_id?: string
   source_prompt: string
   signature: string
   planned_by: 'llm' | 'hybrid_repair' | 'deterministic_fallback' | 'not_needed' | 'manual'
@@ -498,6 +503,8 @@ export interface PromptEnhancementRecord {
   enhanced_prompt?: string | null
   warnings?: string[]
   error?: string | null
+  draft_history_id?: string
+  drafts?: import('../components/WriterDraftHistory').WriterDraft[]
 }
 
 export type GenerationPreviewMode = 'off' | 'rgb' | 'tiny_vae_frames' | 'tiny_vae_video'
@@ -532,6 +539,8 @@ export interface GenerationJob {
   phase: string
   message: string
   outputFiles: string[]
+  /** Non-fatal finishing failures; the original output remains available. */
+  finishingWarnings?: string[]
   error: string | null
   /** Small, job-scoped in-progress preview. Absent on older backends. */
   preview?: GenerationPreview | null
@@ -1003,6 +1012,8 @@ export interface ModelOptions {
     protect_audio: boolean
   } | null
   minimax_h3_fused_turbo?: boolean
+  minimax_h3_fasth3?: boolean
+  minimax_h3_fasth3_omniref?: boolean
   minimax_h3_full_checkpoint?: boolean
   minimax_h3_baked_turbo?: boolean
   loras_disabled?: boolean

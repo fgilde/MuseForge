@@ -27,7 +27,7 @@
 > [Wan2GP](https://github.com/deepbeepmeep/Wan2GP) generation pipeline. Full credits
 > [below](#credits) — this README covers what MuseForge does differently.
 > The `VERSION` file tracks the upstream release the engine is level with
-> (currently **Maestro 3.1.0**), so you can tell at a glance how current it is.
+> (currently **Maestro 3.2.0**), so you can tell at a glance how current it is.
 
 Deploy it anywhere with one `docker compose up`, then use it from the browser or
 let an agent drive it over MCP. 205 generation models, an LLM-planned Director
